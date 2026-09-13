@@ -599,8 +599,23 @@ async fn run_inner(
 						break;
 					}
 					member_diagnostics.record("subscription sent: first 100 positions");
-					active_members = Some(ActiveMembers::new(subscription));
-					members_deadline = Some(Instant::now() + Duration::from_secs(15));
+					if let Some(active) = &mut active_members {
+						// Channels with the same list identity share the existing SYNC.
+						// Keep its rows: another subscription may only receive deltas.
+						active.subscription = subscription;
+						active.clear_presence();
+						let freshness = if active.synced {
+							Freshness::Fresh
+						} else if members_deadline.is_some() {
+							Freshness::Loading
+						} else {
+							Freshness::Unavailable
+						};
+						emit(Event::Members(active.snapshot(freshness)))?;
+					} else {
+						active_members = Some(ActiveMembers::new(subscription));
+						members_deadline = Some(Instant::now() + Duration::from_secs(15));
+					}
 				}
 				if active_members.is_none() {
 					member_diagnostics.record(
@@ -662,9 +677,17 @@ async fn run_inner(
 				}
 				changed=subscriptions.changed(), if subscriptions_open && ready_at.is_some() => {
 					subscriptions_open=changed.is_ok();
-					if let Some(old)=active_members.take() && !matches!(timeout(Duration::from_secs(5),socket.send(subscription_packet(old.subscription.guild,None))).await,Ok(Ok(()))) {break;}
+					let same_list = subscriptions_open && (members_deadline.is_some() || active_members.as_ref().is_some_and(|active| active.synced)) && active_members.as_ref().is_some_and(|active| {
+						subscriptions.borrow().as_ref().is_some_and(|next| {
+							next.guild == active.subscription.guild && next.list_id == active.subscription.list_id
+						})
+					});
+					if !same_list {
+						if let Some(old)=active_members.take() && !matches!(timeout(Duration::from_secs(5),socket.send(subscription_packet(old.subscription.guild,None))).await,Ok(Ok(()))) {break;}
+						members_deadline=None;
+					}
 					member_diagnostics.record("subscription replaced or canceled");
-					members_deadline=None;sent_members = !subscriptions_open;
+					sent_members = !subscriptions_open;
 				}
 				_=tokio::time::sleep_until(members_deadline.unwrap_or(ready_deadline)), if members_deadline.is_some() => {
 					member_diagnostics.record("timeout: no populated member SYNC within 15 seconds");
@@ -800,7 +823,7 @@ async fn run_inner(
 												Ok(_) => member_diagnostics.record("reply: incremental operations only; no SYNC"),
 											}
 											match decoded.map_err(|_|Failure::Protocol).and_then(|update|active.update(update)) {
-												Ok(true)=>{member_diagnostics.record(if active.synced {"snapshot synchronized"} else {"snapshot still awaiting populated SYNC"});let freshness=if active.synced {Freshness::Fresh}else{Freshness::Stale};emit(Event::Members(active.snapshot(freshness)))?;if active.synced {members_deadline=None;}else{members_deadline=Some(Instant::now()+Duration::from_secs(15));}},
+												Ok(true)=>{member_diagnostics.record(if active.synced {"snapshot synchronized"} else {"snapshot still awaiting populated SYNC"});let freshness=if active.synced {Freshness::Fresh}else{Freshness::Stale};emit(Event::Members(active.snapshot(freshness)))?;if active.synced {members_deadline=None;}else{members_deadline.get_or_insert(Instant::now()+Duration::from_secs(15));}},
 												Ok(false)=>{},
 												Err(_)=>{member_diagnostics.record("snapshot unavailable: decode, range or capacity failure");active.clear_presence();active.rows.fill(None);active.synced=false;emit(Event::Members(active.snapshot(Freshness::Unavailable)))?;members_deadline=None;}
 											}
@@ -2175,6 +2198,7 @@ mod member_tests {
                 assert!(matches!(socket.next().await,Some(Ok(Frame::Text(_)))));
                 socket.send(Frame::Text(json!({"op":0,"t":"READY","s":1,"d":{"user":{"id":"1","username":"Owner"},"session_id":"synthetic-members","resume_gateway_url":"wss://gateway.discord.gg/","guilds":[],"private_channels":[]}}).to_string().into())).await.unwrap();
                 let mut subscribed=false;
+                let mut switched=false;
                 while let Some(Ok(Frame::Text(text)))=socket.next().await {
                     let packet:serde_json::Value=serde_json::from_str(&text).unwrap();
                     if packet["op"]==1 {socket.send(Frame::Text(json!({"op":11,"d":null}).to_string().into())).await.unwrap();continue;}
@@ -2193,16 +2217,27 @@ mod member_tests {
                             (5,json!({"guild_id":"1","user":{"id":"3"},"status":"idle","activities":[{"type":4,"state":"Synthetic live update"}]})),
                             (6,json!({"guild_id":"1","user":{"id":"3"}})),
                         ] {socket.send(Frame::Text(json!({"op":0,"t":"PRESENCE_UPDATE","s":sequence,"d":data}).to_string().into())).await.unwrap();}
+                    } else if !switched {
+                        assert_eq!(subscription["typing"],true);assert_eq!(subscription["channels"],json!({"4":[[0,99]]}));switched=true;
+                        // A shared list need not send another full SYNC on a channel switch.
                     } else {assert_eq!(subscription["typing"],false);assert_eq!(subscription["channels"],json!({}));break;}
                 }
                 socket.close(Some(CloseFrame{code:CloseCode::Library(4004),reason:"synthetic stop".into()})).await.unwrap();
             };
             let client=run_inner(Arc::new(SessionSecret::from_owner_input("synthetic-owner-session".into()).unwrap()),"wss://gateway.discord.gg/".into(),receive,mpsc::channel(1).1,None,|event| {
-                if let Event::Members(list)=&event { assert_eq!(list.request,7);assert_eq!(list.channel,Id(2));assert_eq!(list.rows[0].as_ref().unwrap().user.id,Id(3)); }
+                if let Event::Members(list)=&event {
+                    assert_eq!(list.rows[0].as_ref().unwrap().user.id,Id(3));
+                    assert_eq!(list.freshness,Freshness::Fresh);
+                    if list.request==8 {
+                        assert_eq!(list.channel,Id(4));
+                        assert_eq!(list.rows[0].as_ref().unwrap().status.as_deref(),Some("idle"));
+                        selection.send(None).unwrap();
+                    } else { assert_eq!(list.request,7);assert_eq!(list.channel,Id(2)); }
+                }
                 if let Event::MemberPresence {guild,channel,request,updates}=event {
                     assert_eq!((guild,channel,request),(Id(1),Id(2),7));
                     assert_eq!(updates,vec![record(3,Some("idle"),Some("Synthetic live update"))]);
-                    selection.send(None).unwrap();
+                    selection.send(Some(MemberSubscription {guild:Id(1),channel:Id(4),request:8,list_id:"everyone".into()})).unwrap();
                 }
                 Ok(())
             },Some(&endpoint));
