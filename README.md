@@ -213,12 +213,10 @@ For full details, review the [Storage Policy](docs/storage-policy.md) and [Threa
 - [Storage Policy & Cache Retention](docs/storage-policy.md)
 - [Platform Support & Build Requirements](docs/platform-support.md)
 - [Voice Architecture & Procedure](docs/voice.md)
-- [User Profiles & Customization](docs/profiles.md)
-- [Notifications & Sound Settings](docs/notifications.md)
-- [Performance & Benchmarks](docs/performance.md)
 - [Design Tokens & UI Styling](docs/design.md)
 - [Extensions & Plugin Architecture](docs/extensions.md)
 - [Theme API Specification](docs/theme-api.md)
+- [Threat Model & Security](docs/threat-model.md)
 - [Third-Party Licenses & Notices](THIRD_PARTY_NOTICES.md)
 
 ---

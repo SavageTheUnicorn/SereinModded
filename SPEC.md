@@ -148,10 +148,12 @@ native-discord/
 │   ├── discord-compatibility.md
 │   ├── authentication.md
 │   ├── storage-policy.md
-│   ├── performance.md
 │   ├── threat-model.md
-│   ├── platform-support.md
-│   └── dependency-versions.md
+│   ├── voice.md
+│   ├── design.md
+│   ├── extensions.md
+│   ├── theme-api.md
+│   └── platform-support.md
 └── .github/workflows/
 ```
 
