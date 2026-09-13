@@ -15,7 +15,9 @@ pub(super) fn ready_calls(ready: &Ready, calls: &mut Calls) -> Result<BTreeSet<I
 			.sum::<usize>()
 		> client_core::MAX_NAV
 	{
-		return Err(Failure::Capacity);
+		return Err(Failure::CapacityAt(
+			"Account navigation exceeds 4,000 entries; connection stopped",
+		));
 	}
 	calls.allowed.clear();
 	let guilds: BTreeSet<_> = ready

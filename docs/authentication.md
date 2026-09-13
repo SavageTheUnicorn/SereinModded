@@ -33,3 +33,17 @@ Record only date, OS/build, methods tested, pass/fail and redacted failure categ
 A separate `--features developer-session` build exposes an explicitly labeled, RAM-only owner-provided token field for adapter diagnosis. It is not the normal login, is disabled in release packaging, and never permits extraction from other software.
 
 Saved-login startup reports credential lookup separately from Discord connection. A found credential advances the status immediately; absent/invalid/unavailable outcomes remain visible. The UI stops awaiting lookup after 10 seconds and permits manual hosted login. Manual login, preview, logout and timeout discard late lookup results. The synchronous OS call remains on the existing single worker; no background retry workers or plaintext fallback are created.
+
+Gateway login keeps optional voice identity metadata within 4,096 entries / 1 MiB per cache.
+Extra referenced users or merged members are omitted from that cache; eligible voice participants
+retain their IDs and use the existing fallback when their name/avatar is unavailable. Previously,
+crossing either cache budget could stop login before READY, even with no voice participants.
+Offline WebSocket regressions cover 4,097 referenced users, UTF-8 names crossing the byte budget,
+and 4,097 combined supplemental members. This reproduces one cause of issue #143; the affected
+reporter's actual account payload has not been inspected or tested.
+
+Hard Gateway frame/compressed/decompressed payload, navigation, actual voice roster, and desktop
+synchronization queue limits remain enforced. Their capacity failures identify the limit using
+fixed local text and still terminate the connection. An oversized frame stops immediately during
+Hello or subsequent startup instead of being retried as a network failure. No payload contents,
+account identifiers or credentials are added to the error. Credential saving still requires READY.

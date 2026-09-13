@@ -23,7 +23,9 @@ impl Decoder {
 			return Ok(Some(frame));
 		};
 		if bytes.len() > MAX_WIRE.saturating_sub(self.pending.len()) {
-			return Err(Failure::Capacity);
+			return Err(Failure::CapacityAt(
+				"Compressed Gateway payload exceeds 4 MiB; connection stopped",
+			));
 		}
 		self.pending.extend_from_slice(&bytes);
 		if !self.pending.ends_with(&[0, 0, 255, 255]) {
@@ -45,7 +47,9 @@ impl Decoder {
 				return Err(Failure::Protocol);
 			}
 			if written > MAX_WIRE.saturating_sub(output.len()) {
-				return Err(Failure::Capacity);
+				return Err(Failure::CapacityAt(
+					"Decompressed Gateway payload exceeds 4 MiB; connection stopped",
+				));
 			}
 			output.extend_from_slice(&chunk[..written]);
 			consumed += read;
@@ -96,14 +100,18 @@ mod tests {
 		}
 		assert_eq!(
 			Decoder::default().frame(Frame::Binary(vec![0; MAX_WIRE + 1].into())),
-			Err(Failure::Capacity)
+			Err(Failure::CapacityAt(
+				"Compressed Gateway payload exceeds 4 MiB; connection stopped"
+			))
 		);
 		let mut bomb = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
 		bomb.write_all(&vec![b'x'; MAX_WIRE + 1]).unwrap();
 		bomb.flush().unwrap();
 		assert_eq!(
 			Decoder::default().frame(Frame::Binary(bomb.get_ref().clone().into())),
-			Err(Failure::Capacity)
+			Err(Failure::CapacityAt(
+				"Decompressed Gateway payload exceeds 4 MiB; connection stopped"
+			))
 		);
 	}
 }

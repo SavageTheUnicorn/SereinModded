@@ -31,6 +31,9 @@ pub enum Failure {
 	ProtocolAt(&'static str),
 	#[error("Safe session capacity exceeded; connection stopped")]
 	Capacity,
+	// Fixed local labels only; never include remote payloads or account identifiers.
+	#[error("{0}")]
+	CapacityAt(&'static str),
 	#[error("Only an owner-supplied normal-user session is supported")]
 	InvalidCredential,
 }
@@ -51,7 +54,7 @@ impl Failure {
 			Self::Network => "Connection failed",
 			Self::Ambiguous => "Outcome unknown · check the official client before retrying",
 			Self::Protocol => "Unsupported service response",
-			Self::ProtocolAt(stage) => stage,
+			Self::ProtocolAt(stage) | Self::CapacityAt(stage) => stage,
 			Self::Capacity => "Safe capacity exceeded · connection stopped",
 			Self::InvalidCredential => "Invalid session input or bot account rejected",
 		}
@@ -59,7 +62,11 @@ impl Failure {
 	pub fn ends_session(self) -> bool {
 		matches!(
 			self,
-			Self::Expired | Self::Challenged | Self::Capacity | Self::InvalidCredential
+			Self::Expired
+				| Self::Challenged
+				| Self::Capacity
+				| Self::CapacityAt(_)
+				| Self::InvalidCredential
 		)
 	}
 }
@@ -97,6 +104,9 @@ mod tests {
 	fn secret_is_redacted_and_header_injection_rejected() {
 		let contextual = Failure::Protocol.protocol_at("Synthetic stage");
 		assert_eq!(contextual.label(), "Synthetic stage");
+		let capacity = Failure::CapacityAt("Synthetic capacity limit");
+		assert_eq!(capacity.label(), "Synthetic capacity limit");
+		assert!(capacity.ends_session());
 		for failure in [
 			Failure::Expired,
 			Failure::Challenged,
@@ -104,6 +114,7 @@ mod tests {
 			Failure::RateLimited,
 			Failure::Network,
 			Failure::Capacity,
+			capacity,
 			contextual,
 		] {
 			assert_eq!(failure.protocol_at("Other stage"), failure);

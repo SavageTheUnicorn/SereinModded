@@ -46,7 +46,8 @@ pub(super) struct Calls {
 	pub(super) departure_deadline: Option<Instant>,
 	stream: Option<StreamAttempt>,
 	watch: Option<WatchAttempt>,
-	// Only retained between READY and READY_SUPPLEMENTAL, with the roster's item/byte budget.
+	// Optional metadata, retained until READY_SUPPLEMENTAL or reset within the roster budget.
+	// Overflow leaves participants using the existing user-ID fallback.
 	pub(super) users: BTreeMap<Id, User>,
 }
 impl Calls {
@@ -90,40 +91,44 @@ impl Calls {
 			})
 		})
 	}
-	pub(super) fn remember_users(&mut self, users: Vec<UserDto>) -> Result<(), Failure> {
-		if users.len() > voice::MAX_ROSTER {
-			return Err(Failure::Capacity);
+	pub(super) fn remember_users(&mut self, users: Vec<UserDto>) {
+		self.users.clear();
+		let mut bytes = 0;
+		for user in users {
+			if self.users.len() == voice::MAX_ROSTER {
+				break;
+			}
+			if user.id.0 == 0 || self.users.contains_key(&user.id) {
+				continue;
+			}
+			let user = user.into_model();
+			let added = size_of::<User>() + user.heap_bytes();
+			if bytes + added <= voice::MAX_ROSTER_BYTES {
+				bytes += added;
+				self.users.insert(user.id, user);
+			}
 		}
-		self.users = users
-			.into_iter()
-			.map(|u| {
-				let u = u.into_model();
-				(u.id, u)
-			})
-			.collect();
-		if self
-			.users
-			.values()
-			.map(|u| size_of::<User>() + u.heap_bytes())
-			.sum::<usize>()
-			> voice::MAX_ROSTER_BYTES
-		{
-			return Err(Failure::Capacity);
-		}
-		Ok(())
 	}
-	fn members(&self, members: Vec<VoiceMemberDto>) -> Result<BTreeMap<Id, Member>, Failure> {
-		if members.len() > voice::MAX_ROSTER {
-			return Err(Failure::Capacity);
+	fn members(&self, members: Vec<VoiceMemberDto>) -> BTreeMap<Id, Member> {
+		let mut retained = BTreeMap::new();
+		let mut bytes = 0;
+		for member in members {
+			if retained.len() == voice::MAX_ROSTER {
+				break;
+			}
+			let Some(member) = self.member(member) else {
+				continue;
+			};
+			if member.user.id.0 == 0 || retained.contains_key(&member.user.id) {
+				continue;
+			}
+			let added = member.bytes();
+			if bytes + added <= voice::MAX_ROSTER_BYTES {
+				bytes += added;
+				retained.insert(member.user.id, member);
+			}
 		}
-		let members: BTreeMap<_, _> = members
-			.into_iter()
-			.filter_map(|m| self.member(m).map(|m| (m.user.id, m)))
-			.collect();
-		if members.values().map(Member::bytes).sum::<usize>() > voice::MAX_ROSTER_BYTES {
-			return Err(Failure::Capacity);
-		}
-		Ok(members)
+		retained
 	}
 	fn member(&self, member: VoiceMemberDto) -> Option<Member> {
 		Some(Member {
@@ -139,10 +144,7 @@ impl Calls {
 		})
 	}
 	pub(super) fn snapshot(&self, guild: &mut GuildDto, partial: bool) -> Result<Event, Failure> {
-		if guild.voice_states.len() > voice::MAX_ROSTER {
-			return Err(Failure::Capacity);
-		}
-		let members = self.members(std::mem::take(&mut guild.members))?;
+		let members = self.members(std::mem::take(&mut guild.members));
 		let mut participants = Vec::new();
 		let mut bytes = 0;
 		for mut state in std::mem::take(&mut guild.voice_states) {
@@ -152,6 +154,11 @@ impl Calls {
 			};
 			if self.allowed.get(&channel) != Some(&Some(guild.id)) {
 				continue;
+			}
+			if participants.len() == voice::MAX_ROSTER {
+				return Err(Failure::CapacityAt(
+					"Voice roster participant limit exceeded",
+				));
 			}
 			let participant = participant(&state);
 			let member = state
@@ -166,7 +173,7 @@ impl Calls {
 			};
 			bytes += entry.bytes();
 			if bytes > voice::MAX_ROSTER_BYTES {
-				return Err(Failure::Capacity);
+				return Err(Failure::CapacityAt("Voice roster byte limit exceeded"));
 			}
 			participants.push(entry);
 		}
@@ -195,7 +202,7 @@ impl Calls {
 				Err(Failure::Protocol)
 			};
 		};
-		let members = self.members(update.updated_members)?;
+		let members = self.members(update.updated_members);
 		for mut state in update.updated_voice_states.drain(..) {
 			state.guild_id = Some(guild);
 			let member = members.get(&state.user_id).cloned();
@@ -833,6 +840,88 @@ mod tests {
 	use super::*;
 	use std::sync::Mutex;
 	#[test]
+	fn optional_login_users_are_bounded_without_rejecting_the_session() {
+		let user = |id, name: &str| UserDto {
+			id: Id(id),
+			username: name.into(),
+			global_name: None,
+			bot: false,
+			avatar: None,
+			discriminator: String::new(),
+		};
+		let mut calls = Calls::default();
+		calls.remember_users((1..=5000).map(|id| user(id, "Short")).collect());
+		assert_eq!(calls.users.len(), voice::MAX_ROSTER);
+		let long = "\u{754c}".repeat(128);
+		calls.remember_users((1..=3000).map(|id| user(id, &long)).collect());
+		assert!(!calls.users.is_empty());
+		assert!(calls.users.len() < 3000);
+		assert!(
+			calls
+				.users
+				.values()
+				.map(|u| size_of::<User>() + u.heap_bytes())
+				.sum::<usize>()
+				<= voice::MAX_ROSTER_BYTES
+		);
+		let mut users: Vec<_> = (0..5000).map(|_| user(1, &long)).collect();
+		users.push(user(0, "Invalid"));
+		users.push(user(2, "Other"));
+		calls.remember_users(users);
+		assert_eq!(calls.users.len(), 2);
+		assert_eq!(calls.users[&Id(2)].name, "Other");
+		calls.disconnected();
+		assert!(calls.users.is_empty());
+		calls.remember_users(vec![user(1, "Again")]);
+		calls.session_reset();
+		assert!(calls.users.is_empty());
+	}
+
+	#[test]
+	fn optional_members_overflow_keeps_voice_participants_and_filters_ineligible_states() {
+		let mut calls = Calls::default();
+		calls.allowed.insert(Id(20), Some(Id(10)));
+		let member = |id: u64, name: &str| {
+			decode::<VoiceMemberDto>(
+				json!({"user":{"id":id.to_string(),"username":name}})
+					.to_string()
+					.as_bytes(),
+			)
+			.unwrap()
+		};
+		let mut guild: GuildDto = decode(br#"{"id":"10"}"#).unwrap();
+		guild.members = (1..=5000u64).map(|id| member(id, "Short")).collect();
+		guild.voice_states = (0..5000)
+			.map(|_| decode(br#"{"channel_id":null,"user_id":"1"}"#).unwrap())
+			.collect();
+		guild
+			.voice_states
+			.push(decode(br#"{"channel_id":"999","user_id":"2"}"#).unwrap());
+		guild
+			.voice_states
+			.push(decode(br#"{"channel_id":"20","user_id":"5000"}"#).unwrap());
+		let Event::Voice(voice::Event::Snapshot { participants, .. }) =
+			calls.snapshot(&mut guild, true).unwrap()
+		else {
+			panic!()
+		};
+		assert_eq!(participants.len(), 1);
+		assert!(participants[0].member.is_none());
+		let long = "\u{754c}".repeat(128);
+		let retained = calls.members((1..=3000u64).map(|id| member(id, &long)).collect());
+		assert!(!retained.is_empty());
+		assert!(retained.len() < 3000);
+		assert!(retained.values().map(Member::bytes).sum::<usize>() <= voice::MAX_ROSTER_BYTES);
+		let retained = calls.members(
+			(0..5000)
+				.map(|_| member(1u64, &long))
+				.chain([member(2u64, "Other")])
+				.collect(),
+		);
+		assert_eq!(retained.len(), 2);
+	}
+
+	#[test]
 	fn sync_discovers_only_admitted_dm_calls_without_joining() {
 		let mut calls = Calls::default();
 		calls.allowed.insert(Id(2), None);
@@ -1141,7 +1230,9 @@ mod tests {
 			.collect();
 		assert!(matches!(
 			calls.snapshot(&mut guild, false),
-			Err(Failure::Capacity)
+			Err(Failure::CapacityAt(
+				"Voice roster participant limit exceeded"
+			))
 		));
 	}
 

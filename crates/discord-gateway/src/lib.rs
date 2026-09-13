@@ -2,6 +2,8 @@
 mod activity;
 mod channel_events;
 mod compression;
+#[cfg(test)]
+mod login_tests;
 mod presence;
 mod thread_events;
 mod voice;
@@ -27,6 +29,15 @@ use tokio_tungstenite::{
 	tungstenite::{Message as Frame, protocol::WebSocketConfig},
 };
 use zeroize::Zeroizing;
+
+fn socket_failure(error: tokio_tungstenite::tungstenite::Error) -> Failure {
+	match error {
+		tokio_tungstenite::tungstenite::Error::Capacity(_) => {
+			Failure::CapacityAt("Gateway frame exceeds 4 MiB; connection stopped")
+		}
+		_ => Failure::Network,
+	}
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Reconnect {
@@ -513,7 +524,7 @@ async fn run_inner(
 		let mut compression = compression::Decoder::default();
 		let hello = timeout(Duration::from_secs(10), async {
 			while let Some(frame) = socket.next().await {
-				let frame = frame.map_err(|_| Failure::Network)?;
+				let frame = frame.map_err(socket_failure)?;
 				if let Some(frame) = compression.frame(frame)? {
 					match frame {
 						Frame::Ping(_) | Frame::Pong(_) => continue,
@@ -524,6 +535,11 @@ async fn run_inner(
 			Err(Failure::Network)
 		})
 		.await;
+		if let Ok(Err(failure)) = hello
+			&& failure.ends_session()
+		{
+			return Err(failure);
+		}
 		let Ok(Ok(Frame::Text(text))) = hello else {
 			attempt += 1;
 			continue;
@@ -712,6 +728,11 @@ async fn run_inner(
 							Some(frame) => Some(Ok(frame)),
 							None => continue,
 						},
+						Some(Err(error)) => {
+							let failure = socket_failure(error);
+							if failure.ends_session() { return Err(failure); }
+							break;
+						},
 						other => other,
 					};
 					match frame {
@@ -742,13 +763,13 @@ async fn run_inner(
 										let permissions = envelope.permissions().map_err(|_|Failure::ProtocolAt("Gateway login: invalid permission metadata"))?;
 										let mut ready = envelope.navigation().map_err(|_| Failure::ProtocolAt("Gateway login: unsupported READY payload"))?;
 										owner_id=Some(ready.user.id);
-										if ready.session_id.len() > 2048 { return Err(Failure::Capacity); }
+										if ready.session_id.len() > 2048 { return Err(Failure::CapacityAt("Gateway session ID exceeds 2 KiB; connection stopped")); }
 										state.url = Some(validated_url(&ready.resume_gateway_url).map_err(|f|f.protocol_at("Gateway login: resume address rejected"))?);
 										state.session = Some(Zeroizing::new(std::mem::take(&mut ready.session_id)));
 										let friends = ready.relationships.as_ref().map(|s| s.friends(&ready.users)).transpose().map_err(|_| Failure::ProtocolAt("Invalid friend metadata"))?;
 										let requests = ready.relationships.as_ref().map(|s| s.requests(&ready.users)).transpose().map_err(|_| Failure::ProtocolAt("Invalid friend request metadata"))?;
 										calls.session_reset();
-										calls.remember_users(std::mem::take(&mut ready.users))?;
+										calls.remember_users(std::mem::take(&mut ready.users));
 										known_guilds=channel_events::ready_calls(&ready,&mut calls)?;
 										let mut participants = Vec::new();
 										let mut roster_bytes = 0;
@@ -756,13 +777,14 @@ async fn run_inner(
 											if guild.voice_states.is_empty() { continue; }
 											if let Event::Voice(client_core::voice::Event::Snapshot { participants: mut rows, .. }) = calls.snapshot(guild, false)? {
 												roster_bytes += rows.iter().map(client_core::voice::RosterEntry::bytes).sum::<usize>();
-												if participants.len() + rows.len() > client_core::voice::MAX_ROSTER || roster_bytes > client_core::voice::MAX_ROSTER_BYTES { return Err(Failure::Capacity); }
+												if participants.len() + rows.len() > client_core::voice::MAX_ROSTER { return Err(Failure::CapacityAt("Voice roster participant limit exceeded")); }
+												if roster_bytes > client_core::voice::MAX_ROSTER_BYTES { return Err(Failure::CapacityAt("Voice roster byte limit exceeded")); }
 												participants.append(&mut rows);
 											}
 										}
 										let (guilds, channels) = ready.navigation().map_err(|_| Failure::ProtocolAt("Gateway login: invalid or oversized channel/thread navigation"))?;
 										let (read_entries,read_version,partial)=ready.read_state.take().map_or((None,None,false),|snapshot|(Some(snapshot.entries.into_iter().filter(|e|e.kind==0).map(|e|(e.id,e.last_message_id,e.mention_count)).collect()),snapshot.version,snapshot.partial));
-										if guilds.len() + channels.len() > MAX_NAV { return Err(Failure::Capacity); }
+										if guilds.len() + channels.len() > MAX_NAV { return Err(Failure::CapacityAt("Account navigation exceeds 4,000 entries; connection stopped")); }
 										direct_presence.bootstrap_users=friends.as_ref().into_iter().flatten().map(|(u,_)|u.id).chain(channels.iter().filter(|c|c.guild.is_none() && matches!(c.kind,1|3)).flat_map(|c|c.recipients.iter().map(|u|u.id))).take(client_core::presence::MAX_DIRECT_PRESENCES).collect();
 										calls.allowed=channels.iter().filter(|c|(c.guild.is_none() && c.kind==1 && c.recipients.len()==1) || (c.guild.is_some() && c.kind==2)).map(|c|(c.id,c.guild)).collect();
 										if was_ready { emit(Event::Resync)?; }
@@ -796,14 +818,15 @@ async fn run_inner(
 											if !updates.is_empty() {emit(Event::Permissions(client_core::permissions::Event::Members(updates)))?;}
 										}
 
-										if extra.guilds.len() > MAX_NAV || extra.merged_members.len() > MAX_NAV { return Err(Failure::Capacity); }
+										if extra.guilds.len() > MAX_NAV || extra.merged_members.len() > MAX_NAV { return Err(Failure::CapacityAt("Supplemental login exceeds 4,000 server groups; connection stopped")); }
 										let mut participants = Vec::new();
 										let mut roster_bytes = 0;
 										for (index, guild) in extra.guilds.iter_mut().enumerate() {
 											if let Some(members) = extra.merged_members.get_mut(index) { guild.members.append(members); }
 											if let Event::Voice(client_core::voice::Event::Snapshot { participants: mut rows, .. }) = calls.snapshot(guild, true)? {
 												roster_bytes += rows.iter().map(client_core::voice::RosterEntry::bytes).sum::<usize>();
-												if participants.len() + rows.len() > client_core::voice::MAX_ROSTER || roster_bytes > client_core::voice::MAX_ROSTER_BYTES { return Err(Failure::Capacity); }
+												if participants.len() + rows.len() > client_core::voice::MAX_ROSTER { return Err(Failure::CapacityAt("Voice roster participant limit exceeded")); }
+												if roster_bytes > client_core::voice::MAX_ROSTER_BYTES { return Err(Failure::CapacityAt("Voice roster byte limit exceeded")); }
 												participants.append(&mut rows);
 											}
 										}

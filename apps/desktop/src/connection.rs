@@ -466,7 +466,9 @@ fn emit_event(
 	}
 	let bytes = envelope.event.bytes();
 	if bytes > MAX_EVENT_BYTES {
-		return Err(Failure::Capacity);
+		return Err(Failure::CapacityAt(
+			"Account synchronization event exceeds 4 MiB; connection stopped",
+		));
 	}
 	// Event::bytes includes Event itself; also charge envelope padding and the owned permit.
 	let bytes = bytes + size_of::<(Envelope, OwnedSemaphorePermit)>() - size_of::<Event>();
@@ -474,12 +476,16 @@ fn emit_event(
 		.bytes
 		.clone()
 		.try_acquire_many_owned(bytes as u32)
-		.map_err(|_| Failure::Capacity)?;
+		.map_err(|_| {
+			Failure::CapacityAt("Account synchronization queue exceeds 32 MiB; connection stopped")
+		})?;
 	reliable
 		.send
 		.try_send((envelope, permit))
 		.map_err(|error| match error {
-			mpsc::error::TrySendError::Full(_) => Failure::Capacity,
+			mpsc::error::TrySendError::Full(_) => Failure::CapacityAt(
+				"Account synchronization event queue is full; connection stopped",
+			),
 			mpsc::error::TrySendError::Closed(_) => Failure::Network,
 		})?;
 	ctx.request_repaint();
@@ -675,7 +681,9 @@ mod tests {
 		let retained = send.bytes.available_permits();
 		assert_eq!(
 			emit_event(&send, &typing, queued_channel(0), &ctx),
-			Err(Failure::Capacity)
+			Err(Failure::CapacityAt(
+				"Account synchronization event queue is full; connection stopped"
+			))
 		);
 		assert_eq!(send.bytes.available_permits(), retained);
 		for id in 1..=RELIABLE_ITEMS as u64 {
@@ -707,7 +715,9 @@ mod tests {
 		assert_eq!(send.bytes.available_permits(), 0);
 		assert_eq!(
 			emit_event(&send, &typing, queued_channel(3), &ctx),
-			Err(Failure::Capacity)
+			Err(Failure::CapacityAt(
+				"Account synchronization queue exceeds 32 MiB; connection stopped"
+			))
 		);
 		assert_eq!(events.receive.len(), 1);
 		events.try_recv().unwrap();
@@ -721,7 +731,9 @@ mod tests {
 		}
 		assert_eq!(
 			emit_event(&send, &typing, oversized, &ctx),
-			Err(Failure::Capacity)
+			Err(Failure::CapacityAt(
+				"Account synchronization event exceeds 4 MiB; connection stopped"
+			))
 		);
 		assert_eq!(send.bytes.available_permits(), before);
 		drop(events);
