@@ -455,6 +455,8 @@ async fn run(
 		{
 			error = Some(CACHE_ERROR);
 		}
+		// Decoded results can wait for the UI; the encoded source is no longer needed.
+		drop(bytes);
 		if *cancelled.borrow() {
 			break;
 		}

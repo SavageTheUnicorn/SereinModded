@@ -41,6 +41,7 @@ use tokio::{
 pub struct DiscordApi {
 	ack_token: Mutex<zeroize::Zeroizing<Option<String>>>,
 	client: Client,
+	upload_client: tokio::sync::OnceCell<Client>,
 	secret: Arc<SessionSecret>,
 	cooldown: Mutex<Instant>,
 	requests: Semaphore,
@@ -134,6 +135,7 @@ impl DiscordApi {
 			.build()
 			.map_err(|_| Failure::Network)?;
 		Ok(Self {
+			upload_client: tokio::sync::OnceCell::new(),
 			ack_token: Mutex::new(zeroize::Zeroizing::new(None)),
 			client,
 			secret,
@@ -272,7 +274,9 @@ impl DiscordApi {
 		{
 			return Err(Failure::Capacity);
 		}
-		let mut bytes = zeroize::Zeroizing::new(Vec::new());
+		let mut bytes = zeroize::Zeroizing::new(Vec::with_capacity(
+			response.content_length().unwrap_or(0).min(max_bytes as u64) as usize,
+		));
 		while let Some(chunk) = response.chunk().await.map_err(|_| {
 			if write {
 				Failure::Ambiguous

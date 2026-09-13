@@ -4,11 +4,52 @@ use model::{Id, Message};
 use std::{
 	collections::{BTreeMap, BTreeSet},
 	sync::{
-		Arc,
+		Arc, Condvar, Mutex,
 		atomic::{AtomicBool, AtomicU64, Ordering},
 		mpsc::{self, Receiver, SyncSender},
 	},
 };
+const QUEUE_BYTES: usize = 16 * 1024 * 1024;
+const WINDOW_BYTES: usize = 4 * 1024 * 1024;
+
+#[derive(Default)]
+struct Budget {
+	used: Mutex<usize>,
+	available: Condvar,
+}
+pub struct Reservation {
+	budget: Arc<Budget>,
+	bytes: usize,
+}
+impl Budget {
+	fn reserve(self: &Arc<Self>, bytes: usize, wait: bool) -> Option<Reservation> {
+		if bytes > QUEUE_BYTES {
+			return None;
+		}
+		let mut used = self.used.lock().unwrap_or_else(|e| e.into_inner());
+		while *used + bytes > QUEUE_BYTES {
+			if !wait {
+				return None;
+			}
+			used = self.available.wait(used).unwrap_or_else(|e| e.into_inner());
+		}
+		*used += bytes;
+		Some(Reservation {
+			budget: self.clone(),
+			bytes,
+		})
+	}
+}
+impl Drop for Reservation {
+	fn drop(&mut self) {
+		*self.budget.used.lock().unwrap_or_else(|e| e.into_inner()) -= self.bytes;
+		self.budget.available.notify_one();
+	}
+}
+fn message_bytes(messages: &Vec<Message>) -> usize {
+	messages.iter().map(Message::bytes).sum::<usize>()
+		+ messages.capacity().saturating_sub(messages.len()) * size_of::<Message>()
+}
 pub enum Operation {
 	LoadAppPreferences,
 	SaveAppPreferences(local_store::AppPreferences),
@@ -81,8 +122,9 @@ pub enum Outcome {
 	},
 }
 pub struct Cache {
-	send: SyncSender<(u64, Id, u64, Operation)>,
-	pub receive: Receiver<(u64, Outcome)>,
+	send: SyncSender<(u64, Id, u64, Operation, Reservation)>,
+	pub receive: Receiver<(u64, Outcome, Reservation)>,
+	budget: Arc<Budget>,
 	pub history: Arc<HistorySafety>,
 }
 #[derive(Default)]
@@ -171,6 +213,61 @@ impl Cache {
 		if matches!(&operation, Operation::SaveChannelPreferences(value) if !value.is_valid()) {
 			return false;
 		}
+		let payload = match &operation {
+			Operation::SaveChannel { messages, .. } | Operation::SaveChanges { messages, .. } => {
+				if messages.len() > 500
+					|| messages.iter().map(Message::bytes).sum::<usize>() > WINDOW_BYTES
+				{
+					return false;
+				}
+				message_bytes(messages)
+			}
+			Operation::SaveDraft { content, .. } => {
+				if content.len() > 8192 {
+					return false;
+				}
+				content.capacity()
+			}
+			Operation::SaveGifFavorites(favorites) => {
+				if favorites.len() > 100 {
+					return false;
+				}
+				favorites.iter().map(model::Gif::bytes).sum::<usize>()
+					+ favorites.capacity() * size_of::<model::Gif>()
+			}
+			Operation::SaveAppPreferences(value) => {
+				if !value.is_valid() {
+					return false;
+				}
+				value.voice_input.as_ref().map_or(0, String::capacity)
+					+ value.voice_output.as_ref().map_or(0, String::capacity)
+					+ value.expanded_folders.capacity() * size_of::<u64>()
+			}
+			Operation::SaveThemeVariant(value) => value.as_ref().map_or(0, String::capacity),
+			_ => 0,
+		};
+		let ids = match &operation {
+			Operation::SaveChanges { retained, .. } => {
+				if retained.len() > 500 {
+					return false;
+				}
+				retained.capacity() * size_of::<Id>()
+			}
+			Operation::DeleteMessages { ids, .. } => {
+				if ids.len() > 100 {
+					return false;
+				}
+				ids.capacity() * size_of::<Id>()
+			}
+			_ => 0,
+		};
+		// Small metadata and channel preferences fit in the reserved 8 KiB overhead.
+		let Some(reservation) = self
+			.budget
+			.reserve(payload.saturating_add(ids).saturating_add(8192), false)
+		else {
+			return false;
+		};
 		let epoch = self.history.epoch();
 		if matches!(
 			operation,
@@ -182,19 +279,34 @@ impl Cache {
 			return false;
 		}
 		self.send
-			.try_send((generation, account, epoch, operation))
+			.try_send((generation, account, epoch, operation, reservation))
 			.is_ok()
 	}
 	pub fn start(ctx: egui::Context) -> Self {
-		let (send, commands) = mpsc::sync_channel::<(u64, Id, u64, Operation)>(16);
+		let (send, commands) = mpsc::sync_channel::<(u64, Id, u64, Operation, Reservation)>(16);
 		let (events, receive) = mpsc::sync_channel(16);
+		let budget = Arc::new(Budget::default());
 		let history = Arc::new(HistorySafety::default());
 		let worker_history = history.clone();
 		std::thread::spawn(move || {
 			let mut store = LocalStore::open_default();
-			while let Ok((generation, account, epoch, operation)) = commands.recv() {
+			let results = Arc::new(Budget::default());
+			while let Ok((generation, account, epoch, operation, reservation)) = commands.recv() {
 				let outcome = execute(&mut store, &worker_history, account, epoch, operation);
-				if events.send((generation, outcome)).is_err() {
+				drop(reservation);
+				let bytes = match &outcome {
+					Outcome::Channel { messages, .. } => message_bytes(messages),
+					Outcome::Drafts(drafts) => drafts.values().map(String::capacity).sum(),
+					Outcome::GifFavorites(favorites) => {
+						favorites.iter().map(model::Gif::bytes).sum::<usize>()
+							+ favorites.capacity() * size_of::<model::Gif>()
+					}
+					_ => 0,
+				};
+				let reservation = results
+					.reserve(bytes + 64 * 1024, true)
+					.expect("bounded storage outcome fits queue");
+				if events.send((generation, outcome, reservation)).is_err() {
 					break;
 				}
 				ctx.request_repaint();
@@ -203,6 +315,7 @@ impl Cache {
 		Self {
 			send,
 			receive,
+			budget,
 			history,
 		}
 	}
@@ -424,6 +537,7 @@ mod tests {
 		let cache = Cache {
 			send,
 			receive,
+			budget: Arc::new(Budget::default()),
 			history: Arc::new(HistorySafety::default()),
 		};
 		for enabled in [true, false] {
@@ -448,7 +562,7 @@ mod tests {
 			settings.observe(&view);
 			assert!(settings.save(Some(&cache), 2));
 			assert!(!settings.save(Some(&cache), 2));
-			let (_, account, epoch, operation) = commands.try_recv().unwrap();
+			let (_, account, epoch, operation, _reservation) = commands.try_recv().unwrap();
 			assert!(matches!(
 				execute(&mut store, &cache.history, account, epoch, operation),
 				Outcome::AppPreferencesSaved(Ok(()))
@@ -786,6 +900,7 @@ mod tests {
 		let cache = Cache {
 			send,
 			receive,
+			budget: Arc::new(Budget::default()),
 			history: Arc::new(HistorySafety::default()),
 		};
 		let account = Id(1);
@@ -815,7 +930,7 @@ mod tests {
 			commands.try_recv().unwrap();
 		}
 		assert!(cache.queue(1, account, Operation::ClearHistory));
-		let (generation, owner, epoch, operation) = commands.try_recv().unwrap();
+		let (generation, owner, epoch, operation, _reservation) = commands.try_recv().unwrap();
 		assert_eq!((generation, owner), (1, account));
 		let mut store = Ok(LocalStore::open(std::path::Path::new(":memory:")).unwrap());
 		for owner in [account, Id(9)] {

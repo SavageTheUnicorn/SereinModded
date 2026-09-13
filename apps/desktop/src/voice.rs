@@ -811,7 +811,7 @@ impl Voice {
 			}
 			let image = egui::ColorImage::from_rgba_unmultiplied(
 				[frame.width as usize, frame.height as usize],
-				&frame.rgba,
+				frame.rgba,
 			);
 			if let Ok(mut slot) = pictures.lock() {
 				if let Some(entry) = slot.iter_mut().find(|(user, _)| *user == frame.user) {

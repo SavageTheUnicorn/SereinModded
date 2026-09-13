@@ -615,11 +615,7 @@ impl State {
 		if self.selected == Some(channel) && self.freshness != Freshness::Unavailable {
 			return None;
 		}
-		if !self
-			.channels
-			.iter()
-			.any(|c| c.id == channel && navigable(c))
-		{
+		if !self.channel(channel).is_some_and(navigable) {
 			self.status = "This channel kind is unsupported";
 			return None;
 		}
@@ -639,11 +635,7 @@ impl State {
 		self.older_exhausted = false;
 		self.reply = None;
 		self.revision += 1;
-		if self
-			.channels
-			.iter()
-			.any(|c| c.id == channel && !c.supports_text())
-		{
+		if self.channel(channel).is_some_and(|c| !c.supports_text()) {
 			self.cancel_history();
 			self.freshness = Freshness::Fresh;
 			return None;

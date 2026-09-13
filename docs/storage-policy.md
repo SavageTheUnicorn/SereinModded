@@ -188,7 +188,43 @@ Offline SQLite tests exercise real temporary-file reopen, schema upgrade, appear
 
 A process-write trace was attempted with `sudo -n fs_usage -w -f filesys -t 3 <synthetic-app-pid>`; the OS returned “a password is required.” No trace was obtained. The account/cache code and synthetic SQLite files were tested, but actual process-write behavior is not certified.
 
-The September 10 owner clarification prioritizes low RAM and small packages over minimizing disk caches. Avatars/icons remain static PNGs; visible embed previews use validated Discord media proxies. No animation or new image codec is enabled. One worker downloads/decodes at a time, with 128 bounded keys waiting, two decoded results (at most 2 MiB total), a 2 MiB encoded body ceiling, and 512×512 preview output. Avatar/icon decode limits remain 256×256 source / 1 MiB decoder allocations / 128×128 output; message previews and profile banners allow 1024×1024 source / 8 MiB decoder allocations. Shared textures are bounded by 64 entries and 16 MiB RGBA. These are component bounds, not whole-process RSS or driver allocations. Disk eviction retains only 32 candidate paths at a time. Worker completion fences replacement and deletion, so logout/clear cannot race an older worker's writes. Picture-cache failures appear in local-storage status. Disk cache contents are unencrypted. Category collapse preferences remain session-local. See image policy and embed persistence.
+Current image limits include the GIF and larger-viewer features added after September 10.
+One worker decodes serially while up to four credential-free downloads overlap, with
+128 bounded keys waiting and two decoded results queued. Ordinary encoded bodies are
+capped at 2 MiB, animation bodies at 8 MiB and larger-viewer bodies at 16 MiB; four large
+downloads can therefore hold 64 MiB of encoded payload, separately from decoder memory.
+The completed encoded source is released before waiting to deliver its decoded result.
+Avatar/icon decoding accepts at most 512 KiB encoded, 256×256 source, 1 MiB decoder
+allocations and 128×128 output. Previews/banners use 1024×1024 source, 8 MiB decoder
+allocations and a 512-pixel output edge. Larger-viewer images allow 4096×4096 source,
+96 MiB decoder allocations and a 2048-pixel output edge (16 MiB RGBA per image).
+GIF/WebP animations retain at most 80 frames with a 160-pixel edge, about 8 MiB per clip.
+Two queued large stills can retain 32 MiB of decoded pixels; active decoding, image
+conversion and framework/driver allocations are additional. Shared textures are bounded
+by 256 entries / 64 MiB, with a separate four-animation / 16 MiB retained-pixel budget.
+These are component ceilings, not measured whole-process RSS. Disk eviction retains only
+32 candidate paths at a time. Worker completion fences replacement and deletion, so
+logout/clear cannot race an older worker's writes. Picture-cache failures appear in
+local-storage status. Disk cache contents are unencrypted. Category collapse remains
+session-local.
+
+Storage commands and results each retain their 16-item limit and have separate 16 MiB
+estimated allocation budgets. Reservations include vector/string capacity and metadata
+allowances and are released when work/results are consumed or dropped. Byte exhaustion
+rejects command admission through the existing unsaved/cleanup handling; the storage worker
+waits for result capacity without dropping completions. One completed result awaiting
+admission and the SQLite working set are additional. History payloads retain the 500-row /
+4 MiB limit. A connection-local byte total avoids rescanning all history on each save;
+SQLite write/version counters invalidate it after other writes. The disk schema and
+transactional eviction limits are unchanged.
+
+Each remote-video decoder queue admits at most 64 access units and 16 MiB of allocated
+encoded capacity, including the access unit being decoded. Exhaustion uses the existing
+frame-drop/keyframe-recovery path. At most 16 reassemblers retain partial access units
+of 2 MiB + 64 KiB each; discarded partials release capacities above 256 KiB. Decoder,
+reference-picture, hardware and displayed-frame memory are additional. The synchronous
+software-video sink borrows the reusable RGBA buffer, avoiding a full-frame clone before
+conversion to UI pixels. No live media was used to establish these implementation bounds.
 
 Voice introduces no application audio files, recordings or voice-key store. Device preferences are saved locally as described above. Voice tokens/session IDs use redacted, zeroizing buffers and never enter SQLite or diagnostics; DAVE identities are regenerated for a new call. Eight-frame PCM queues, bounded Opus packets and one bounded decoder/jitter/PCM working set per remote speaker (up to 63) are transient media allocations, not disk caches. Guild voice rosters are session-only with 4,096-entry and 1 MiB budgets; they are never persisted. Upstream cryptographic tracing is compiled out. Audio-device shutdown is fenced before another device session starts. Synthetic crypto, transport and device-free capture-gate tests passed; actual audio-driver/permission artifacts and process writes during a physical call have not been traced. OS microphone permissions and driver behavior are outside Serein's cache-clearing guarantee.
 
@@ -217,7 +253,7 @@ and 256 KiB allocated data per server, including names and role lists, within th
 4 MiB navigation budget. Reconnect READY replaces catalogs; full emoji-update events replace
 a server catalog; deletion clears it and old session generations cannot repopulate it.
 No catalog table or schema migration is added. Custom PNG previews reuse the existing
-account-isolated image worker/disk cache and its 64-texture / 16 MiB GPU working set, request
+account-isolated image worker/disk cache and its 256-texture / 64 MiB GPU working set, request
 and retry limits, 512 KiB icon decode input and 128×128 decoded dimension cap. They use
 validated numeric `emoji-ID` keys and credential-free Discord CDN PNG requests (64px static
 preview), never arbitrary URLs or automatic animation. Cache clear/logout follows the existing
@@ -382,7 +418,7 @@ One optional artwork reference per activity is retained: two asset IDs, one appl
 a Discord media-proxy path of at most 1,024 bytes. Its enum/vector storage and allocated path
 capacity count toward the same presence budgets. Secrets, buttons and raw event payloads are
 discarded. Images needed by the visible profile share the existing credential-free image worker,
-64-texture / 16-MiB texture cache and account-isolated 1-GiB / 4,096-file / 90-day disk cache.
+256-texture / 64-MiB texture cache and account-isolated 1-GiB / 4,096-file / 90-day disk cache.
 Application-icon metadata responses are capped at 64 KiB and discarded after validating the
 application ID and icon hash; only the decoded-valid PNG enters the disk cache. Application icons
 cached by application ID can remain stale until normal cache expiry or clear-cache. Proxy keys

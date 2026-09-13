@@ -1895,14 +1895,12 @@ impl MessagingUi {
 		let connected = matches!(phase, Phase::Connected | Phase::Waiting);
 		let error = call.error;
 		let channel = state
-			.channels
-			.iter()
-			.find(|c| c.id == call.channel)
+			.channel(call.channel)
 			.map_or("Direct message", |c| c.name.as_str())
 			.to_owned();
 		let guild = call
 			.guild
-			.and_then(|id| state.guilds.iter().find(|g| g.id == id))
+			.and_then(|id| state.guild(id))
 			.map(|g| g.name.clone());
 		let detail = match guild {
 			Some(guild) => format!("{channel} / {guild}"),

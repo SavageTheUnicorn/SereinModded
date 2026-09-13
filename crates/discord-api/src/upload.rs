@@ -307,16 +307,23 @@ impl DiscordApi {
 		if self.stopped() {
 			return Err(Failure::Expired);
 		}
-		let client = reqwest::Client::builder()
-			.redirect(reqwest::redirect::Policy::none())
-			.retry(reqwest::retry::never())
-			.no_proxy()
-			.connect_timeout(Duration::from_secs(10))
-			.read_timeout(Duration::from_secs(30))
-			.timeout(Duration::from_secs(300))
-			.user_agent(client_core::fingerprint::user_agent())
-			.build()
-			.map_err(|_| Failure::Network)?;
+		let client = self
+			.upload_client
+			.get_or_try_init(|| async {
+				reqwest::Client::builder()
+					.redirect(reqwest::redirect::Policy::none())
+					.retry(reqwest::retry::never())
+					.no_proxy()
+					.connect_timeout(Duration::from_secs(10))
+					.read_timeout(Duration::from_secs(30))
+					.timeout(Duration::from_secs(300))
+					.pool_max_idle_per_host(1)
+					.pool_idle_timeout(Duration::from_secs(30))
+					.user_agent(client_core::fingerprint::user_agent())
+					.build()
+					.map_err(|_| Failure::Network)
+			})
+			.await?;
 		let total = source.size();
 		progress.send_replace(Status::Uploading {
 			sent: completed,

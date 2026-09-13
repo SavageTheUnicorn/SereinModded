@@ -18,18 +18,24 @@ pub const MAX_FRAME_BYTES: usize = 2 * 1024 * 1024 + 64 * 1024;
 pub const MAX_SOURCES: usize = 16;
 /// Decoders kept alive at once; each holds reference pictures for one remote user.
 const MAX_DECODERS: usize = 8;
+const QUEUE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_WIDTH: u32 = 1920;
 const MAX_PIXELS: u64 = 1920 * 1080;
 const START_CODE: [u8; 4] = [0, 0, 0, 1];
 
 /// One decoded remote picture, packed RGBA.
-pub struct RemoteFrame {
+pub struct RemoteFrame<'a> {
 	pub user: u64,
 	pub width: u32,
 	pub height: u32,
-	pub rgba: Vec<u8>,
+	pub rgba: &'a [u8],
 }
-pub type VideoSink = Arc<dyn Fn(RemoteFrame) + Send + Sync>;
+pub type VideoSink = Arc<dyn Fn(RemoteFrame<'_>) + Send + Sync>;
+
+pub(crate) struct DecoderQueue {
+	send: SyncSender<(Encoded, tokio::sync::OwnedSemaphorePermit)>,
+	bytes: Arc<tokio::sync::Semaphore>,
+}
 
 /// A cleartext Annex-B access unit handed to the decoder thread.
 pub(crate) struct Encoded {
@@ -107,6 +113,9 @@ impl Assembler {
 	}
 	fn reset_frame(&mut self) {
 		self.frame.clear();
+		if self.frame.capacity() > 256 * 1024 {
+			self.frame = Vec::new();
+		}
 		self.fragmenting = false;
 		self.broken = false;
 	}
@@ -114,6 +123,11 @@ impl Assembler {
 		let total: usize = parts.iter().map(|part| part.len()).sum();
 		if self.frame.len() + total > MAX_FRAME_BYTES {
 			return Err(());
+		}
+		if self.frame.len() + total > self.frame.capacity()
+			&& self.frame.capacity().saturating_mul(2) > MAX_FRAME_BYTES
+		{
+			self.frame.reserve_exact(MAX_FRAME_BYTES - self.frame.len());
 		}
 		for part in parts {
 			self.frame.extend_from_slice(part);
@@ -255,7 +269,7 @@ impl Receivers {
 
 /// Decoder thread: cleartext access units in, bounded RGBA frames out through the sink.
 /// Dropping the returned sender ends the thread and releases every decoder.
-pub(crate) fn spawn_decoder(sink: VideoSink) -> Result<(SyncSender<Encoded>, Lost), &'static str> {
+pub(crate) fn spawn_decoder(sink: VideoSink) -> Result<(DecoderQueue, Lost), &'static str> {
 	// Predictions are small; queueing a second of them beats dropping and waiting for an IDR.
 	let (send, receive) = sync_channel(64);
 	let lost: Lost = Arc::new(Mutex::new(Vec::new()));
@@ -264,7 +278,13 @@ pub(crate) fn spawn_decoder(sink: VideoSink) -> Result<(SyncSender<Encoded>, Los
 		.name("remote-video".into())
 		.spawn(move || decode_loop(receive, sink, report))
 		.map_err(|_| "Could not start the video decoder thread")?;
-	Ok((send, lost))
+	Ok((
+		DecoderQueue {
+			send,
+			bytes: Arc::new(tokio::sync::Semaphore::new(QUEUE_BYTES)),
+		},
+		lost,
+	))
 }
 
 /// RFC 4585 Picture Loss Indication asking the media server for a fresh keyframe.
@@ -276,8 +296,18 @@ pub(crate) fn pli(sender: u32, media: u32) -> ([u8; 8], [u8; 4]) {
 
 /// Queue a frame without blocking the transport. `Ok(false)` means the queue was full and
 /// the frame dropped, so the caller must wait for the next keyframe.
-pub(crate) fn offer(sender: &SyncSender<Encoded>, frame: Encoded) -> Result<bool, &'static str> {
-	match sender.try_send(frame) {
+pub(crate) fn offer(sender: &DecoderQueue, frame: Encoded) -> Result<bool, &'static str> {
+	if frame.data.len() > MAX_FRAME_BYTES || frame.data.capacity() > QUEUE_BYTES {
+		return Ok(false);
+	}
+	let Ok(permit) = sender
+		.bytes
+		.clone()
+		.try_acquire_many_owned(frame.data.capacity() as u32)
+	else {
+		return Ok(false);
+	};
+	match sender.send.try_send((frame, permit)) {
 		Ok(()) => Ok(true),
 		Err(TrySendError::Full(_)) => Ok(false),
 		Err(TrySendError::Disconnected(_)) => Err("Video decoder stopped"),
@@ -300,7 +330,7 @@ impl Backend {
 						user,
 						width: frame.width,
 						height: frame.height,
-						rgba: frame.rgba,
+						rgba: &frame.rgba,
 					});
 				}
 			});
@@ -312,11 +342,7 @@ impl Backend {
 	}
 	/// Feed one access unit. Software pictures are returned; hardware ones were already
 	/// delivered to the sink. `scratch` is reused so no frame-sized buffer is zeroed per frame.
-	fn decode(
-		&mut self,
-		data: &[u8],
-		scratch: &mut Vec<u8>,
-	) -> Result<Option<(u32, u32, Vec<u8>)>, ()> {
+	fn decode(&mut self, data: &[u8], scratch: &mut Vec<u8>) -> Result<Option<(u32, u32)>, ()> {
 		match self {
 			Self::Hardware(decoder) => decoder.decode(data).map(|()| None).map_err(|_| ()),
 			Self::Software(decoder) => {
@@ -332,7 +358,7 @@ impl Backend {
 					*scratch = vec![0; bytes];
 				}
 				decoded.write_rgba8(scratch);
-				Ok(Some((width, height, scratch.clone())))
+				Ok(Some((width, height)))
 			}
 		}
 	}
@@ -344,14 +370,18 @@ impl Backend {
 	}
 }
 
-fn decode_loop(receive: Receiver<Encoded>, sink: VideoSink, lost: Lost) {
+fn decode_loop(
+	receive: Receiver<(Encoded, tokio::sync::OwnedSemaphorePermit)>,
+	sink: VideoSink,
+	lost: Lost,
+) {
 	let mut decoders: HashMap<u64, Backend> = HashMap::new();
 	// Users whose hardware decoder rejected the stream fall back to software.
 	let mut software_only: Vec<u64> = Vec::new();
 	// After a decode error, predictions are skipped until a keyframe rebuilds the references.
 	let mut broken: Vec<u64> = Vec::new();
 	let mut scratch = Vec::new();
-	while let Ok(frame) = receive.recv() {
+	while let Ok((frame, _permit)) = receive.recv() {
 		if frame.data.len() > MAX_FRAME_BYTES {
 			continue;
 		}
@@ -392,12 +422,12 @@ fn decode_loop(receive: Receiver<Encoded>, sink: VideoSink, lost: Lost) {
 				continue;
 			}
 		};
-		let (width, height, rgba) = decoded;
+		let (width, height) = decoded;
 		sink(RemoteFrame {
 			user: frame.user,
 			width,
 			height,
-			rgba,
+			rgba: &scratch,
 		});
 	}
 	// Hardware pictures still in flight must land before the sink goes away.
@@ -506,7 +536,9 @@ mod tests {
 		let pictures = Arc::new(std::sync::Mutex::new(Vec::new()));
 		let seen = pictures.clone();
 		let sink: VideoSink = Arc::new(move |frame: RemoteFrame| {
-			seen.lock().unwrap().push(frame);
+			seen.lock()
+				.unwrap()
+				.push((frame.user, frame.width, frame.height, frame.rgba.to_vec()));
 		});
 		let mut decoder = Backend::new(true, 9, &sink).expect("hardware backend");
 		assert!(matches!(decoder, Backend::Hardware(_)));
@@ -522,9 +554,9 @@ mod tests {
 		let pictures = pictures.lock().unwrap();
 		assert!(!pictures.is_empty(), "VideoToolbox produced pictures");
 		let frame = &pictures[0];
-		assert_eq!((frame.user, frame.width, frame.height), (9, 320, 240));
-		assert_eq!(frame.rgba.len(), 320 * 240 * 4);
-		assert!(frame.rgba.as_chunks::<4>().0.iter().all(|px| px[3] == 255));
+		assert_eq!((frame.0, frame.1, frame.2), (9, 320, 240));
+		assert_eq!(frame.3.len(), 320 * 240 * 4);
+		assert!(frame.3.as_chunks::<4>().0.iter().all(|px| px[3] == 255));
 	}
 	/// `cargo test -p discord-voice compare_decoder_backends -- --ignored --nocapture`
 	#[cfg(target_os = "macos")]

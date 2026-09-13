@@ -487,11 +487,11 @@ impl LocalStore {
 			return Err(StoreError::Capacity);
 		}
 		let retained: std::collections::BTreeSet<_> = retained.iter().copied().collect();
-		let mut window: BTreeMap<_, _> = self
-			.load_channel(account, channel)?
-			.into_iter()
+		let existing = self.load_channel(account, channel)?;
+		let mut window: BTreeMap<_, _> = existing
+			.iter()
 			.filter(|m| retained.contains(&m.id))
-			.map(|m| (m.id, m))
+			.map(|m| (m.id, m.clone()))
 			.collect();
 		for message in messages {
 			if !retained.contains(&message.id) {
@@ -499,9 +499,27 @@ impl LocalStore {
 			}
 			window.insert(message.id, message.clone());
 		}
-		self.save_channel(account, channel, &window.into_values().collect::<Vec<_>>())
+		self.save_channel_loaded(
+			account,
+			channel,
+			&window.into_values().collect::<Vec<_>>(),
+			&existing,
+		)
 	}
 	pub fn save_channel(&mut self, account: Id, channel: Id, messages: &[Message]) -> Result<()> {
+		if messages.len() > 500 {
+			return Err(StoreError::Capacity);
+		}
+		let existing = self.load_channel(account, channel)?;
+		self.save_channel_loaded(account, channel, messages, &existing)
+	}
+	fn save_channel_loaded(
+		&mut self,
+		account: Id,
+		channel: Id,
+		messages: &[Message],
+		existing: &[Message],
+	) -> Result<()> {
 		if messages.len() > 500
 			|| messages.iter().map(Message::bytes).sum::<usize>() > MAX_WINDOW_BYTES
 			|| messages.iter().any(|m| {
@@ -516,7 +534,6 @@ impl LocalStore {
 			return Err(StoreError::Capacity);
 		}
 		// Compare on the storage worker; unchanged rows need no serialization or write.
-		let existing = self.load_channel(account, channel)?;
 		let transaction = self.0.transaction()?;
 		let account = account.to_string();
 		let channel = channel.to_string();
@@ -525,12 +542,14 @@ impl LocalStore {
 		{
 			let mut delete = transaction
 				.prepare_cached("DELETE FROM messages WHERE account=?1 AND channel=?2 AND id=?3")?;
-			for message in &existing {
+			for message in existing {
 				if !retained.contains(&message.id) {
 					delete.execute(params![account, channel, message.id.to_string()])?;
 				}
 			}
 		}
+		let mut insert = transaction.prepare_cached(
+            "INSERT OR REPLACE INTO messages(account,channel,id,author,name,content,edited,reply,unsupported,avatar,discriminator,embeds,embeds_suppressed,attachments,mentions,extra_content,message_kind,reply_deleted,webhook,account_kind,forwarded) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21)")?;
 		for message in messages {
 			if previous
 				.get(&message.id)
@@ -550,33 +569,31 @@ impl LocalStore {
 			if embeds.len() > MAX_MEDIA_JSON || attachments.len() > MAX_MEDIA_JSON {
 				return Err(StoreError::Capacity);
 			}
-			transaction.prepare_cached(
-                "INSERT OR REPLACE INTO messages(account,channel,id,author,name,content,edited,reply,unsupported,avatar,discriminator,embeds,embeds_suppressed,attachments,mentions,extra_content,message_kind,reply_deleted,webhook,account_kind,forwarded) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21)")?.execute(
-                params![
-                    account,
-                    channel,
-                    message.id.to_string(),
-                    message.author.id.to_string(),
-                    message.author.name,
-                    message.content,
-                    message.edited,
-                    message.reply_to.map(|id| id.to_string()),
-                    message.unsupported,
-                    message.author.avatar,
-                    message.author.discriminator,
-                    embeds,
-                    message.embeds_suppressed,
-                    attachments,
-                    mentions,
-                    message.extra_content.bits(),
-                    message.kind,
-                    message.reply_deleted,
-                    message.author.webhook,
-                    message.author.kind as u8,
-                    message.forwarded
-                ],
-            )?;
+			insert.execute(params![
+				account,
+				channel,
+				message.id.to_string(),
+				message.author.id.to_string(),
+				message.author.name,
+				message.content,
+				message.edited,
+				message.reply_to.map(|id| id.to_string()),
+				message.unsupported,
+				message.author.avatar,
+				message.author.discriminator,
+				embeds,
+				message.embeds_suppressed,
+				attachments,
+				mentions,
+				message.extra_content.bits(),
+				message.kind,
+				message.reply_deleted,
+				message.author.webhook,
+				message.author.kind as u8,
+				message.forwarded,
+			])?;
 		}
+		drop(insert);
 		transaction.execute("INSERT INTO channels VALUES(?1,?2,unixepoch('subsec')*1000) ON CONFLICT(account,channel) DO UPDATE SET touched=excluded.touched",params![account,channel])?;
 		// Global limit: 20 channel windows, 10000 messages AND 48 MiB content, below the 64 MiB database page ceiling.
 		loop {

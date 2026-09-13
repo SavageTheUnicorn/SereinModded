@@ -1287,10 +1287,7 @@ impl MessagingUi {
 					rect.bottom(),
 					egui::Stroke::new(1.0, colors.border),
 				);
-				let channel = state
-					.selected
-					.and_then(|id| state.channels.iter().find(|c| c.id == id))
-					.cloned();
+				let channel = state.selected.and_then(|id| state.channel(id)).cloned();
 				let dm = channel
 					.as_ref()
 					.is_some_and(|c| c.kind == 1 && c.guild.is_none());
@@ -2011,7 +2008,7 @@ impl MessagingUi {
 				});
 				send && i.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
 			});
-		let placeholder = state.channels.iter().find(|c| c.id == channel).map_or_else(
+		let placeholder = state.channel(channel).map_or_else(
 			|| "Message".to_owned(),
 			|c| {
 				if c.guild.is_some() {
@@ -2861,9 +2858,8 @@ impl MessagingUi {
 		self.screen.show(&ctx, state);
 		if let Some(id) = self.timeline.channel_reference.take()
 			&& let Some(target) = state
-				.channels
-				.iter()
-				.find(|c| c.id == id && c.guild.is_some() && c.supports_text())
+				.channel(id)
+				.filter(|c| c.guild.is_some() && c.supports_text())
 		{
 			self.guild = target.guild;
 			if let Some(command) = state.select(id) {
@@ -3019,9 +3015,7 @@ impl MessagingUi {
 		if let Some((channel, message)) = self.deleting {
 			let allowed = state.can_delete(channel, message);
 			let conversation = state
-				.channels
-				.iter()
-				.find(|c| c.id == channel)
+				.channel(channel)
 				.map_or("this conversation", |c| c.name.as_str());
 			let mut confirm = dialog::Confirm::new(
 				"delete-message",

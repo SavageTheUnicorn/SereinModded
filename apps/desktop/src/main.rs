@@ -2780,7 +2780,7 @@ impl Desktop {
 				}
 			}
 		}
-		for (generation, outcome) in cached {
+		for (generation, outcome, _reservation) in cached {
 			self.cache_pending = self.cache_pending.saturating_sub(1);
 			// Settings are global; account removal/write failures still matter after logout.
 			match &outcome {

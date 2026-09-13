@@ -787,9 +787,10 @@ async fn run_stream_inner(
 							json_send(&mut ws,json!({"op":5,"d":{"speaking":2,"delay":0,"ssrc":audio_ssrc}})).await?;
 							*speaking=true;
 						}
-						while pending.len()>=1920 {
-							let frame:Vec<f32>=pending.drain(..1920).collect();
-							let length=encoder.encode_float(&frame,&mut audio_encoded).map_err(|_|"Stream audio encoding failed")?;
+						let mut consumed=0;
+						while pending.len()-consumed>=1920 {
+							let length=encoder.encode_float(&pending[consumed..consumed+1920],&mut audio_encoded).map_err(|_|"Stream audio encoding failed")?;
+							consumed+=1920;
 							let data=dave.session.encrypt_opus(&audio_encoded[..length]).map_err(|_|"DAVE stream audio encryption failed")?.into_owned();
 							let mut header=[0;12];header[0]=0x80;header[1]=120;header[2..4].copy_from_slice(&audio_sequence.to_be_bytes());header[4..8].copy_from_slice(&audio_timestamp.to_be_bytes());header[8..12].copy_from_slice(&audio_ssrc.to_be_bytes());
 							let crypto=encryption.as_mut().ok_or("Missing stream transport key")?;
@@ -797,6 +798,7 @@ async fn run_stream_inner(
 							socket.send(&crypto.seal(&header,&data)?).await.map_err(|_|"Stream audio UDP send failed")?;
 							audio_sequence=audio_sequence.wrapping_add(1);audio_timestamp=audio_timestamp.wrapping_add(960);
 						}
+						pending.drain(..consumed);
 					}
 				}
 			},
