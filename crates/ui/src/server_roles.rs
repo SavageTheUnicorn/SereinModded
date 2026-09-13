@@ -1,5 +1,5 @@
 //! One bounded role draft backed by the existing server administration request lane.
-use crate::{avatars::Avatars, design, emoji_picker::Picker, icons};
+use crate::{avatars::Avatars, design, dialog, emoji_picker::Picker, icons};
 use client_core::{Command, State};
 use egui::{Color32, RichText};
 use model::{
@@ -325,9 +325,8 @@ impl RolesUi {
 	) {
 		self.sync(state, guild);
 		ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
-		let colors = design::palette(ui);
 		if let Some(error) = state.server_admin.error.or(self.error) {
-			ui.colored_label(colors.danger, error);
+			design::notice(ui, design::Level::Error, error);
 			if ui
 				.add_enabled(
 					!state.server_admin.pending,
@@ -403,12 +402,11 @@ impl RolesUi {
 			);
 			if state.can_create_guild_role(guild)
 				&& ui
-					.add_enabled(
+					.add_enabled_ui(
 						!state.server_admin.pending && !state.server_admin.needs_refresh,
-						egui::Button::new(RichText::new("Create Role").color(colors.accent_text))
-							.fill(colors.accent)
-							.min_size(egui::vec2(112.0, 36.0)),
+						|ui| design::button(ui, "Create Role", design::ButtonKind::Primary),
 					)
+					.inner
 					.clicked()
 			{
 				self.creating = Self::dispatch(
@@ -685,12 +683,10 @@ impl RolesUi {
 			return;
 		};
 		let colors = design::palette(ui);
-		let label = ui.label(design::medium(ui, "Role name", 17.0));
-		ui.add(
-			egui::TextEdit::singleline(&mut draft.name)
-				.char_limit(100)
-				.desired_width(f32::INFINITY)
-				.margin(egui::vec2(12.0, 10.0)),
+		let label = design::label(ui, "Role name");
+		design::input(
+			ui,
+			egui::TextEdit::singleline(&mut draft.name).char_limit(100),
 		)
 		.labelled_by(label.id);
 		section(ui, "Role Style");
@@ -1013,43 +1009,62 @@ impl RolesUi {
 		guild: Id,
 		commands: &mut Vec<Command>,
 	) {
-		ui.horizontal_wrapped(|ui| {
-			ui.label(if self.submitted {
-				"Saving role..."
-			} else {
-				"You have unsaved changes."
-			});
+		let colors = design::palette(ui);
+		let mut save = false;
+		ui.horizontal(|ui| {
+			ui.spacing_mut().item_spacing.x = 8.0;
 			let ready = !state.server_admin.pending
 				&& !state.server_admin.needs_refresh
 				&& !self.icon_pending;
-			if ui
-				.add_enabled(!state.server_admin.pending, egui::Button::new("Reset"))
-				.clicked()
-			{
-				self.draft.clone_from(&self.baseline);
-				self.icon = Patch::Absent;
-				self.icon_texture = None;
-				self.icon_pending = false;
-				self.icon_requested = false;
-				self.error = None;
-			}
-			if ui
-				.add_enabled(ready, egui::Button::new("Save Changes"))
-				.clicked() && let (Some(before), Some(draft)) = (&self.baseline, &self.draft)
-			{
-				let mut edit = Edit::between(before, draft);
-				if !matches!(self.icon, Patch::Absent) {
-					edit.icon = self.icon.clone();
-				}
-				self.submitted =
-					Self::dispatch(state, guild, Action::Edit { id: draft.id, edit }, commands);
-				if !self.submitted {
-					self.error = Some(
-						"Could not save this role. Check the name, permissions, and your role hierarchy.",
+			ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+				ui.add_enabled_ui(ready, |ui| {
+					save =
+						crate::dialog::action(ui, "Save Changes", crate::dialog::Action::Primary)
+							.clicked();
+				});
+				ui.add_enabled_ui(!state.server_admin.pending, |ui| {
+					if crate::dialog::action(ui, "Reset", crate::dialog::Action::Neutral).clicked()
+					{
+						self.draft.clone_from(&self.baseline);
+						self.icon = Patch::Absent;
+						self.icon_texture = None;
+						self.icon_pending = false;
+						self.icon_requested = false;
+						self.error = None;
+					}
+				});
+				ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+					ui.add(
+						egui::Label::new(
+							design::medium(
+								ui,
+								if self.submitted {
+									"Saving role…"
+								} else {
+									"Careful — you have unsaved changes!"
+								},
+								14.0,
+							)
+							.color(colors.text_strong),
+						)
+						.truncate(),
 					);
-				}
-			}
+				});
+			});
 		});
+		if save && let (Some(before), Some(draft)) = (&self.baseline, &self.draft) {
+			let mut edit = Edit::between(before, draft);
+			if !matches!(self.icon, Patch::Absent) {
+				edit.icon = self.icon.clone();
+			}
+			self.submitted =
+				Self::dispatch(state, guild, Action::Edit { id: draft.id, edit }, commands);
+			if !self.submitted {
+				self.error = Some(
+					"Could not save this role. Check the name, permissions, and your role hierarchy.",
+				);
+			}
+		}
 	}
 	fn members(
 		&mut self,
@@ -1192,28 +1207,23 @@ impl RolesUi {
 		commands: &mut Vec<Command>,
 	) {
 		if let Some(target) = self.switch_to {
-			let modal = egui::Modal::new(egui::Id::unique("discard-role-draft")).show(ctx, |ui| {
-				ui.set_width(340.0);
-				ui.heading("Discard role changes?");
-				ui.label("Your unsaved role changes will be lost.");
-				ui.horizontal(|ui| {
-					if ui.button("Keep Editing").clicked() {
-						self.switch_to = None;
-					}
-					if ui
-						.add_enabled(
-							!state.server_admin.saving,
-							egui::Button::new("Discard Changes"),
-						)
-						.clicked()
-					{
-						self.switch_to = None;
-						self.select(target, guild);
-					}
-				});
-			});
-			if modal.should_close() {
-				self.switch_to = None;
+			match dialog::Confirm::new(
+				"discard-role-draft",
+				"Discard role changes?",
+				"Your unsaved changes to this role will be lost.",
+			)
+			.danger()
+			.confirm_label("Discard Changes")
+			.cancel_label("Keep Editing")
+			.enabled(!state.server_admin.saving)
+			.show(ctx)
+			{
+				Some(dialog::Choice::Confirmed) => {
+					self.switch_to = None;
+					self.select(target, guild);
+				}
+				Some(dialog::Choice::Cancelled) => self.switch_to = None,
+				None => {}
 			}
 		}
 		if let Some(role) = self.delete {
@@ -1223,35 +1233,26 @@ impl RolesUi {
 				.as_ref()
 				.and_then(|catalog| catalog.items.iter().find(|known| known.id == role))
 				.map_or("this role", |role| role.name.as_str());
-			let mut remove = false;
-			let mut close = false;
-			let modal = egui::Modal::new(egui::Id::unique("delete-server-role")).show(ctx, |ui| {
-				ui.set_width(340.0);
-				ui.heading("Delete Role?");
-				ui.label(format!(
-					"Delete {name}? Members will lose the permissions this role grants."
-				));
-				if let Some(error) = state.server_admin.error {
-					ui.colored_label(design::palette(ui).danger, error);
-				}
-				ui.horizontal(|ui| {
-					close = ui
-						.add_enabled(!state.server_admin.saving, egui::Button::new("Cancel"))
-						.clicked();
-					remove = ui
-						.add_enabled(
-							!state.server_admin.pending
-								&& !state.server_admin.needs_refresh
-								&& state.can_delete_guild_role(guild, role),
-							egui::Button::new("Delete Role"),
-						)
-						.clicked();
-				});
-			});
-			if close || (modal.should_close() && !state.server_admin.saving) {
+			let mut confirm = dialog::Confirm::new(
+				"delete-server-role",
+				"Delete role?",
+				format!("Members will lose every permission {name} grants. This cannot be undone."),
+			)
+			.danger()
+			.confirm_label("Delete Role")
+			.enabled(
+				!state.server_admin.pending
+					&& !state.server_admin.needs_refresh
+					&& state.can_delete_guild_role(guild, role),
+			);
+			if let Some(error) = state.server_admin.error {
+				confirm = confirm.note(dialog::Level::Error, error);
+			}
+			let choice = confirm.show(ctx);
+			if choice == Some(dialog::Choice::Cancelled) && !state.server_admin.saving {
 				self.delete = None;
 			}
-			if remove {
+			if choice == Some(dialog::Choice::Confirmed) {
 				self.deleting = Self::dispatch(state, guild, Action::Delete(role), commands);
 			}
 		}
@@ -1345,10 +1346,8 @@ fn colored_name(ui: &mut egui::Ui, text: &str, colors: Colors, size: f32) {
 	ui.add(egui::Label::new(job).truncate());
 }
 fn section(ui: &mut egui::Ui, title: &str) {
-	ui.add_space(24.0);
-	ui.separator();
-	ui.add_space(20.0);
-	ui.label(design::medium(ui, title, 17.0));
+	design::divider(ui);
+	design::section(ui, title, None);
 }
 fn fixed_label(ui: &mut egui::Ui, text: &str, width: f32, strong: bool) {
 	ui.allocate_ui_with_layout(

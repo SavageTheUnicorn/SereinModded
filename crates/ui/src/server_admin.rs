@@ -145,7 +145,6 @@ impl Admin {
 		commands: &mut Vec<Command>,
 	) {
 		ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
-		let colors = design::palette(ui);
 		if self.submitted_upload && !state.server_admin.pending {
 			self.submitted_upload = false;
 			if state.server_admin.error.is_none() {
@@ -192,7 +191,7 @@ impl Admin {
 			}
 		}
 		if let Some(error) = state.server_admin.error.or(self.error) {
-			ui.colored_label(colors.danger, error);
+			design::notice(ui, design::Level::Error, error);
 			if ui
 				.add_enabled(!state.server_admin.pending, egui::Button::new("Reload"))
 				.clicked() && let Some(command) = state.request_server_admin(
@@ -233,12 +232,11 @@ impl Admin {
 		ui.add_space(14.0);
 		if state.can_create_guild_emoji(guild) {
 			if ui
-				.add_enabled(
+				.add_enabled_ui(
 					!self.preparing() && self.uploads.is_empty() && !state.server_admin.pending,
-					egui::Button::new(RichText::new("Upload Emoji").color(colors.accent_text))
-						.fill(colors.accent)
-						.min_size(egui::vec2(132.0, 40.0)),
+					|ui| design::button(ui, "Upload Emoji", design::ButtonKind::Primary),
 				)
+				.inner
 				.clicked()
 			{
 				self.queue_files(Vec::new());
@@ -293,8 +291,9 @@ impl Admin {
 						.iter()
 						.all(|upload| model::server_admin::valid_emoji_name(&upload.name));
 					if !valid {
-						ui.colored_label(
-							colors.danger,
+						design::notice(
+							ui,
+							design::Level::Error,
 							"Emoji names must use 2–32 letters, numbers, or underscores.",
 						);
 					}
@@ -977,87 +976,65 @@ impl Admin {
 		let mut close = false;
 		let mut action = None;
 		let ready = !state.server_admin.pending && !state.server_admin.needs_refresh;
-		let modal =
-			egui::Modal::new(egui::Id::unique("server-admin-confirmation")).show(ctx, |ui| {
-				ui.set_width((ctx.content_rect().width() - 64.0).clamp(220.0, 420.0));
+		let (title, subtitle) = match &*dialog {
+			Dialog::Rename { .. } => (
+				"Rename emoji".to_owned(),
+				"Names use letters, numbers and underscores.".to_owned(),
+			),
+			Dialog::Delete { name, .. } => (
+				"Delete emoji?".to_owned(),
+				format!("Removing :{name}: cannot be undone."),
+			),
+			Dialog::Nickname { .. } => (
+				"Change nickname".to_owned(),
+				"Only affects how this member appears in this server.".to_owned(),
+			),
+			Dialog::Kick { name, .. } => (
+				format!("Kick {name}?"),
+				"They can rejoin using a new invite.".to_owned(),
+			),
+			Dialog::Prune { .. } => (
+				"Prune members".to_owned(),
+				"Removes inactive members who hold no additional roles.".to_owned(),
+			),
+		};
+		let destructive = matches!(
+			&*dialog,
+			Dialog::Delete { .. } | Dialog::Kick { .. } | Dialog::Prune { .. }
+		);
+		let mut builder = crate::dialog::Dialog::new("server-admin-confirmation", title)
+			.subtitle(subtitle)
+			.width(440.0);
+		if destructive {
+			builder = builder.danger();
+		}
+		let response = builder.show(ctx, |d| {
+			d.content(|ui| {
+				ui.spacing_mut().item_spacing.y = 10.0;
 				match dialog {
-					Dialog::Rename { id, name } => {
-						ui.heading("Rename Emoji");
-						ui.add(
+					Dialog::Rename { name, .. } => {
+						let label = crate::dialog::label(ui, "Emoji name");
+						crate::dialog::input(ui, egui::TextEdit::singleline(name).char_limit(32))
+							.labelled_by(label.id);
+					}
+					Dialog::Delete { .. } | Dialog::Kick { .. } => {}
+					Dialog::Nickname { name, .. } => {
+						let label = crate::dialog::label(ui, "Nickname");
+						crate::dialog::input(
+							ui,
 							egui::TextEdit::singleline(name)
-								.char_limit(32)
-								.desired_width(f32::INFINITY),
-						);
-						if ui
-							.add_enabled(
-								ready
-									&& state.can_edit_guild_emoji(guild, *id)
-									&& model::server_admin::valid_emoji_name(name),
-								egui::Button::new("Save"),
-							)
-							.clicked()
-						{
-							action = Some(Action::RenameEmoji {
-								id: *id,
-								name: name.clone(),
-							});
-						}
-					}
-					Dialog::Delete { id, name } => {
-						ui.heading("Delete Emoji?");
-						ui.label(format!("Remove :{name}: from this server?"));
-						if ui
-							.add_enabled(
-								ready && state.can_edit_guild_emoji(guild, *id),
-								egui::Button::new("Delete Emoji"),
-							)
-							.clicked()
-						{
-							action = Some(Action::DeleteEmoji { id: *id });
-						}
-					}
-					Dialog::Nickname { user, name } => {
-						ui.heading("Change Nickname");
-						ui.add(
-							egui::TextEdit::singleline(name)
-								.char_limit(32)
-								.desired_width(f32::INFINITY),
-						);
-						ui.weak("Leave blank to use their username.");
-						if ui
-							.add_enabled(
-								ready
-									&& state.can_edit_guild_nickname(guild, *user)
-									&& !name.chars().any(char::is_control),
-								egui::Button::new("Save"),
-							)
-							.clicked()
-						{
-							action = Some(Action::SetNickname {
-								user: *user,
-								nick: name.clone(),
-							});
-						}
-					}
-					Dialog::Kick { user, name } => {
-						ui.heading(format!("Kick {name}?"));
-						ui.label("They can rejoin using a new invite.");
-						if ui
-							.add_enabled(
-								ready && state.can_kick_guild_member(guild, *user),
-								egui::Button::new("Kick Member"),
-							)
-							.clicked()
-						{
-							action = Some(Action::Kick { user: *user });
-						}
+								.hint_text("Use their username")
+								.char_limit(32),
+						)
+						.labelled_by(label.id);
+						crate::dialog::hint(ui, "Leave blank to use their username.");
 					}
 					Dialog::Prune { days, counted } => {
-						ui.heading("Prune Members");
-						ui.label("Remove inactive members without additional roles.");
+						crate::dialog::label(ui, "Inactive for");
 						let before = *days;
 						egui::ComboBox::from_id_salt("prune-days")
-							.selected_text(format!("Inactive for {days} days"))
+							.selected_text(format!("{days} days"))
+							.width(ui.available_width())
 							.show_ui(ui, |ui| {
 								for value in [7, 30] {
 									ui.selectable_value(days, value, format!("{value} days"));
@@ -1066,58 +1043,120 @@ impl Admin {
 						if before != *days {
 							*counted = None;
 						}
-						if ui
-							.add_enabled(
-								ready && state.can_prune_guild(guild),
-								egui::Button::new("Preview Prune"),
-							)
-							.clicked()
-						{
-							*counted = Some(*days);
-							action = Some(Action::Prune {
-								days: *days,
-								execute: false,
-							});
-						}
 						if *counted == Some(*days)
 							&& !state.server_admin.pending
 							&& state.server_admin.error.is_none()
 							&& let Some(count) = state.server_admin.pruned
 						{
-							ui.label(format!("{count} members would be removed."));
-							if ui
-								.add_enabled(
-									count > 0 && state.can_prune_guild(guild),
-									egui::Button::new("Prune Members"),
-								)
-								.clicked()
-							{
-								action = Some(Action::Prune {
-									days: *days,
-									execute: true,
-								});
-								*counted = None;
-							}
+							crate::dialog::notice(
+								ui,
+								crate::dialog::Level::Warning,
+								&format!("{count} members would be removed."),
+							);
 						}
 					}
 				}
 				if let Some(error) = state.server_admin.error {
-					ui.colored_label(design::palette(ui).danger, error);
-				}
-				if ui
-					.add_enabled(!state.server_admin.saving, egui::Button::new("Cancel"))
-					.clicked()
-				{
-					close = true;
+					crate::dialog::notice(ui, crate::dialog::Level::Error, error);
 				}
 			});
+			d.footer(|ui| {
+				let kind = if destructive {
+					crate::dialog::Action::Danger
+				} else {
+					crate::dialog::Action::Primary
+				};
+				match dialog {
+					Dialog::Rename { id, name } => {
+						ui.add_enabled_ui(
+							ready
+								&& state.can_edit_guild_emoji(guild, *id)
+								&& model::server_admin::valid_emoji_name(name),
+							|ui| {
+								if crate::dialog::action(ui, "Save", kind).clicked() {
+									action = Some(Action::RenameEmoji {
+										id: *id,
+										name: name.clone(),
+									});
+								}
+							},
+						);
+					}
+					Dialog::Delete { id, .. } => {
+						ui.add_enabled_ui(ready && state.can_edit_guild_emoji(guild, *id), |ui| {
+							if crate::dialog::action(ui, "Delete Emoji", kind).clicked() {
+								action = Some(Action::DeleteEmoji { id: *id });
+							}
+						});
+					}
+					Dialog::Nickname { user, name } => {
+						ui.add_enabled_ui(
+							ready
+								&& state.can_edit_guild_nickname(guild, *user)
+								&& !name.chars().any(char::is_control),
+							|ui| {
+								if crate::dialog::action(ui, "Save", kind).clicked() {
+									action = Some(Action::SetNickname {
+										user: *user,
+										nick: name.clone(),
+									});
+								}
+							},
+						);
+					}
+					Dialog::Kick { user, .. } => {
+						ui.add_enabled_ui(
+							ready && state.can_kick_guild_member(guild, *user),
+							|ui| {
+								if crate::dialog::action(ui, "Kick Member", kind).clicked() {
+									action = Some(Action::Kick { user: *user });
+								}
+							},
+						);
+					}
+					Dialog::Prune { days, counted } => {
+						let previewed = *counted == Some(*days)
+							&& !state.server_admin.pending
+							&& state.server_admin.error.is_none();
+						let count = state.server_admin.pruned.unwrap_or(0);
+						ui.add_enabled_ui(
+							previewed && count > 0 && state.can_prune_guild(guild),
+							|ui| {
+								if crate::dialog::action(ui, "Prune Members", kind).clicked() {
+									action = Some(Action::Prune {
+										days: *days,
+										execute: true,
+									});
+									*counted = None;
+								}
+							},
+						);
+						ui.add_enabled_ui(ready && state.can_prune_guild(guild), |ui| {
+							if crate::dialog::action(ui, "Preview", crate::dialog::Action::Outline)
+								.clicked()
+							{
+								*counted = Some(*days);
+								action = Some(Action::Prune {
+									days: *days,
+									execute: false,
+								});
+							}
+						});
+					}
+				}
+				ui.add_enabled_ui(!state.server_admin.saving, |ui| {
+					close |= crate::dialog::action(ui, "Cancel", crate::dialog::Action::Neutral)
+						.clicked();
+				});
+			});
+		});
 		if let Some(action) = action
 			&& let Some(command) = state.request_server_admin(guild, action)
 		{
 			commands.push(command);
 			self.dialog_submitted = true;
 		}
-		if close || (modal.should_close() && !state.server_admin.saving) {
+		if close || (response.close && !state.server_admin.saving) {
 			self.dialog = None;
 		}
 	}

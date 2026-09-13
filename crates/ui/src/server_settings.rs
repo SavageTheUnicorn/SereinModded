@@ -1,7 +1,7 @@
 //! One permission-checked, session-only server settings draft.
-use crate::{MessagingUi, avatars::Avatars, design, settings::close_control};
+use crate::{MessagingUi, avatars::Avatars, design, dialog, settings::close_control};
 use client_core::{Command, State};
-use egui::{Color32, RichText};
+use egui::Color32;
 use model::{
 	Id, Patch,
 	server_settings::{Edit, Settings, Trait},
@@ -427,10 +427,13 @@ impl Editor {
 		let mut close = false;
 		let invite_overlay = self.invites.overlay_open() || self.integrations.overlay_open();
 		let modal = egui::Modal::new(egui::Id::unique("server-settings"))
-			.backdrop_color(colors.chat.to_opaque())
+			.backdrop_color(dialog::backdrop(ctx))
 			.frame(
 				egui::Frame::new()
 					.fill(colors.chat.to_opaque())
+					.stroke(egui::Stroke::new(1.0, colors.border))
+					.corner_radius(dialog::RADIUS)
+					.shadow(ctx.style_of(ctx.theme()).visuals.window_shadow)
 					.inner_margin(0),
 			)
 			.show(ctx, |ui| {
@@ -445,8 +448,14 @@ impl Editor {
 						.show_separator_line(false)
 						.frame(
 							egui::Frame::new()
-								.fill(colors.chat.to_opaque())
-								.inner_margin(egui::Margin::symmetric(12, 40)),
+								.fill(colors.sidebar.to_opaque())
+								.corner_radius(egui::CornerRadius {
+									nw: dialog::RADIUS,
+									sw: dialog::RADIUS,
+									ne: 0,
+									se: 0,
+								})
+								.inner_margin(egui::Margin::symmetric(12, 28)),
 						)
 						.show(ui, |ui| {
 							if self.page == Page::Roles && self.roles.editing() {
@@ -496,19 +505,7 @@ impl Editor {
 										colors.muted,
 									));
 								}
-								if ui
-									.add_sized(
-										[ui.available_width(), 32.0],
-										egui::Button::new(design::medium(ui, page.label(), 14.0))
-											.selected(self.page == page)
-											.right_text("")
-											.fill(if self.page == page {
-												colors.selected
-											} else {
-												Color32::TRANSPARENT
-											})
-											.corner_radius(4),
-									)
+								if crate::settings::nav_item(ui, page.label(), self.page == page)
 									.clicked()
 								{
 									self.page = page;
@@ -558,87 +555,29 @@ impl Editor {
 						}
 						if self.dirty() || state.server_settings.saving {
 							egui::Panel::bottom("server-settings-save")
-								.frame(
-									egui::Frame::new()
-										.fill(colors.raised)
-										.corner_radius(8)
-										.inner_margin(12),
-								)
+								.frame(save_bar_frame(ctx, colors))
 								.show(ui, |ui| self.save_bar(ui, state, commands));
 						}
 						if self.page == Page::Roles && self.roles.has_changes() {
 							egui::Panel::bottom("role-settings-save")
-								.frame(
-									egui::Frame::new()
-										.fill(colors.raised)
-										.corner_radius(8)
-										.inner_margin(12),
-								)
+								.frame(save_bar_frame(ctx, colors))
 								.show(ui, |ui| self.roles.save_bar(ui, state, guild, commands));
 						}
-						egui::ScrollArea::vertical()
-							.id_salt(("server-settings-content", self.page as u8))
-							.auto_shrink([false, false])
-							.show(ui, |ui| {
-								ui.set_width(ui.available_width());
-								if self.page == Page::AuditLog {
-									self.audit_log.show(ui, state, guild, avatars, commands);
-									return;
-								}
-								if self.page == Page::Integrations {
-									self.integrations.show(ui, state, guild, avatars, commands);
-									return;
-								}
-								if self.page == Page::Invites {
-									self.invites.show(ui, state, guild, avatars, commands);
-									return;
-								}
-								if self.page == Page::Roles {
-									self.roles.show(ui, state, guild, avatars, commands);
-									return;
-								}
-								if matches!(self.page, Page::Emoji | Page::Members) {
-									self.admin.show(
-										ui,
-										state,
-										guild,
-										self.page == Page::Members,
-										avatars,
-										commands,
-									);
-									return;
-								}
-								if let Some(error) = state.server_settings.error {
-									ui.colored_label(colors.danger, error);
-									if !state.server_settings.pending
-										&& ui.button("Reload server settings").clicked()
-										&& let Some(command) = state.load_server_settings(guild)
-									{
-										commands.push(command);
-									}
-								}
-								if self.draft.is_none() {
-									if state.server_settings.pending {
-										ui.spinner();
-										ui.label("Loading server settings...");
-									} else if !state.gateway_connected && !state.demo {
-										ui.weak("Reconnect to load server settings.");
-									} else if ui.button("Load server settings").clicked()
-										&& let Some(command) = state.load_server_settings(guild)
-									{
-										commands.push(command);
-									}
-									return;
-								}
-								ui.add_enabled_ui(!state.server_settings.pending, |ui| {
-									if self.page == Page::Profile {
-										self.profile(ui, state, avatars);
-									} else if let Some(draft) = &mut self.draft {
-										engagement(ui, state, draft);
-									}
+						// Pages that virtualize their own list own the only vertical scrollbar;
+						// wrapping them again would nest two scroll areas over one list.
+						if self.scrolling_page() {
+							ui.set_width(ui.available_width());
+							self.page_body(ui, state, guild, avatars, commands);
+						} else {
+							egui::ScrollArea::vertical()
+								.id_salt(("server-settings-content", self.page as u8))
+								.auto_shrink([false, false])
+								.show(ui, |ui| {
+									ui.set_width(ui.available_width());
+									self.page_body(ui, state, guild, avatars, commands);
+									ui.add_space(24.0);
 								});
-								ui.add_space(24.0);
-							});
+						}
 					});
 			});
 		if self.page == Page::Invites {
@@ -668,77 +607,193 @@ impl Editor {
 			}
 		}
 		if self.discard {
-			let confirmation =
-				egui::Modal::new(egui::Id::unique("discard-server-settings")).show(ctx, |ui| {
-					ui.set_max_width(380.0);
-					ui.heading("Discard unsaved changes?");
-					ui.label(
-						if state.server_settings.saving
-							|| state.server_admin.saving
-							|| self.invites.busy()
-						{
-							"Wait for the current save to finish before closing."
-						} else {
-							"Your changes to this server will be lost."
-						},
-					);
-					ui.horizontal(|ui| {
-						if ui.button("Keep Editing").clicked() {
-							self.discard = false;
-						}
-						if ui
-							.add_enabled(
-								!state.server_settings.saving
-									&& !state.server_admin.saving
-									&& !self.invites.busy(),
-								egui::Button::new("Discard Changes"),
-							)
-							.clicked()
-						{
-							*self = Self::default();
-							state.close_server_settings();
-							state.close_server_admin();
-						}
-					});
-				});
-			if confirmation.should_close() {
-				self.discard = false;
+			let busy =
+				state.server_settings.saving || state.server_admin.saving || self.invites.busy();
+			let mut confirmation = dialog::Confirm::new(
+				"discard-server-settings",
+				"Discard unsaved changes?",
+				"Your changes to this server will be lost.",
+			)
+			.danger()
+			.confirm_label("Discard Changes")
+			.cancel_label("Keep Editing")
+			.enabled(!busy);
+			if busy {
+				confirmation = confirmation.note(
+					dialog::Level::Info,
+					"Wait for the current save to finish before closing.",
+				);
+			}
+			match confirmation.show(ctx) {
+				Some(dialog::Choice::Confirmed) => {
+					*self = Self::default();
+					state.close_server_settings();
+					state.close_server_admin();
+				}
+				Some(dialog::Choice::Cancelled) => self.discard = false,
+				None => {}
 			}
 		}
 	}
 
-	fn save_bar(&mut self, ui: &mut egui::Ui, state: &mut State, commands: &mut Vec<Command>) {
-		let colors = design::palette(ui);
-		ui.horizontal_wrapped(|ui| {
-			ui.label(if state.server_settings.saving { "Saving changes..." } else { "You have unsaved changes." });
-			let available = !state.server_settings.pending && !self.icon_pending;
-			if ui.add_enabled(available, egui::Button::new("Reset").frame(false)).clicked() { self.reset(); }
-			if ui.add_enabled(available && !state.server_settings.needs_refresh && (state.demo || state.gateway_connected), egui::Button::new(RichText::new("Save Changes").color(colors.accent_text)).fill(colors.accent)).clicked()
-				&& let (Some(baseline), Some(draft)) = (&self.baseline, &self.draft) {
-				let mut edit = Edit::between(baseline, draft);
-				if let Some(traits) = &mut edit.traits { traits.retain(|entry| !entry.label.is_empty()); }
-				edit.icon = self.icon.clone();
-				if !edit.valid() {
-					self.form_error = Some("Use a server name of 2–100 characters, a description of up to 300 characters, and valid traits without control characters.");
-					return;
-				}
-				if let Some(command) = state.save_server_settings(edit) {
-					commands.push(command);
-					self.submitted = true;
-					self.form_error = None;
-				} else {
-					self.form_error = Some("Could not save these changes. Check the selected channels, reconnect, or reload the server settings and try again.");
-				}
+	/// Pages whose own virtualized list scrolls; they must not sit inside a second scroll area.
+	fn scrolling_page(&self) -> bool {
+		match self.page {
+			Page::AuditLog | Page::Invites => true,
+			Page::Integrations => self.integrations.scrolls_itself(),
+			_ => false,
+		}
+	}
+
+	/// One page of settings content, with no scroll chrome of its own.
+	fn page_body(
+		&mut self,
+		ui: &mut egui::Ui,
+		state: &mut State,
+		guild: Id,
+		avatars: &mut Avatars,
+		commands: &mut Vec<Command>,
+	) {
+		match self.page {
+			Page::AuditLog => {
+				self.audit_log.show(ui, state, guild, avatars, commands);
+				return;
+			}
+			Page::Integrations => {
+				self.integrations.show(ui, state, guild, avatars, commands);
+				return;
+			}
+			Page::Invites => {
+				self.invites.show(ui, state, guild, avatars, commands);
+				return;
+			}
+			Page::Roles => {
+				self.roles.show(ui, state, guild, avatars, commands);
+				return;
+			}
+			Page::Emoji | Page::Members => {
+				self.admin.show(
+					ui,
+					state,
+					guild,
+					self.page == Page::Members,
+					avatars,
+					commands,
+				);
+				return;
+			}
+			Page::Profile | Page::Engagement => {}
+		}
+		if let Some(error) = state.server_settings.error {
+			dialog::notice(ui, dialog::Level::Error, error);
+			if !state.server_settings.pending
+				&& ui.button("Reload server settings").clicked()
+				&& let Some(command) = state.load_server_settings(guild)
+			{
+				commands.push(command);
+			}
+		}
+		if self.draft.is_none() {
+			if state.server_settings.pending {
+				ui.horizontal(|ui| {
+					ui.spinner();
+					ui.label("Loading server settings…");
+				});
+			} else if !state.gateway_connected && !state.demo {
+				ui.weak("Reconnect to load server settings.");
+			} else if ui.button("Load server settings").clicked()
+				&& let Some(command) = state.load_server_settings(guild)
+			{
+				commands.push(command);
+			}
+			return;
+		}
+		ui.add_enabled_ui(!state.server_settings.pending, |ui| {
+			if self.page == Page::Profile {
+				self.profile(ui, state, avatars);
+			} else if let Some(draft) = &mut self.draft {
+				engagement(ui, state, draft);
 			}
 		});
+	}
+
+	fn save_bar(&mut self, ui: &mut egui::Ui, state: &mut State, commands: &mut Vec<Command>) {
+		let colors = design::palette(ui);
+		let mut save = false;
+		ui.horizontal(|ui| {
+			ui.spacing_mut().item_spacing.x = 8.0;
+			let available = !state.server_settings.pending && !self.icon_pending;
+			ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+				ui.add_enabled_ui(
+					available
+						&& !state.server_settings.needs_refresh
+						&& (state.demo || state.gateway_connected),
+					|ui| {
+						save =
+							dialog::action(ui, "Save Changes", dialog::Action::Primary).clicked();
+					},
+				);
+				ui.add_enabled_ui(available, |ui| {
+					if dialog::action(ui, "Reset", dialog::Action::Neutral).clicked() {
+						self.reset();
+					}
+				});
+				ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+					ui.add(
+						egui::Label::new(
+							design::medium(
+								ui,
+								if state.server_settings.saving {
+									"Saving changes…"
+								} else {
+									"Careful — you have unsaved changes!"
+								},
+								14.0,
+							)
+							.color(colors.text_strong),
+						)
+						.truncate(),
+					);
+				});
+			});
+		});
+		if save && let (Some(baseline), Some(draft)) = (&self.baseline, &self.draft) {
+			let mut edit = Edit::between(baseline, draft);
+			if let Some(traits) = &mut edit.traits {
+				traits.retain(|entry| !entry.label.is_empty());
+			}
+			edit.icon = self.icon.clone();
+			if !edit.valid() {
+				self.form_error = Some(
+					"Use a server name of 2–100 characters, a description of up to 300 characters, and valid traits without control characters.",
+				);
+				return;
+			}
+			if let Some(command) = state.save_server_settings(edit) {
+				commands.push(command);
+				self.submitted = true;
+				self.form_error = None;
+			} else {
+				self.form_error = Some(
+					"Could not save these changes. Check the selected channels, reconnect, or reload the server settings and try again.",
+				);
+			}
+		}
 		if state.server_settings.needs_refresh {
-			ui.weak("Reload the server settings before saving again. Your edits will be kept.");
+			ui.add_space(8.0);
+			dialog::notice(
+				ui,
+				dialog::Level::Warning,
+				"Reload the server settings before saving again. Your edits will be kept.",
+			);
 		}
 		if !state.demo && !state.gateway_connected {
-			ui.weak("Reconnect to save changes.");
+			ui.add_space(8.0);
+			dialog::notice(ui, dialog::Level::Warning, "Reconnect to save changes.");
 		}
 		if let Some(error) = self.form_error {
-			ui.colored_label(colors.danger, error);
+			ui.add_space(8.0);
+			dialog::notice(ui, dialog::Level::Error, error);
 		}
 	}
 
@@ -778,38 +833,29 @@ impl Editor {
 		ui.label(design::semibold(ui, "Server Profile", 20.0).color(colors.text_strong));
 		ui.label("Customize how your server appears in invite links and, if enabled, in Server Discovery and Announcement Channel messages.");
 		ui.add_space(24.0);
-		let name_label = ui.label(design::medium(ui, "Name", 15.0));
-		ui.add_sized(
-			[ui.available_width(), 40.0],
-			egui::TextEdit::singleline(&mut draft.name)
-				.char_limit(100)
-				.frame(
-					egui::Frame::new()
-						.stroke(egui::Stroke::new(1.0, colors.border))
-						.corner_radius(6)
-						.inner_margin(egui::Margin::symmetric(12, 10)),
-				)
-				.margin(egui::vec2(12.0, 10.0)),
+		let name_label = design::label(ui, "Name");
+		design::input(
+			ui,
+			egui::TextEdit::singleline(&mut draft.name).char_limit(100),
 		)
 		.labelled_by(name_label.id);
-		divider(ui);
-		label(ui, "Icon");
+		design::divider(ui);
+		design::label(ui, "Icon");
 		ui.weak("We recommend an image of at least 512×512.");
 		ui.horizontal_wrapped(|ui| {
 			if ui
-				.add_enabled(
-					!self.icon_pending,
-					egui::Button::new(
-						RichText::new(if self.icon_pending {
-							"Preparing icon..."
+				.add_enabled_ui(!self.icon_pending, |ui| {
+					design::button(
+						ui,
+						if self.icon_pending {
+							"Preparing icon…"
 						} else {
 							"Change Server Icon"
-						})
-						.color(colors.accent_text),
+						},
+						design::ButtonKind::Primary,
 					)
-					.fill(colors.accent)
-					.min_size(egui::vec2(0.0, 36.0)),
-				)
+				})
+				.inner
 				.clicked()
 			{
 				self.icon_requested = true;
@@ -817,11 +863,11 @@ impl Editor {
 				self.icon_error = None;
 			}
 			if ui
-				.add_enabled(
+				.add_enabled_ui(
 					draft.icon.is_some() || matches!(self.icon, Patch::Value(_)),
-					egui::Button::new(RichText::new("Remove Icon").color(colors.danger))
-						.min_size(egui::vec2(0.0, 36.0)),
+					|ui| design::button(ui, "Remove Icon", design::ButtonKind::Outline),
 				)
+				.inner
 				.clicked()
 			{
 				self.icon = Patch::Null;
@@ -831,10 +877,10 @@ impl Editor {
 			}
 		});
 		if let Some(error) = self.icon_error {
-			ui.colored_label(colors.danger, error);
+			design::notice(ui, design::Level::Error, error);
 		}
-		divider(ui);
-		label(ui, "Banner");
+		design::divider(ui);
+		design::label(ui, "Banner");
 		let swatches = [
 			0x2153dc, 0xf916a0, 0xed171a, 0xef7912, 0xf1cd29, 0x763a94, 0x04adf1, 0x46dcca,
 			0x496b00, 0x282828,
@@ -870,8 +916,8 @@ impl Editor {
 				}
 			});
 		}
-		divider(ui);
-		label(ui, "Traits");
+		design::divider(ui);
+		design::label(ui, "Traits");
 		ui.weak("Add up to 5 traits to show off your server's interests and personality.");
 		let columns = if ui.available_width() >= 480.0 {
 			3
@@ -935,17 +981,12 @@ impl Editor {
 			}
 		}
 		draft.traits = traits;
-		divider(ui);
-		let description_label = ui.label(design::medium(ui, "Description", 15.0));
+		design::divider(ui);
+		let description_label = design::label(ui, "Description");
 		ui.weak("How did your server get started? Why should people join?");
-		ui.add(
+		design::input(
+			ui,
 			egui::TextEdit::multiline(&mut draft.description)
-				.frame(
-					egui::Frame::new()
-						.stroke(egui::Stroke::new(1.0, colors.border))
-						.corner_radius(6)
-						.inner_margin(10),
-				)
 				.hint_text("Tell the world a bit about this server.")
 				.char_limit(300)
 				.desired_width(f32::INFINITY)
@@ -1034,14 +1075,6 @@ impl Editor {
 	}
 }
 
-fn label(ui: &mut egui::Ui, text: &str) {
-	ui.label(design::medium(ui, text, 15.0));
-}
-fn divider(ui: &mut egui::Ui) {
-	ui.add_space(24.0);
-	ui.separator();
-	ui.add_space(24.0);
-}
 fn gradient(ui: &mut egui::Ui, rect: egui::Rect, color: u32, radius: u8) {
 	let top = Color32::from_rgb((color >> 16) as u8, (color >> 8) as u8, color as u8);
 	let bottom = top.lerp_to_gamma(Color32::WHITE, 0.38);
@@ -1104,10 +1137,10 @@ fn engagement(ui: &mut egui::Ui, state: &State, draft: &mut Settings) {
 		}
 	}
 	ui.add_space(12.0);
-	label(ui, "System Messages Channel");
+	design::label(ui, "System Messages Channel");
 	ui.weak("This is the channel we send system event messages to.");
 	channel_picker(ui, state, draft.guild, &mut draft.system_channel_id, false);
-	divider(ui);
+	design::divider(ui);
 	ui.label(design::semibold(ui, "Activity Feed Settings", 21.0));
 	ui.label("Shows a feed of activity from games and connected apps in this server.");
 	let mut enabled = draft.activity_feed.unwrap_or(false);
@@ -1124,8 +1157,8 @@ fn engagement(ui: &mut egui::Ui, state: &State, draft: &mut Settings) {
 	if draft.activity_feed.is_none() {
 		ui.weak("Server default");
 	}
-	divider(ui);
-	label(ui, "Default Notification Settings");
+	design::divider(ui);
+	design::label(ui, "Default Notification Settings");
 	ui.weak("This will determine whether members who have not explicitly set their notification settings receive a notification for every message sent in this server or not.");
 	ui.radio_value(&mut draft.default_message_notifications, 0, "All Messages");
 	ui.radio_value(
@@ -1134,10 +1167,10 @@ fn engagement(ui: &mut egui::Ui, state: &State, draft: &mut Settings) {
 		"Only @mentions",
 	);
 	ui.weak("We highly recommend setting this to only @mentions for a Community Server.");
-	divider(ui);
+	design::divider(ui);
 	if ui.available_width() >= 500.0 {
 		ui.columns(2, |columns| {
-			label(&mut columns[0], "Inactive Channel");
+			design::label(&mut columns[0], "Inactive Channel");
 			channel_picker(
 				&mut columns[0],
 				state,
@@ -1145,15 +1178,15 @@ fn engagement(ui: &mut egui::Ui, state: &State, draft: &mut Settings) {
 				&mut draft.afk_channel_id,
 				true,
 			);
-			label(&mut columns[1], "Inactive Timeout");
+			design::label(&mut columns[1], "Inactive Timeout");
 			columns[1].add_enabled_ui(draft.afk_channel_id.is_some(), |ui| {
 				timeout_picker(ui, &mut draft.afk_timeout)
 			});
 		});
 	} else {
-		label(ui, "Inactive Channel");
+		design::label(ui, "Inactive Channel");
 		channel_picker(ui, state, draft.guild, &mut draft.afk_channel_id, true);
-		label(ui, "Inactive Timeout");
+		design::label(ui, "Inactive Timeout");
 		ui.add_enabled_ui(draft.afk_channel_id.is_some(), |ui| {
 			timeout_picker(ui, &mut draft.afk_timeout)
 		});
@@ -1219,6 +1252,22 @@ fn timeout_picker(ui: &mut egui::Ui, timeout: &mut u32) {
 				ui.selectable_value(timeout, seconds, format!("{} minutes", seconds / 60));
 			}
 		});
+}
+
+/// Floating "unsaved changes" strip Discord pins over the settings content.
+fn save_bar_frame(ctx: &egui::Context, colors: design::Palette) -> egui::Frame {
+	egui::Frame::new()
+		.fill(colors.base.to_opaque())
+		.stroke(egui::Stroke::new(1.0, colors.border))
+		.corner_radius(10)
+		.shadow(ctx.style_of(ctx.theme()).visuals.window_shadow)
+		.inner_margin(egui::Margin::symmetric(14, 12))
+		.outer_margin(egui::Margin {
+			left: 0,
+			right: 0,
+			top: 8,
+			bottom: 8,
+		})
 }
 
 #[cfg(test)]

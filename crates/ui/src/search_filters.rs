@@ -1,4 +1,4 @@
-use crate::{avatars::Avatars, design, icons};
+use crate::{avatars::Avatars, design, dialog, icons};
 use client_core::State;
 use egui::RichText;
 use model::User;
@@ -212,10 +212,7 @@ fn replace(query: &mut String, key: &str, value: &str, multi: bool) {
 }
 
 fn heading(ui: &mut egui::Ui, name: &str, help: &str) {
-	let colors = design::palette(ui);
-	ui.label(design::medium(ui, name, 16.0).color(colors.text_strong));
-	ui.label(RichText::new(help).size(13.0).color(colors.muted));
-	ui.add_space(6.0);
+	design::section(ui, name, Some(help));
 }
 
 fn caption(query: &str, key: &str, users: &[&User], placeholder: &str) -> String {
@@ -344,145 +341,131 @@ impl Draft {
 	pub fn show(&mut self, ctx: &egui::Context, state: &State, avatars: &mut Avatars) -> Action {
 		let colors = design::palette_for(ctx);
 		let width = 560.0_f32.min((ctx.content_rect().width() - 32.0).max(240.0));
-		let height = (ctx.content_rect().height() - 210.0).clamp(120.0, 650.0);
 		let users = users(state);
 		let mut action = Action::None;
-		let modal = egui::Modal::new(egui::Id::unique("message-search-filter-dialog"))
-			.frame(
-				egui::Frame::new()
-					.fill(colors.base)
-					.stroke(egui::Stroke::new(1.0, colors.border))
-					.corner_radius(12)
-					.inner_margin(0),
-			)
-			.show(ctx, |ui| {
-				ui.set_width(width);
-				egui::Frame::new().inner_margin(24).show(ui, |ui| {
-					ui.horizontal(|ui| {
-						ui.label(design::semibold(ui, "Filters", 22.0).color(colors.text_strong));
-						ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-							if icons::button(ui, icons::Icon::Close, 28.0, "Close filters")
+		let response = dialog::Dialog::new("message-search-filter-dialog", "Filters")
+			.subtitle("Narrow this search down to the messages you want.")
+			.width(width)
+			.show(ctx, |d| {
+				d.scroll(230.0, |ui| {
+					egui::Frame::new().inner_margin(0).show(ui, |ui| {
+						ui.set_width(ui.available_width());
+						ui.spacing_mut().item_spacing.y = 4.0;
+						ui.spacing_mut().interact_size.y = 40.0;
+						ui.visuals_mut().widgets.inactive.bg_fill = colors.base;
+						ui.visuals_mut().widgets.inactive.weak_bg_fill = colors.base;
+						ui.visuals_mut().widgets.inactive.bg_stroke =
+							egui::Stroke::new(1.0, colors.border);
+						heading(ui, "From", "Sent by any of the selected users");
+						user_picker(
+							ui,
+							&mut self.query,
+							"from",
+							&mut self.from_search,
+							&users,
+							avatars,
+							state.demo,
+						);
+						ui.add_space(22.0);
+						heading(ui, "Has", "Includes any of the selected types of data");
+						choices(
+							ui,
+							&mut self.query,
+							"has",
+							"Any content",
+							&[
+								("link", "Link"),
+								("embed", "Embed"),
+								("file", "File"),
+								("image", "Image"),
+								("video", "Video"),
+								("sound", "Sound"),
+							],
+							true,
+						);
+						ui.add_space(22.0);
+						heading(ui, "Mentions", "Mentions any of the selected users");
+						user_picker(
+							ui,
+							&mut self.query,
+							"mentions",
+							&mut self.mentions_search,
+							&users,
+							avatars,
+							state.demo,
+						);
+						ui.add_space(22.0);
+						heading(ui, "Date", "When the message was sent");
+						if !self.date_open {
+							if ui
+								.add_sized(
+									[ui.available_width(), 42.0],
+									egui::Button::new("+  Add date"),
+								)
 								.clicked()
 							{
-								action = Action::Cancel;
+								self.date_open = true;
 							}
-						});
+						} else {
+							for (label, date) in
+								[("After", &mut self.after), ("Before", &mut self.before)]
+							{
+								ui.label(label);
+								ui.add(
+									egui::TextEdit::singleline(date)
+										.hint_text("YYYY-MM-DD")
+										.char_limit(10)
+										.desired_width(f32::INFINITY),
+								);
+							}
+							if ui.button("Remove dates").clicked() {
+								self.after.clear();
+								self.before.clear();
+								self.date_open = false;
+							}
+						}
+						ui.add_space(22.0);
+						heading(
+							ui,
+							"Author Type",
+							"Sent by any of the selected types of author",
+						);
+						choices(
+							ui,
+							&mut self.query,
+							"author_type",
+							"Choose author type",
+							&[("user", "User"), ("bot", "Bot"), ("webhook", "Webhook")],
+							true,
+						);
+						ui.add_space(22.0);
+						heading(ui, "Pinned", "If the message is pinned or not");
+						choices(
+							ui,
+							&mut self.query,
+							"pinned",
+							"Any",
+							&[("true", "True"), ("false", "False")],
+							false,
+						);
+						if let Some(error) = self.error {
+							dialog::notice(ui, dialog::Level::Error, error);
+						}
 					});
 				});
-				ui.separator();
-				egui::ScrollArea::vertical()
-					.id_salt("filter-dialog-body")
-					.max_height(height)
-					.auto_shrink([false, true])
-					.show(ui, |ui| {
-						egui::Frame::new().inner_margin(24).show(ui, |ui| {
-							ui.set_width((width - 48.0).max(1.0));
-							ui.spacing_mut().item_spacing.y = 4.0;
-							ui.spacing_mut().interact_size.y = 40.0;
-							ui.visuals_mut().widgets.inactive.bg_fill = colors.base;
-							ui.visuals_mut().widgets.inactive.weak_bg_fill = colors.base;
-							ui.visuals_mut().widgets.inactive.bg_stroke =
-								egui::Stroke::new(1.0, colors.border);
-							heading(ui, "From", "Sent by any of the selected users");
-							user_picker(
-								ui,
-								&mut self.query,
-								"from",
-								&mut self.from_search,
-								&users,
-								avatars,
-								state.demo,
-							);
-							ui.add_space(22.0);
-							heading(ui, "Has", "Includes any of the selected types of data");
-							choices(
-								ui,
-								&mut self.query,
-								"has",
-								"Any content",
-								&[
-									("link", "Link"),
-									("embed", "Embed"),
-									("file", "File"),
-									("image", "Image"),
-									("video", "Video"),
-									("sound", "Sound"),
-								],
-								true,
-							);
-							ui.add_space(22.0);
-							heading(ui, "Mentions", "Mentions any of the selected users");
-							user_picker(
-								ui,
-								&mut self.query,
-								"mentions",
-								&mut self.mentions_search,
-								&users,
-								avatars,
-								state.demo,
-							);
-							ui.add_space(22.0);
-							heading(ui, "Date", "When the message was sent");
-							if !self.date_open {
-								if ui
-									.add_sized(
-										[ui.available_width(), 42.0],
-										egui::Button::new("+  Add date"),
-									)
-									.clicked()
-								{
-									self.date_open = true;
-								}
-							} else {
-								for (label, date) in
-									[("After", &mut self.after), ("Before", &mut self.before)]
-								{
-									ui.label(label);
-									ui.add(
-										egui::TextEdit::singleline(date)
-											.hint_text("YYYY-MM-DD")
-											.char_limit(10)
-											.desired_width(f32::INFINITY),
-									);
-								}
-								if ui.button("Remove dates").clicked() {
-									self.after.clear();
-									self.before.clear();
-									self.date_open = false;
-								}
+				d.footer(|ui| {
+					ui.add_enabled_ui(state.can_search(), |ui| {
+						if dialog::action(ui, "Apply Filters", dialog::Action::Primary).clicked() {
+							match self.applied() {
+								Ok(query) => action = Action::Apply(query),
+								Err(error) => self.error = Some(error),
 							}
-							ui.add_space(22.0);
-							heading(
-								ui,
-								"Author Type",
-								"Sent by any of the selected types of author",
-							);
-							choices(
-								ui,
-								&mut self.query,
-								"author_type",
-								"Choose author type",
-								&[("user", "User"), ("bot", "Bot"), ("webhook", "Webhook")],
-								true,
-							);
-							ui.add_space(22.0);
-							heading(ui, "Pinned", "If the message is pinned or not");
-							choices(
-								ui,
-								&mut self.query,
-								"pinned",
-								"Any",
-								&[("true", "True"), ("false", "False")],
-								false,
-							);
-							if let Some(error) = self.error {
-								ui.colored_label(colors.danger, error);
-							}
-						});
+						}
 					});
-				ui.separator();
-				egui::Frame::new().inner_margin(24).show(ui, |ui| {
-					ui.horizontal(|ui| {
+					if dialog::action(ui, "Cancel", dialog::Action::Neutral).clicked() {
+						action = Action::Cancel;
+					}
+					ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
 						if ui
 							.add(
 								egui::Button::new(
@@ -500,34 +483,10 @@ impl Draft {
 							self.date_open = false;
 							self.error = None;
 						}
-						ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-							if ui
-								.add_enabled(
-									state.can_search(),
-									egui::Button::new(
-										RichText::new("Apply Filters").color(egui::Color32::WHITE),
-									)
-									.fill(colors.accent)
-									.min_size(egui::vec2(122.0, 40.0)),
-								)
-								.clicked()
-							{
-								match self.applied() {
-									Ok(query) => action = Action::Apply(query),
-									Err(error) => self.error = Some(error),
-								}
-							}
-							if ui
-								.add_sized([92.0, 40.0], egui::Button::new("Cancel"))
-								.clicked()
-							{
-								action = Action::Cancel;
-							}
-						});
 					});
 				});
 			});
-		if modal.should_close() {
+		if response.close {
 			Action::Cancel
 		} else {
 			action

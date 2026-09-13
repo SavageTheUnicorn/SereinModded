@@ -43,61 +43,31 @@ impl InviteDialog {
 		{
 			commands.push(command);
 		}
-		let colors = design::palette_for(ctx);
-		let narrow = ctx.content_rect().width() < 420.0;
-		let margin = if narrow { 16 } else { 30 };
 		let mut close = false;
-		let modal = egui::Modal::new(egui::Id::unique("server-invite-dialog"))
-			.frame(
-				egui::Frame::new()
-					.fill(colors.chat)
-					.stroke(egui::Stroke::new(1.0, colors.border))
-					.corner_radius(14)
-					.inner_margin(margin),
-			)
-			.show(ctx, |ui| {
-				ui.set_width(
-					(ctx.content_rect().width() - f32::from(margin) * 2.0 - 32.0)
-						.clamp(180.0, 540.0),
-				);
-				let title = if self.settings.is_some() {
-					"Server invite link settings".to_owned()
+		let settings_open = self.settings.is_some();
+		let title = if settings_open {
+			"Invite Link Settings".to_owned()
+		} else {
+			format!("Invite friends to {name}")
+		};
+		let response = crate::dialog::Dialog::new("server-invite-dialog", title)
+			.subtitle(if settings_open {
+				"Control how long this link lasts and how many people can use it."
+			} else {
+				"Share a link so friends can join this server."
+			})
+			.width(540.0)
+			.show(ctx, |d| {
+				if settings_open {
+					d.scroll(220.0, |ui| {
+						self.settings(ui, state, guild, *channel, commands)
+					});
 				} else {
-					format!("Invite friends to {name}")
-				};
-				ui.horizontal_top(|ui| {
-					let width = (ui.available_width() - 36.0).max(1.0);
-					ui.allocate_ui_with_layout(
-						egui::vec2(width, 28.0),
-						egui::Layout::top_down(egui::Align::Min),
-						|ui| {
-							ui.set_width(width);
-							ui.add(
-								egui::Label::new(
-									design::semibold(ui, title, 23.0).color(colors.text_strong),
-								)
-								.wrap(),
-							);
-						},
-					);
-					if icons::button(ui, icons::Icon::Close, 28.0, "Close dialog").clicked() {
-						close = true;
-					}
-				});
-				if self.settings.is_some() {
-					let height = (ctx.content_rect().height()
-						- f32::from(margin) * 2.0
-						- 40.0 - (ui.cursor().top() - ui.min_rect().top()))
-					.max(80.0);
-					egui::ScrollArea::vertical()
-						.id_salt("invite-settings-scroll")
-						.max_height(height)
-						.show(ui, |ui| self.settings(ui, state, guild, *channel, commands));
-				} else {
-					self.picker(ui, state, guild, channel, avatars, commands);
+					d.content(|ui| self.picker(ui, state, guild, channel, avatars, commands));
 				}
 			});
-		(close || modal.should_close()) && self.settings.take().is_none()
+		close |= response.close;
+		close && self.settings.take().is_none()
 	}
 	fn picker(
 		&mut self,
@@ -366,11 +336,12 @@ impl InviteDialog {
 		if let Some(status) = state.server_action_status(guild)
 			&& state.created_invite(guild).is_none()
 		{
-			ui.colored_label(colors.warning, status);
+			design::notice(ui, design::Level::Warning, status);
 		}
 		if channel.is_none() {
-			ui.colored_label(
-				colors.warning,
+			design::notice(
+				ui,
+				design::Level::Warning,
 				"You need Create Invite permission in a channel to create an invite.",
 			);
 		}
@@ -521,24 +492,11 @@ fn select(ui: &mut egui::Ui, id: &str, label: &str, content: impl FnOnce(&mut eg
 			.show_ui(ui, content);
 	});
 }
-fn primary(ui: &mut egui::Ui, label: &str, size: egui::Vec2) -> egui::Response {
-	let colors = design::palette(ui);
-	ui.add_sized(
-		size,
-		egui::Button::new(design::semibold(ui, label, 15.0).color(colors.accent_text))
-			.fill(colors.accent)
-			.corner_radius(6),
-	)
+fn primary(ui: &mut egui::Ui, label: &str, _size: egui::Vec2) -> egui::Response {
+	design::button(ui, label, design::ButtonKind::Primary)
 }
-fn secondary(ui: &mut egui::Ui, label: &str, size: egui::Vec2) -> egui::Response {
-	let colors = design::palette(ui);
-	ui.add_sized(
-		size,
-		egui::Button::new(design::medium(ui, label, 16.0))
-			.fill(colors.raised)
-			.stroke(egui::Stroke::new(1.0, colors.border))
-			.corner_radius(10),
-	)
+fn secondary(ui: &mut egui::Ui, label: &str, _size: egui::Vec2) -> egui::Response {
+	design::button(ui, label, design::ButtonKind::Outline)
 }
 
 #[cfg(test)]

@@ -110,99 +110,34 @@ impl ScreenUi {
 		if !self.open {
 			return;
 		}
-		let colors = crate::design::palette_for(ctx);
-		let narrow = ctx.content_rect().width() < 460.0;
-		let margin = if narrow { 16 } else { 20 };
 		let mut cancel = false;
 		let mut share = false;
-		let modal = egui::Modal::new(egui::Id::unique("screen-share-settings"))
-			.frame(
-				egui::Frame::new()
-					.fill(colors.chat)
-					.stroke(egui::Stroke::new(1.0, colors.border))
-					.corner_radius(14)
-					.inner_margin(margin),
-			)
-			.show(ctx, |ui| {
-				ui.set_width(
-					(ctx.content_rect().width() - f32::from(margin) * 2.0 - 32.0)
-						.clamp(180.0, 460.0),
-				);
-				ui.horizontal_top(|ui| {
-					let width = (ui.available_width() - 32.0).max(1.0);
-					ui.allocate_ui_with_layout(
-						egui::vec2(width, 28.0),
-						egui::Layout::top_down(egui::Align::Min),
-						|ui| {
-							ui.set_width(width);
-							ui.spacing_mut().item_spacing.y = 4.0;
-							ui.add(
-								egui::Label::new(
-									crate::design::semibold(ui, "Share your screen", 20.0)
-										.color(colors.text_strong),
-								)
-								.wrap(),
-							);
-							ui.add(
-								egui::Label::new(
-									egui::RichText::new("Choose what people in this call can see.")
-										.size(13.0)
-										.color(colors.muted),
-								)
-								.wrap(),
-							);
-						},
-					);
-					cancel =
-						crate::icons::button(ui, crate::icons::Icon::Close, 28.0, "Close dialog")
-							.clicked();
-				});
-				ui.add_space(16.0);
-				egui::ScrollArea::vertical()
-					.id_salt("screen-share-body")
-					.max_height((ctx.content_rect().height() - 260.0).clamp(140.0, 420.0))
-					.show(ui, |ui| self.body(ui, state));
-				ui.add_space(16.0);
-				ui.horizontal(|ui| {
-					if ui
-						.add(
-							egui::Button::new(
-								crate::design::medium(ui, "Cancel", 15.0).color(colors.text_strong),
-							)
-							.fill(colors.raised)
-							.stroke(egui::Stroke::new(1.0, colors.border))
-							.corner_radius(8)
-							.min_size(egui::vec2(100.0, 44.0)),
+		let response = crate::dialog::Dialog::new("screen-share-settings", "Share your screen")
+			.subtitle("Choose what people in this call can see.")
+			.width(460.0)
+			.show(ctx, |d| {
+				d.scroll(260.0, |ui| self.body(ui, state));
+				d.footer(|ui| {
+					let allowed = !state.demo
+						&& self.supported && !self.busy
+						&& self.settings().is_some()
+						&& state.voice.active.as_ref().is_some_and(|call| {
+							matches!(call.phase, Phase::Connected | Phase::Waiting)
+								&& state.can_stream(call.channel)
+						});
+					ui.add_enabled_ui(allowed, |ui| {
+						share = crate::dialog::action(
+							ui,
+							"Share Screen",
+							crate::dialog::Action::Primary,
 						)
-						.clicked()
-					{
-						cancel = true;
-					}
-					ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-						let allowed = !state.demo
-							&& self.supported && !self.busy
-							&& self.settings().is_some()
-							&& state.voice.active.as_ref().is_some_and(|call| {
-								matches!(call.phase, Phase::Connected | Phase::Waiting)
-									&& state.can_stream(call.channel)
-							});
-						share = ui
-							.add_enabled(
-								allowed,
-								egui::Button::new(
-									crate::design::medium(ui, "Share screen", 15.0)
-										.color(colors.accent_text),
-								)
-								.fill(colors.accent)
-								.stroke(egui::Stroke::NONE)
-								.corner_radius(8)
-								.min_size(egui::vec2(140.0, 44.0)),
-							)
-							.clicked();
+						.clicked();
 					});
+					cancel |= crate::dialog::action(ui, "Cancel", crate::dialog::Action::Neutral)
+						.clicked();
 				});
 			});
-		cancel |= modal.should_close();
+		cancel |= response.close;
 		if share && !cancel {
 			self.request = self.settings().map(Request::Start);
 		}

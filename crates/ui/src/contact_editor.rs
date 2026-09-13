@@ -45,90 +45,100 @@ impl ContactEditor {
 			self.loaded = true;
 		}
 		let mut close = false;
-		let response = egui::Modal::new(egui::Id::unique("contact-editor")).show(ctx, |ui| {
-			let colors = crate::design::palette(ui);
-			ui.set_width((ctx.content_rect().width() - 56.0).clamp(160.0, 400.0));
-			ui.heading(if self.nickname {
+		let limit = if self.nickname { 32 } else { 256 };
+		let ready = if self.nickname {
+			state.friends().any(|friend| friend.id == user.id)
+		} else {
+			state.user_note(user.id).is_some()
+		};
+		let response = crate::dialog::Dialog::new(
+			"contact-editor",
+			if self.nickname {
 				"Friend Nickname"
 			} else {
 				"Note"
-			});
-			ui.label(crate::design::semibold(ui, &user.name, 16.0));
-			ui.colored_label(
-				colors.muted,
-				if self.nickname {
-					"Only you can see this nickname. It does not change their server name."
-				} else {
-					"Only you can see this note. Saved to your Discord account."
-				},
-			);
-			ui.add_space(12.0);
-			if !self.loaded {
-				ui.label(if busy {
-					"Loading note…"
-				} else {
-					"Could not load the note. Your existing note has not been changed."
-				});
-				if ui.add_enabled(!busy, egui::Button::new("Retry")).clicked()
-					&& let Some(command) = state.load_user_note(user.id)
-				{
-					commands.push(command);
-				}
-			} else {
-				let label = ui.label(if self.nickname { "Nickname" } else { "Note" });
-				let limit = if self.nickname { 32 } else { 256 };
-				ui.add_enabled_ui(!busy, |ui| {
-					let edit = if self.nickname {
-						egui::TextEdit::singleline(&mut self.draft).align(egui::Align2::LEFT_CENTER)
+			},
+		)
+		.subtitle(if self.nickname {
+			"Only you can see this nickname. It does not change their server name."
+		} else {
+			"Only you can see this note. It is saved to your Discord account."
+		})
+		.width(420.0)
+		.show(ctx, |d| {
+			d.content(|ui| {
+				ui.spacing_mut().item_spacing.y = 10.0;
+				let colors = crate::design::palette(ui);
+				ui.label(crate::design::semibold(ui, &user.name, 15.0).color(colors.text_strong));
+				if !self.loaded {
+					if busy {
+						ui.horizontal(|ui| {
+							ui.spinner();
+							ui.label("Loading note…");
+						});
 					} else {
-						egui::TextEdit::multiline(&mut self.draft).desired_rows(5)
-					};
-					ui.add_sized(
-						[
-							ui.available_width(),
-							if self.nickname { 44.0 } else { 124.0 },
-						],
-						edit.char_limit(limit).hint_text(if self.nickname {
-							"Enter a nickname"
-						} else {
-							"Add something to remember…"
-						}),
-					)
-					.labelled_by(label.id);
-				});
-				ui.colored_label(
-					colors.muted,
-					format!(
-						"{} / {limit} · Leave empty to remove",
-						self.draft.chars().count()
-					),
-				);
-			}
-			if let Some(status) = state.user_action_status() {
-				ui.label(status);
-			}
-			let ready = if self.nickname {
-				state.friends().any(|friend| friend.id == user.id)
-			} else {
-				state.user_note(user.id).is_some()
-			};
-			if self.loaded && !ready {
-				ui.label(if self.nickname {
-					"This user is no longer a confirmed friend."
+						crate::dialog::notice(
+							ui,
+							crate::dialog::Level::Error,
+							"Could not load the note. Your existing note has not been changed.",
+						);
+						if ui.button("Retry").clicked()
+							&& let Some(command) = state.load_user_note(user.id)
+						{
+							commands.push(command);
+						}
+					}
 				} else {
-					"Connection refreshed. Reload the saved note before saving; your draft is kept."
-				});
-				if !self.nickname
-					&& ui
-						.add_enabled(!busy, egui::Button::new("Reload saved note"))
-						.clicked() && let Some(command) = state.load_user_note(user.id)
-				{
-					commands.push(command);
+					let label =
+						crate::dialog::label(ui, if self.nickname { "Nickname" } else { "Note" });
+					ui.add_enabled_ui(!busy, |ui| {
+						let edit = if self.nickname {
+							egui::TextEdit::singleline(&mut self.draft)
+								.align(egui::Align2::LEFT_CENTER)
+						} else {
+							egui::TextEdit::multiline(&mut self.draft).desired_rows(5)
+						};
+						crate::dialog::input(
+							ui,
+							edit.char_limit(limit).hint_text(if self.nickname {
+								"Enter a nickname"
+							} else {
+								"Add something to remember…"
+							}),
+						)
+						.labelled_by(label.id);
+					});
+					crate::dialog::hint(
+						ui,
+						&format!(
+							"{} / {limit} · Leave empty to remove",
+							self.draft.chars().count()
+						),
+					);
 				}
-			}
-			ui.add_space(16.0);
-			ui.horizontal(|ui| {
-				close = ui.add_enabled(!busy, egui::Button::new("Cancel")).clicked();
+				if let Some(status) = state.user_action_status() {
+					crate::dialog::notice(ui, crate::dialog::Level::Error, status);
+				}
+				if self.loaded && !ready {
+					crate::dialog::notice(
+						ui,
+						crate::dialog::Level::Warning,
+						if self.nickname {
+							"This user is no longer a confirmed friend."
+						} else {
+							"Connection refreshed. Reload the saved note before saving; your draft is kept."
+						},
+					);
+					if !self.nickname
+						&& ui
+							.add_enabled(!busy, egui::Button::new("Reload saved note"))
+							.clicked() && let Some(command) = state.load_user_note(user.id)
+					{
+						commands.push(command);
+					}
+				}
+			});
+			d.footer(|ui| {
 				let valid =
 					client_core::user_actions::valid_personal_text(&self.draft, self.nickname);
 				let saved = if self.nickname {
@@ -136,29 +146,34 @@ impl ContactEditor {
 				} else {
 					state.user_note(user.id).unwrap_or("")
 				};
-				if ui
-					.add_enabled(
-						self.loaded && ready && valid && !busy && saved != self.draft,
-						egui::Button::new(
-							egui::RichText::new(if busy { "Saving…" } else { "Save" })
-								.color(colors.accent_text),
+				ui.add_enabled_ui(
+					self.loaded && ready && valid && !busy && saved != self.draft,
+					|ui| {
+						if crate::dialog::action(
+							ui,
+							if busy { "Saving…" } else { "Save" },
+							crate::dialog::Action::Primary,
 						)
-						.fill(colors.accent),
-					)
-					.clicked()
-				{
-					let command = if self.nickname {
-						state.set_friend_nickname(user.id, self.draft.clone())
-					} else {
-						state.set_user_note(user.id, self.draft.clone())
-					};
-					if let Some(command) = command {
-						commands.push(command);
-					}
-				}
+						.clicked()
+						{
+							let command = if self.nickname {
+								state.set_friend_nickname(user.id, self.draft.clone())
+							} else {
+								state.set_user_note(user.id, self.draft.clone())
+							};
+							if let Some(command) = command {
+								commands.push(command);
+							}
+						}
+					},
+				);
+				ui.add_enabled_ui(!busy, |ui| {
+					close |= crate::dialog::action(ui, "Cancel", crate::dialog::Action::Neutral)
+						.clicked();
+				});
 			});
 		});
-		if close || (!state.user_action_pending() && response.should_close()) {
+		if close || (!state.user_action_pending() && response.close) {
 			*self = Self::default();
 		}
 	}

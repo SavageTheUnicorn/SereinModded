@@ -154,17 +154,35 @@ pub(super) fn confirm_external_link(
 	}
 	let mut confirm = false;
 	let mut cancel = false;
-	let modal = egui::Modal::new(egui::Id::unique("confirm-external-link")).show(ctx, |ui| {
-		ui.set_width((ctx.content_rect().width() - 48.0).clamp(180.0, 440.0));
-		ui.heading("Open external link?");
-		ui.label("Open this destination in your default browser:");
-		ui.add(egui::Label::new(&target).wrap().selectable(true));
-		ui.horizontal_wrapped(|ui| {
-			confirm = ui.button("Open in browser").clicked();
-			cancel = ui.button("Cancel").clicked();
+	let response = crate::dialog::Dialog::new("confirm-external-link", "Open external link?")
+		.subtitle("This destination opens in your default browser.")
+		.width(460.0)
+		.show(ctx, |d| {
+			d.content(|ui| {
+				let colors = crate::design::palette(ui);
+				egui::Frame::new()
+					.fill(colors.base)
+					.stroke(egui::Stroke::new(1.0, colors.border))
+					.corner_radius(8)
+					.inner_margin(egui::Margin::symmetric(12, 10))
+					.show(ui, |ui| {
+						ui.set_width(ui.available_width());
+						ui.add(
+							egui::Label::new(egui::RichText::new(&target).monospace().size(13.0))
+								.wrap()
+								.selectable(true),
+						);
+					});
+			});
+			d.footer(|ui| {
+				confirm =
+					crate::dialog::action(ui, "Open in Browser", crate::dialog::Action::Primary)
+						.clicked();
+				cancel =
+					crate::dialog::action(ui, "Cancel", crate::dialog::Action::Neutral).clicked();
+			});
 		});
-	});
-	cancel |= modal.should_close();
+	cancel |= response.close;
 	if confirm && !cancel {
 		// Revalidate the exact normalized destination shown above before emitting an OS action.
 		if let Some(url) = external_url(&target) {
@@ -1042,7 +1060,7 @@ mod tests {
 				_ => None,
 			}
 		}
-		for action in ["Cancel", "Escape", "Open in browser"] {
+		for action in ["Cancel", "Escape", "Open in Browser"] {
 			let ctx = egui::Context::default();
 			let normalized = "https://example.com/b%20c";
 			let mut opening = Some("HTTPS://EXAMPLE.COM:443/a/../b c".into());
@@ -1117,7 +1135,7 @@ mod tests {
 				.collect();
 			assert_eq!(
 				opened,
-				if action == "Open in browser" {
+				if action == "Open in Browser" {
 					vec![normalized]
 				} else {
 					vec![]

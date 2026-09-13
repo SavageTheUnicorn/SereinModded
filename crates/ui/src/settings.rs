@@ -163,7 +163,8 @@ impl MessagingUi {
 			.frame(
 				egui::Frame::new()
 					.fill(colors.chat.to_opaque())
-					.corner_radius(12)
+					.corner_radius(crate::dialog::RADIUS)
+					.shadow(ctx.style_of(ctx.theme()).visuals.window_shadow)
 					.stroke(egui::Stroke::new(1.0, colors.border)),
 			)
 			.show(ctx, |ui| {
@@ -177,8 +178,8 @@ impl MessagingUi {
 							egui::Frame::new()
 								.fill(colors.sidebar.to_opaque())
 								.corner_radius(egui::CornerRadius {
-									nw: 12,
-									sw: 12,
+									nw: crate::dialog::RADIUS,
+									sw: crate::dialog::RADIUS,
 									ne: 0,
 									se: 0,
 								})
@@ -963,10 +964,10 @@ fn account_row(ui: &mut egui::Ui, label: &str, value: &str) {
 }
 
 /// Sidebar entry in the settings modal; the selected page uses the strong surface and text.
-fn nav_item(ui: &mut egui::Ui, label: &str, selected: bool) -> egui::Response {
+pub(super) fn nav_item(ui: &mut egui::Ui, label: &str, selected: bool) -> egui::Response {
 	let colors = design::palette(ui);
 	let (rect, response) =
-		ui.allocate_exact_size(egui::vec2(ui.available_width(), 32.0), egui::Sense::click());
+		ui.allocate_exact_size(egui::vec2(ui.available_width(), 34.0), egui::Sense::click());
 	response.widget_info(|| {
 		egui::WidgetInfo::selected(
 			egui::WidgetType::SelectableLabel,
@@ -977,12 +978,29 @@ fn nav_item(ui: &mut egui::Ui, label: &str, selected: bool) -> egui::Response {
 	});
 	let hot = response.hovered() || response.has_focus();
 	if selected {
-		ui.painter().rect_filled(rect, 4, colors.selected);
+		ui.painter().rect_filled(rect, 8, colors.selected);
+		// Discord marks the open page with an accent rail at the left edge.
+		ui.painter().rect_filled(
+			egui::Rect::from_min_size(
+				egui::pos2(rect.left(), rect.center().y - 8.0),
+				egui::vec2(3.0, 16.0),
+			),
+			2,
+			colors.accent,
+		);
 	} else if hot {
-		ui.painter().rect_filled(rect, 4, colors.hover);
+		ui.painter().rect_filled(rect, 8, colors.hover);
+	}
+	if response.has_focus() {
+		ui.painter().rect_stroke(
+			rect.shrink(1.0),
+			8,
+			egui::Stroke::new(1.0, colors.accent),
+			egui::StrokeKind::Inside,
+		);
 	}
 	ui.painter().text(
-		egui::pos2(rect.left() + 10.0, rect.center().y),
+		egui::pos2(rect.left() + 12.0, rect.center().y),
 		egui::Align2::LEFT_CENTER,
 		label,
 		egui::FontId::new(15.0, design::medium_family(ui.ctx())),

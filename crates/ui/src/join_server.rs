@@ -1,5 +1,5 @@
 //! Explicit, session-bound invite lookup followed by a user-confirmed join.
-use crate::{design, icons, invites::input_code};
+use crate::{design, dialog, invites::input_code};
 use client_core::{Command, State};
 
 fn invite_input(ui: &mut egui::Ui, text: &mut String, focus: bool) -> egui::Response {
@@ -58,61 +58,14 @@ impl JoinDialog {
 			*self = Self::default();
 			return;
 		}
-		let colors = design::palette_for(ctx);
-		let narrow = ctx.content_rect().width() < 460.0;
-		let margin = if narrow { 16 } else { 24 };
 		let mut close = false;
-		let modal = egui::Modal::new(egui::Id::unique("join-server-dialog"))
-			.frame(
-				egui::Frame::new()
-					.fill(colors.chat)
-					.stroke(egui::Stroke::new(1.0, colors.border))
-					.corner_radius(16)
-					.inner_margin(margin),
-			)
-			.show(ctx, |ui| {
-				ui.set_width(
-					(ctx.content_rect().width() - f32::from(margin) * 2.0 - 32.0)
-						.clamp(180.0, 460.0),
-				);
-				ui.horizontal_top(|ui| {
-					let width = (ui.available_width() - 32.0).max(1.0);
-					ui.allocate_ui_with_layout(
-						egui::vec2(width, 28.0),
-						egui::Layout::top_down(egui::Align::Min),
-						|ui| {
-							ui.set_width(width);
-							ui.spacing_mut().item_spacing.y = 4.0;
-							ui.add(
-								egui::Label::new(
-									design::semibold(ui, "Join a Server", 22.0)
-										.color(colors.text_strong),
-								)
-								.wrap(),
-							);
-							ui.add(
-								egui::Label::new(
-									egui::RichText::new(
-										"Enter an invite below to join an existing server.",
-									)
-									.size(14.0)
-									.color(colors.muted),
-								)
-								.wrap(),
-							);
-						},
-					);
-					close = icons::button(ui, icons::Icon::Close, 28.0, "Close dialog").clicked();
-				});
-				ui.add_space(18.0);
-				let body_height = (ctx.content_rect().height() - 260.0).clamp(120.0, 460.0);
-				let (ready, member, loading, accepted, parsed) = egui::ScrollArea::vertical()
-					.id_salt("join-server-body")
-					.max_height(body_height)
-					.show(ui, |ui| self.body(ui, state, avatars))
-					.inner;
-				ui.add_space(18.0);
-				ui.scope(|ui| {
+		let response = dialog::Dialog::new("join-server-dialog", "Join a Server")
+			.subtitle("Enter an invite below to join an existing server.")
+			.width(460.0)
+			.show(ctx, |d| {
+				let (ready, member, loading, accepted, parsed) =
+					d.scroll(260.0, |ui| self.body(ui, state, avatars));
+				d.footer(|ui| {
 					let busy = loading || state.invite_join.pending;
 					let enabled = !state.demo && !busy && !member && !accepted;
 					let text = if busy {
@@ -122,26 +75,15 @@ impl JoinDialog {
 					} else {
 						"Check Invite"
 					};
-					ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-						let clicked = ui
-							.add_enabled(
-								enabled,
-								egui::Button::new(
-									design::medium(ui, text, 15.0).color(colors.accent_text),
-								)
-								.fill(colors.accent)
-								.stroke(egui::Stroke::NONE)
-								.corner_radius(8)
-								.min_size(egui::vec2(140.0, 44.0)),
-							)
-							.clicked();
-						if clicked {
-							self.submit(state, parsed, ready, commands);
+					ui.add_enabled_ui(enabled, |ui| {
+						if dialog::action(ui, text, dialog::Action::Primary).clicked() {
+							self.submit(state, parsed.clone(), ready, commands);
 						}
 					});
+					close |= dialog::action(ui, "Cancel", dialog::Action::Neutral).clicked();
 				});
 			});
-		if close || modal.should_close() {
+		if close || response.close {
 			*self = Self::default();
 		}
 	}

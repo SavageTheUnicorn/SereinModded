@@ -1,5 +1,5 @@
 //! Server actions start from explicit menu choices, with one session-scoped dialog.
-use crate::{avatars::Avatars, design, icons, server_invite::InviteDialog};
+use crate::{avatars::Avatars, design, dialog, icons, server_invite::InviteDialog};
 use client_core::{Command, State};
 use model::Id;
 
@@ -204,90 +204,58 @@ impl ServerMenu {
 			}
 			return;
 		}
+		let pending = state.server_action_pending();
+		let reason = state.leave_server_reason(guild);
+		let mut leave = false;
 		let mut close = false;
-		let colors = design::palette_for(ctx);
-		let modal = egui::Modal::new(egui::Id::unique("server-action-dialog"))
-			.frame(
-				egui::Frame::new()
-					.fill(colors.chat)
-					.stroke(egui::Stroke::new(1.0, colors.border))
-					.corner_radius(12)
-					.inner_margin(24),
-			)
-			.show(ctx, |ui| {
-				ui.set_width((ctx.content_rect().width() - 80.0).clamp(180.0, 536.0));
-				let pending = state.server_action_pending();
-				ui.horizontal(|ui| {
-					let heading = match dialog {
-						Dialog::Invite { .. } => format!("Invite friends to {name}"),
-						Dialog::Leave(_) => "Leave server?".to_owned(),
-					};
-					let heading_width = ui.available_width() - 36.0;
-					ui.allocate_ui_with_layout(
-						egui::vec2(heading_width, 28.0),
-						egui::Layout::top_down(egui::Align::Min),
-						|ui| {
-							ui.set_width(heading_width);
-							ui.add(
-								egui::Label::new(
-									design::semibold(ui, heading, 20.0).color(colors.text_strong),
-								)
-								.wrap(),
-							);
-						},
+		let response = dialog::Dialog::new("server-action-dialog", "Leave server?")
+			.danger()
+			.width(440.0)
+			.show(ctx, |d| {
+				d.content(|ui| {
+					let colors = design::palette(ui);
+					ui.spacing_mut().item_spacing.y = 10.0;
+					ui.add(
+						egui::Label::new(
+							egui::RichText::new(format!(
+								"Are you sure you want to leave {name}? You will not be able to rejoin this server unless you are re-invited."
+							))
+							.size(14.0)
+							.color(colors.text),
+						)
+						.wrap(),
 					);
-					close = icons::button(ui, icons::Icon::Close, 28.0, "Close dialog").clicked();
-				});
-				ui.add_space(8.0);
-				match &mut dialog {
-					Dialog::Invite { .. } => unreachable!(),
-					Dialog::Leave(_) => {
-						ui.label(format!(
-							"Leave {name}? You will need another invite to rejoin."
-						));
-						ui.add_space(12.0);
-						let reason = state.leave_server_reason(guild);
-						if let Some(reason) = reason {
-							ui.colored_label(colors.warning, reason);
-						}
-						if ui
-							.add_enabled(
-								!pending && reason.is_none(),
-								egui::Button::new(
-									egui::RichText::new(if pending {
-										"Leaving…"
-									} else {
-										"Leave server"
-									})
-									.color(colors.danger),
-								),
-							)
-							.clicked() && let Some(command) = state.leave_server(guild)
-						{
-							commands.push(command);
-						}
+					if let Some(reason) = reason {
+						dialog::notice(ui, dialog::Level::Warning, reason);
 					}
-				}
-				if let Some(status) = state.server_action_status(guild) {
-					ui.colored_label(colors.warning, status);
-				}
-				ui.add_space(8.0);
-				if matches!(dialog, Dialog::Leave(_))
-					&& ui
-						.button(if pending { "Close" } else { "Cancel" })
-						.clicked()
-				{
-					close = true;
-				}
-				if state.demo {
-					ui.label(
-						egui::RichText::new("Offline preview · no server changes")
-							.small()
-							.color(colors.muted),
-					);
-				}
+					if let Some(status) = state.server_action_status(guild) {
+						dialog::notice(ui, dialog::Level::Error, status);
+					}
+					if state.demo {
+						dialog::hint(ui, "Offline preview · no server changes");
+					}
+				});
+				d.footer(|ui| {
+					ui.add_enabled_ui(!pending && reason.is_none(), |ui| {
+						leave = dialog::action(
+							ui,
+							if pending { "Leaving…" } else { "Leave Server" },
+							dialog::Action::Danger,
+						)
+						.clicked();
+					});
+					close |= dialog::action(
+						ui,
+						if pending { "Close" } else { "Cancel" },
+						dialog::Action::Neutral,
+					)
+					.clicked();
+				});
 			});
-		self.dialog = if close || modal.should_close() {
+		if leave && let Some(command) = state.leave_server(guild) {
+			commands.push(command);
+		}
+		self.dialog = if close || response.close {
 			None
 		} else {
 			Some(dialog)
@@ -533,13 +501,7 @@ mod tests {
 					let position = text
 						.iter()
 						.rev()
-						.find(|(t, _)| {
-							t == if action == "Create invite" {
-								"Create link"
-							} else {
-								action
-							}
-						})
+						.find(|(t, _)| t == "Leave Server")
 						.unwrap()
 						.1
 						.center();

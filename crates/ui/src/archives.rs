@@ -19,62 +19,141 @@ impl ArchivesUi {
 		let allowed = state.can_archive(parent, view.kind);
 		let parent_channel = state.channels.iter().find(|c| c.id == parent);
 		let private = parent_channel.is_some_and(|c| c.kind == 0);
-		let mut open = true;
 		let mut close = false;
 		let mut request = None;
 		let mut target = None;
-		egui::Window::new("Archived threads")
-            .open(&mut open).collapsible(false).default_width(420.0)
-            .max_height((ctx.content_rect().height() * 0.75).max(180.0))
-            .show(ctx, |ui| {
-                ui.add(egui::Label::new(parent_channel.map_or("Unavailable channel", |c| c.name.as_str())).truncate());
-                ui.weak("One page of up to 25 archived threads. Opening loads messages; it does not join or reopen a thread.");
-                ui.horizontal_wrapped(|ui| {
-                    for (kind, name) in [(Kind::Public, "Public"), (Kind::JoinedPrivate, "Joined private"), (Kind::Private, "Private")] {
-                        if (kind == Kind::Public || private)
-                            && ui.add_enabled(allowed && !view.loading, egui::Button::selectable(view.kind == kind, name)).clicked()
-                            && kind != view.kind
-                        { request = Some((kind, None)); }
-                    }
-                });
-                if view.kind == Kind::Private { ui.weak("Private archives require permission from the service."); }
-                ui.horizontal_wrapped(|ui| {
-                    let reload = ui.add_enabled(allowed, egui::Button::new("Reload"));
-                    if self.focus { reload.request_focus(); self.focus = false; }
-                    if reload.clicked() { request = Some((view.kind, None)); }
-                    if view.error.is_some() {
-                        if ui.add_enabled(allowed && !view.loading, egui::Button::new("Retry")).clicked() {
-                            request = Some((view.kind, view.before));
-                        }
-                    } else if let Some(before) = view.page.as_ref().and_then(|page| page.next)
-                        && ui.add_enabled(allowed && !view.loading, egui::Button::new("Older")).clicked()
-                    { request = Some((view.kind, Some(before))); }
-                    if ui.button("Close").clicked() { close = true; }
-                });
-                if !allowed { ui.weak("Archives are unavailable while disconnected or without channel access."); }
-                if view.loading { ui.weak("Loading archived threads..."); }
-                if let Some(error) = view.error { ui.label(error); }
-                if let Some(page) = &view.page {
-                    ui.weak(format!("{} threads · {} page", page.threads.len(), if view.before.is_some() { "older" } else { "newest" }));
-                    if page.threads.is_empty() { ui.label("No archived threads returned."); }
-                    if page.next.is_none() && !view.loading { ui.weak("No older threads reported by the service."); }
-                    egui::ScrollArea::vertical().id_salt(("archive-page", view.request))
-                        .show_rows(ui, 42.0, page.threads.len(), |ui, range| {
-                            for thread in &page.threads[range] {
-                                ui.push_id(thread.id, |ui| {
-                                    ui.set_height(42.0);
-                                    ui.horizontal(|ui| {
-                                        if ui.add_enabled(allowed && !view.loading, egui::Button::new("Open thread")).clicked() {
-                                            target = Some(thread.id);
-                                        }
-                                        ui.add(egui::Label::new(&thread.name).truncate());
-                                    });
-                                });
-                            }
-                        });
-                }
-            });
-		if !open || close {
+		let response = crate::dialog::Dialog::new("archived-threads", "Archived Threads")
+			.subtitle(
+				"One page of up to 25 archived threads. Opening loads messages; it does not join or reopen a thread.",
+			)
+			.width(460.0)
+			.show(ctx, |d| {
+				d.content(|ui| {
+					let colors = crate::design::palette(ui);
+					ui.add(
+						egui::Label::new(
+							crate::design::semibold(
+								ui,
+								parent_channel.map_or("Unavailable channel", |c| c.name.as_str()),
+								15.0,
+							)
+							.color(colors.text_strong),
+						)
+						.truncate(),
+					);
+					ui.add_space(10.0);
+					ui.horizontal_wrapped(|ui| {
+						for (kind, name) in [
+							(Kind::Public, "Public"),
+							(Kind::JoinedPrivate, "Joined private"),
+							(Kind::Private, "Private"),
+						] {
+							if (kind == Kind::Public || private)
+								&& ui
+									.add_enabled(
+										allowed && !view.loading,
+										egui::Button::selectable(view.kind == kind, name),
+									)
+									.clicked() && kind != view.kind
+							{
+								request = Some((kind, None));
+							}
+						}
+						let reload = ui.add_enabled(allowed, egui::Button::new("Reload"));
+						if self.focus {
+							reload.request_focus();
+							self.focus = false;
+						}
+						if reload.clicked() {
+							request = Some((view.kind, None));
+						}
+						if view.error.is_some() {
+							if ui
+								.add_enabled(allowed && !view.loading, egui::Button::new("Retry"))
+								.clicked()
+							{
+								request = Some((view.kind, view.before));
+							}
+						} else if let Some(before) = view.page.as_ref().and_then(|page| page.next)
+							&& ui
+								.add_enabled(allowed && !view.loading, egui::Button::new("Older"))
+								.clicked()
+						{
+							request = Some((view.kind, Some(before)));
+						}
+					});
+					ui.add_space(8.0);
+					if view.kind == Kind::Private {
+						crate::dialog::notice(
+							ui,
+							crate::dialog::Level::Info,
+							"Private archives require permission from the service.",
+						);
+					}
+					if !allowed {
+						crate::dialog::notice(
+							ui,
+							crate::dialog::Level::Warning,
+							"Archives are unavailable while disconnected or without channel access.",
+						);
+					}
+					if let Some(error) = view.error {
+						crate::dialog::notice(ui, crate::dialog::Level::Error, error);
+					}
+					if view.loading {
+						ui.horizontal(|ui| {
+							ui.spinner();
+							ui.label("Loading archived threads…");
+						});
+					}
+					if let Some(page) = &view.page {
+						crate::dialog::hint(
+							ui,
+							&format!(
+								"{} threads · {} page",
+								page.threads.len(),
+								if view.before.is_some() { "older" } else { "newest" }
+							),
+						);
+						if page.threads.is_empty() {
+							ui.label("No archived threads returned.");
+						}
+						egui::ScrollArea::vertical()
+							.id_salt(("archive-page", view.request))
+							.max_height(320.0)
+							.show_rows(ui, 42.0, page.threads.len(), |ui, range| {
+								for thread in &page.threads[range] {
+									ui.push_id(thread.id, |ui| {
+										ui.set_height(42.0);
+										ui.horizontal(|ui| {
+											if ui
+												.add_enabled(
+													allowed && !view.loading,
+													egui::Button::new("Open thread"),
+												)
+												.clicked()
+											{
+												target = Some(thread.id);
+											}
+											ui.add(egui::Label::new(&thread.name).truncate());
+										});
+									});
+								}
+							});
+						if page.next.is_none() && !view.loading {
+							crate::dialog::hint(
+								ui,
+								"No older threads reported by the service.",
+							);
+						}
+					}
+				});
+				d.footer(|ui| {
+					close |= crate::dialog::action(ui, "Close", crate::dialog::Action::Primary)
+						.clicked();
+				});
+			});
+		if response.close || close {
 			commands.push(state.clear_archives());
 		} else if let Some((kind, before)) = request {
 			if let Some(command) = state.request_archives(parent, kind, before) {
@@ -223,14 +302,8 @@ mod tests {
 				}),
 			);
 			ui.archives.focus = true;
-			// Reload, Close, Open thread: exhausted pages have no Older control.
-			for key in [
-				None,
-				None,
-				Some(egui::Key::Tab),
-				Some(egui::Key::Tab),
-				Some(egui::Key::Enter),
-			] {
+			// Reload, Open thread: exhausted pages have no Older control.
+			for key in [None, None, Some(egui::Key::Tab), Some(egui::Key::Enter)] {
 				frame(&ctx, key, |_| {
 					ui.archives.show(&ctx, &mut state, &mut commands)
 				});

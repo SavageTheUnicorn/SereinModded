@@ -34,7 +34,6 @@ impl AuditLogUi {
 		avatars: &mut Avatars,
 		commands: &mut Vec<Command>,
 	) {
-		let colors = design::palette(ui);
 		let available = !state.server_admin.pending && !state.server_settings.saving;
 		let mut query = self.query.clone();
 		query.before = None;
@@ -152,11 +151,11 @@ impl AuditLogUi {
 			}
 			if state.server_admin.pending {
 				ui.spinner();
-				ui.weak("Loading audit log...");
+				ui.weak("Loading audit log…");
 			}
 		});
 		if let Some(error) = state.server_admin.error {
-			ui.colored_label(colors.danger, error);
+			crate::dialog::notice(ui, crate::dialog::Level::Error, error);
 		}
 		if let Some(page) = &state.server_admin.audit_log {
 			if self.preview_expand {
@@ -171,8 +170,14 @@ impl AuditLogUi {
 				ui.add_space(24.0);
 				ui.weak("No audit log entries match these filters.");
 			}
-			self.entries(ui, state, page, avatars);
-			ui.add_space(12.0);
+			// The list is the page's only scroller: it takes the remaining height and keeps
+			// the paging controls pinned below it.
+			let paging = state.server_admin.audit_limit_reached || page.has_more;
+			let height = design::list_height(ui, if paging { 60.0 } else { 0.0 });
+			self.entries(ui, state, page, avatars, height);
+			if paging {
+				ui.add_space(12.0);
+			}
 			if state.server_admin.audit_limit_reached {
 				ui.weak("The audit log reached its local entry or memory limit. Adjust the filters to find other events.");
 			} else if page.has_more
@@ -202,7 +207,14 @@ impl AuditLogUi {
 			};
 		}
 	}
-	fn entries(&mut self, ui: &mut egui::Ui, state: &State, page: &Page, avatars: &mut Avatars) {
+	fn entries(
+		&mut self,
+		ui: &mut egui::Ui,
+		state: &State,
+		page: &Page,
+		avatars: &mut Avatars,
+		height: f32,
+	) {
 		let expanded_index = self
 			.expanded
 			.and_then(|id| page.entries.iter().position(|entry| entry.id == id));
@@ -211,7 +223,7 @@ impl AuditLogUi {
 		let total_height = page.entries.len() as f32 * 80.0 + extra;
 		egui::ScrollArea::vertical()
 			.id_salt("audit-log-entries")
-			.max_height((ui.ctx().content_rect().height() - 260.0).max(180.0))
+			.max_height(height)
 			.auto_shrink([false, true])
 			.show_viewport(ui, |ui, viewport| {
 				ui.set_min_height(total_height);

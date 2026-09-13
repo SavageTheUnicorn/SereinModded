@@ -1297,6 +1297,179 @@ pub fn switch(
 	response
 }
 
+/// Height of every inline [`button`].
+const BUTTON_HEIGHT: f32 = 38.0;
+
+/// Visual weight of an inline [`button`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ButtonKind {
+	/// Accent-filled confirming action. One per surface.
+	Primary,
+	/// Destructive confirming action.
+	Danger,
+	/// Borderless companion, used for "Cancel".
+	Neutral,
+	/// Bordered companion for a secondary but non-dismissing action.
+	Outline,
+}
+
+/// Compact inline button. Sizes, radius, focus ring and disabled styling are identical
+/// everywhere: dialog footers, settings toolbars and page headers all use this.
+pub fn button(ui: &mut egui::Ui, label: &str, kind: ButtonKind) -> egui::Response {
+	let p = palette(ui);
+	let (fill, stroke, text) = match kind {
+		ButtonKind::Primary => (p.accent, Stroke::NONE, p.accent_text),
+		ButtonKind::Danger => (p.danger, Stroke::NONE, Color32::WHITE),
+		ButtonKind::Neutral => (Color32::TRANSPARENT, Stroke::NONE, p.text),
+		ButtonKind::Outline => (
+			Color32::TRANSPARENT,
+			Stroke::new(1.0, p.border),
+			p.text_strong,
+		),
+	};
+	let font = FontId::new(14.0, medium_family(ui.ctx()));
+	let galley = ui
+		.painter()
+		.layout_no_wrap(label.to_owned(), font, Color32::WHITE);
+	let width = (galley.size().x + 32.0).max(if kind == ButtonKind::Neutral {
+		72.0
+	} else {
+		92.0
+	});
+	let (rect, response) =
+		ui.allocate_exact_size(egui::vec2(width, BUTTON_HEIGHT), egui::Sense::click());
+	response.widget_info(|| {
+		egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label)
+	});
+	let enabled = ui.is_enabled();
+	let hot = response.hovered() || response.has_focus();
+	let fill = if !enabled {
+		fill.gamma_multiply(0.4)
+	} else if response.is_pointer_button_down_on() {
+		fill.gamma_multiply(0.82)
+	} else if hot {
+		match kind {
+			ButtonKind::Neutral | ButtonKind::Outline => p.hover,
+			_ => fill.linear_multiply(1.1),
+		}
+	} else {
+		fill
+	};
+	let text = if enabled {
+		text
+	} else {
+		text.gamma_multiply(0.5)
+	};
+	let painter = ui.painter();
+	painter.rect(rect, 8, fill, stroke, egui::StrokeKind::Inside);
+	if response.has_focus() {
+		painter.rect_stroke(
+			rect.expand(2.0),
+			10,
+			Stroke::new(2.0, p.accent),
+			egui::StrokeKind::Outside,
+		);
+	}
+	painter.galley(rect.center() - galley.size() * 0.5, galley.clone(), text);
+	response
+}
+
+/// Uppercase label above a form control.
+pub fn label(ui: &mut egui::Ui, text: &str) -> egui::Response {
+	let colors = palette(ui);
+	let response = ui.label(eyebrow(ui, text, colors.muted));
+	ui.add_space(6.0);
+	response
+}
+
+/// Small muted explanation under a form control.
+pub fn hint(ui: &mut egui::Ui, text: &str) {
+	let colors = palette(ui);
+	ui.add_space(4.0);
+	ui.add(egui::Label::new(RichText::new(text).size(12.0).color(colors.muted)).wrap());
+}
+
+/// Text input with the dialog's inset fill and an accent focus ring.
+pub fn input(ui: &mut egui::Ui, edit: egui::TextEdit<'_>) -> egui::Response {
+	let colors = palette(ui);
+	let response = ui.add(
+		edit.desired_width(f32::INFINITY)
+			.background_color(colors.base)
+			.frame(
+				egui::Frame::new()
+					.fill(colors.base)
+					.corner_radius(8)
+					.inner_margin(egui::Margin::symmetric(12, 9)),
+			),
+	);
+	let stroke = if response.has_focus() {
+		Stroke::new(2.0, colors.accent)
+	} else {
+		Stroke::new(1.0, colors.border)
+	};
+	ui.painter()
+		.rect_stroke(response.rect, 8, stroke, egui::StrokeKind::Inside);
+	response
+}
+
+/// Severity of a [`notice`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Level {
+	Info,
+	Warning,
+	Error,
+}
+
+/// Tinted callout used for dialog status, permission and failure messages. Replaces the bare
+/// coloured labels these dialogs used to print.
+pub fn notice(ui: &mut egui::Ui, level: Level, text: &str) {
+	let colors = palette(ui);
+	let (tint, icon) = match level {
+		Level::Info => (colors.accent, crate::icons::Icon::Help),
+		Level::Warning => (colors.warning, crate::icons::Icon::ShieldWarning),
+		Level::Error => (colors.danger, crate::icons::Icon::ShieldWarning),
+	};
+	egui::Frame::new()
+		.fill(tint.gamma_multiply(0.13))
+		.stroke(Stroke::new(1.0, tint.gamma_multiply(0.45)))
+		.corner_radius(8)
+		.inner_margin(egui::Margin::symmetric(12, 10))
+		.show(ui, |ui| {
+			ui.set_width(ui.available_width());
+			ui.horizontal_top(|ui| {
+				ui.spacing_mut().item_spacing.x = 8.0;
+				let (rect, _) =
+					ui.allocate_exact_size(egui::Vec2::splat(16.0), egui::Sense::hover());
+				crate::icons::paint(ui.painter(), icon, rect, tint);
+				ui.add(egui::Label::new(RichText::new(text).size(13.0).color(colors.text)).wrap());
+			});
+		});
+}
+
+/// Horizontal rule between settings sections. One spacing rhythm everywhere.
+pub fn divider(ui: &mut egui::Ui) {
+	ui.add_space(24.0);
+	ui.separator();
+	ui.add_space(24.0);
+}
+
+/// Title of a settings group, with an optional supporting line under it.
+pub fn section(ui: &mut egui::Ui, title: &str, help: Option<&str>) {
+	let p = palette(ui);
+	ui.label(medium(ui, title, 16.0).color(p.text_strong));
+	if let Some(help) = help {
+		ui.add(egui::Label::new(RichText::new(help).size(13.0).color(p.muted)).wrap());
+	}
+	ui.add_space(6.0);
+}
+
+/// Height for a virtualized list that fills the rest of a settings page, leaving `reserved`
+/// pixels for the controls below it. Keeps every list scrolling against the page instead of
+/// guessing a height from the window size.
+pub fn list_height(ui: &egui::Ui, reserved: f32) -> f32 {
+	(ui.available_height() - reserved).max(160.0)
+}
+
 /// Rounded settings card that groups related rows on the raised surface.
 pub fn card<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
 	let p = palette(ui);

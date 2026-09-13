@@ -591,31 +591,43 @@ impl MessagingUi {
 		}
 		let mut close = false;
 		if let Some((id, name, color)) = &mut self.folder_ui.editor {
-			egui::Window::new("Folder settings")
-				.collapsible(false)
-				.resizable(false)
-				.show(ui.ctx(), |ui| {
-					ui.label("Name");
-					ui.add(egui::TextEdit::singleline(name).char_limit(100));
-					ui.horizontal(|ui| {
-						ui.label("Color");
+			let response = crate::dialog::Dialog::new("folder-settings", "Folder Settings")
+				.subtitle("Name this folder and pick the colour shown on the server rail.")
+				.width(400.0)
+				.show(ui.ctx(), |d| {
+					d.content(|ui| {
+						let label = crate::dialog::label(ui, "Folder name");
+						crate::dialog::input(
+							ui,
+							egui::TextEdit::singleline(name)
+								.hint_text("Folder name")
+								.char_limit(100),
+						)
+						.labelled_by(label.id);
+						ui.add_space(14.0);
+						crate::dialog::label(ui, "Colour");
 						design::color_edit(ui, color);
 					});
-					ui.horizontal(|ui| {
-						if ui.add_enabled(enabled, egui::Button::new("Save")).clicked() {
-							change = Some(Edit::Customize(
-								*id,
-								name.clone(),
-								((color[0] as u32) << 16)
-									| ((color[1] as u32) << 8) | color[2] as u32,
-							));
-							close = true;
-						}
-						if ui.button("Cancel").clicked() {
-							close = true;
-						}
+					d.footer(|ui| {
+						ui.add_enabled_ui(enabled, |ui| {
+							if crate::dialog::action(ui, "Save", crate::dialog::Action::Primary)
+								.clicked()
+							{
+								change = Some(Edit::Customize(
+									*id,
+									name.clone(),
+									((color[0] as u32) << 16)
+										| ((color[1] as u32) << 8) | color[2] as u32,
+								));
+								close = true;
+							}
+						});
+						close |=
+							crate::dialog::action(ui, "Cancel", crate::dialog::Action::Neutral)
+								.clicked();
 					});
 				});
+			close |= response.close;
 		}
 		if close {
 			self.folder_ui.editor = None;

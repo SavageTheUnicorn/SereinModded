@@ -1056,291 +1056,252 @@ impl ExtensionUi {
 				.manifest
 				.capabilities
 				.contains(&Capability::DeletedMessages);
-		let modal = egui::Modal::new(egui::Id::unique("extension-consent"))
-			.frame(
+		let response = crate::dialog::Dialog::new(
+			"extension-consent",
+			if theme {
+				"Enable this theme"
+			} else {
+				"Enable this extension"
+			},
+		)
+		.subtitle("Everything it may touch is listed below.")
+		.width(460.0)
+		.show(ctx, |d| {
+			d.scroll(260.0, |ui| {
+				ui.set_width(ui.available_width());
+				ui.spacing_mut().item_spacing.y = 10.0;
 				egui::Frame::new()
-					.fill(colors.chat.to_opaque())
-					.corner_radius(14)
+					.fill(colors.raised)
+					.corner_radius(10)
 					.stroke(egui::Stroke::new(1.0, colors.border))
-					.inner_margin(20),
-			)
-			.show(ctx, |ui| {
-				ui.set_width((ctx.content_rect().width() - 80.0).clamp(180.0, 460.0));
-				ui.label(
-					design::semibold(
-						ui,
-						if theme {
-							"Enable this theme"
-						} else {
-							"Enable this extension"
-						},
-						20.0,
-					)
-					.color(colors.text_strong),
-				);
-				ui.add_space(3.0);
-				ui.label(
-					egui::RichText::new("Everything it may touch is listed below.")
-						.size(13.0)
-						.color(colors.muted),
-				);
-				ui.add_space(16.0);
-				egui::ScrollArea::vertical()
-					.max_height((ctx.content_rect().height() - 260.0).max(120.0))
+					.inner_margin(12)
 					.show(ui, |ui| {
-						ui.set_width(ui.available_width());
-						ui.spacing_mut().item_spacing.y = 10.0;
-						egui::Frame::new()
+						ui.set_width((ui.available_width() - 26.0).max(1.0));
+						ui.horizontal_top(|ui| {
+							ui.spacing_mut().item_spacing.x = 12.0;
+							let (rect, _) = ui
+								.allocate_exact_size(egui::vec2(84.0, 47.0), egui::Sense::hover());
+							if illustrated {
+								draw_native_preview(
+									ui,
+									rect,
+									&consent.entry,
+									egui::CornerRadius::same(6),
+								);
+							} else {
+								ui.painter().rect_filled(rect, 6, colors.sidebar);
+								icons::paint(
+									ui.painter(),
+									icons::Icon::Sparkle,
+									egui::Rect::from_center_size(
+										rect.center(),
+										egui::Vec2::splat(20.0),
+									),
+									colors.muted,
+								);
+							}
+							ui.vertical(|ui| {
+								ui.spacing_mut().item_spacing.y = 3.0;
+								ui.add(
+									egui::Label::new(
+										design::semibold(ui, &consent.entry.manifest.name, 16.0)
+											.color(colors.text_strong),
+									)
+									.truncate(),
+								);
+								ui.add(
+									egui::Label::new(
+										egui::RichText::new(format!(
+											"by {}",
+											consent.entry.manifest.author
+										))
+										.size(12.0)
+										.color(colors.muted),
+									)
+									.truncate(),
+								);
+								ui.horizontal_wrapped(|ui| {
+									ui.spacing_mut().item_spacing = egui::vec2(6.0, 4.0);
+									if consent.entry.reviewed {
+										badge(
+											ui,
+											"Reviewed",
+											colors.positive,
+											design::mix(colors.raised, colors.positive, 0.16),
+										);
+									} else {
+										badge(
+											ui,
+											"Unreviewed",
+											colors.warning,
+											design::mix(colors.raised, colors.warning, 0.16),
+										);
+									}
+									badge(
+										ui,
+										&format!("v{}", consent.entry.manifest.version),
+										colors.muted,
+										colors.sidebar.to_opaque(),
+									);
+									badge(
+										ui,
+										&consent.entry.manifest.license,
+										colors.muted,
+										colors.sidebar.to_opaque(),
+									);
+									badge(
+										ui,
+										&format!(
+											"{:.1} KiB",
+											consent.entry.download_bytes as f64 / 1024.0
+										),
+										colors.muted,
+										colors.sidebar.to_opaque(),
+									);
+								});
+								ui.hyperlink_to(
+									egui::RichText::new("View source").size(12.0),
+									&consent.entry.manifest.source,
+								);
+							});
+						});
+					});
+				if !consent.entry.reviewed {
+					egui::Frame::new()
+						.fill(design::mix(colors.chat, colors.warning, 0.14))
+						.corner_radius(10)
+						.inner_margin(12)
+						.show(ui, |ui| {
+							ui.set_width((ui.available_width() - 26.0).max(1.0));
+							ui.horizontal_top(|ui| {
+								ui.spacing_mut().item_spacing.x = 10.0;
+								let (rect, _) = ui.allocate_exact_size(
+									egui::Vec2::splat(18.0),
+									egui::Sense::hover(),
+								);
+								icons::paint(
+									ui.painter(),
+									icons::Icon::ShieldWarning,
+									rect,
+									colors.warning,
+								);
+								ui.label(
+									egui::RichText::new(
+										"Unreviewed package — its source has not been reviewed for the catalog.",
+									)
+									.size(12.5)
+									.color(colors.text),
+								);
+							});
+						});
+				}
+				if consent.entry.manifest.capabilities.is_empty() {
+					egui::Frame::new()
+						.fill(colors.raised)
+						.corner_radius(10)
+						.stroke(egui::Stroke::new(1.0, colors.border))
+						.inner_margin(12)
+						.show(ui, |ui| {
+							ui.set_width((ui.available_width() - 26.0).max(1.0));
+							ui.horizontal_top(|ui| {
+								ui.spacing_mut().item_spacing.x = 10.0;
+								let (rect, _) = ui.allocate_exact_size(
+									egui::Vec2::splat(18.0),
+									egui::Sense::hover(),
+								);
+								icons::paint(
+									ui.painter(),
+									icons::Icon::Check,
+									rect,
+									colors.positive,
+								);
+								ui.label(
+									egui::RichText::new(
+										"No access to conversations or composer text.",
+									)
+									.size(13.0)
+									.color(colors.text),
+								);
+							});
+						});
+				} else {
+					ui.label(design::eyebrow(ui, "Allow this extension to", colors.muted));
+					ui.spacing_mut().item_spacing.y = 8.0;
+					for capability in &consent.entry.manifest.capabilities {
+						let mut granted = consent.grants.contains(capability);
+						let changed = egui::Frame::new()
 							.fill(colors.raised)
 							.corner_radius(10)
-							.stroke(egui::Stroke::new(1.0, colors.border))
+							.stroke(egui::Stroke::new(
+								1.0,
+								if granted {
+									colors.accent
+								} else {
+									colors.border
+								},
+							))
 							.inner_margin(12)
 							.show(ui, |ui| {
 								ui.set_width((ui.available_width() - 26.0).max(1.0));
-								ui.horizontal_top(|ui| {
-									ui.spacing_mut().item_spacing.x = 12.0;
-									let (rect, _) = ui.allocate_exact_size(
-										egui::vec2(84.0, 47.0),
-										egui::Sense::hover(),
-									);
-									if illustrated {
-										draw_native_preview(
-											ui,
-											rect,
-											&consent.entry,
-											egui::CornerRadius::same(6),
-										);
-									} else {
-										ui.painter().rect_filled(rect, 6, colors.sidebar);
-										icons::paint(
-											ui.painter(),
-											icons::Icon::Sparkle,
-											egui::Rect::from_center_size(
-												rect.center(),
-												egui::Vec2::splat(20.0),
-											),
-											colors.muted,
-										);
-									}
-									ui.vertical(|ui| {
-										ui.spacing_mut().item_spacing.y = 3.0;
-										ui.add(
-											egui::Label::new(
-												design::semibold(
-													ui,
-													&consent.entry.manifest.name,
-													16.0,
-												)
-												.color(colors.text_strong),
-											)
-											.truncate(),
-										);
-										ui.add(
-											egui::Label::new(
-												egui::RichText::new(format!(
-													"by {}",
-													consent.entry.manifest.author
-												))
-												.size(12.0)
-												.color(colors.muted),
-											)
-											.truncate(),
-										);
-										ui.horizontal_wrapped(|ui| {
-											ui.spacing_mut().item_spacing = egui::vec2(6.0, 4.0);
-											if consent.entry.reviewed {
-												badge(
-													ui,
-													"Reviewed",
-													colors.positive,
-													design::mix(
-														colors.raised,
-														colors.positive,
-														0.16,
-													),
-												);
-											} else {
-												badge(
-													ui,
-													"Unreviewed",
-													colors.warning,
-													design::mix(
-														colors.raised,
-														colors.warning,
-														0.16,
-													),
-												);
-											}
-											badge(
-												ui,
-												&format!("v{}", consent.entry.manifest.version),
-												colors.muted,
-												colors.sidebar.to_opaque(),
-											);
-											badge(
-												ui,
-												&consent.entry.manifest.license,
-												colors.muted,
-												colors.sidebar.to_opaque(),
-											);
-											badge(
-												ui,
-												&format!(
-													"{:.1} KiB",
-													consent.entry.download_bytes as f64 / 1024.0
-												),
-												colors.muted,
-												colors.sidebar.to_opaque(),
-											);
-										});
-										ui.hyperlink_to(
-											egui::RichText::new("View source").size(12.0),
-											&consent.entry.manifest.source,
-										);
-									});
-								});
-							});
-						if !consent.entry.reviewed {
-							egui::Frame::new()
-								.fill(design::mix(colors.chat, colors.warning, 0.14))
-								.corner_radius(10)
-								.inner_margin(12)
-								.show(ui, |ui| {
-									ui.set_width((ui.available_width() - 26.0).max(1.0));
-									ui.horizontal_top(|ui| {
-										ui.spacing_mut().item_spacing.x = 10.0;
-										let (rect, _) = ui.allocate_exact_size(
-											egui::Vec2::splat(18.0),
-											egui::Sense::hover(),
-										);
-										icons::paint(
-											ui.painter(),
-											icons::Icon::ShieldWarning,
-											rect,
-											colors.warning,
-										);
-										ui.label(
-											egui::RichText::new(
-												"Unreviewed package — its source has not been reviewed for the catalog.",
-											)
-											.size(12.5)
-											.color(colors.text),
-										);
-									});
-								});
-						}
-						if consent.entry.manifest.capabilities.is_empty() {
-							egui::Frame::new()
-								.fill(colors.raised)
-								.corner_radius(10)
-								.stroke(egui::Stroke::new(1.0, colors.border))
-								.inner_margin(12)
-								.show(ui, |ui| {
-									ui.set_width((ui.available_width() - 26.0).max(1.0));
-									ui.horizontal_top(|ui| {
-										ui.spacing_mut().item_spacing.x = 10.0;
-										let (rect, _) = ui.allocate_exact_size(
-											egui::Vec2::splat(18.0),
-											egui::Sense::hover(),
-										);
-										icons::paint(
-											ui.painter(),
-											icons::Icon::Check,
-											rect,
-											colors.positive,
-										);
-										ui.label(
-											egui::RichText::new(
-												"No access to conversations or composer text.",
-											)
-											.size(13.0)
-											.color(colors.text),
-										);
-									});
-								});
-						} else {
-							ui.label(design::eyebrow(ui, "Allow this extension to", colors.muted));
-							ui.spacing_mut().item_spacing.y = 8.0;
-							for capability in &consent.entry.manifest.capabilities {
-								let mut granted = consent.grants.contains(capability);
-								let changed = egui::Frame::new()
-									.fill(colors.raised)
-									.corner_radius(10)
-									.stroke(egui::Stroke::new(
-										1.0,
-										if granted {
-											colors.accent
-										} else {
-											colors.border
-										},
-									))
-									.inner_margin(12)
-									.show(ui, |ui| {
-										ui.set_width((ui.available_width() - 26.0).max(1.0));
-										ui.spacing_mut().icon_width = 20.0;
-										ui.spacing_mut().icon_spacing = 10.0;
-										ui.visuals_mut().widgets.inactive.bg_stroke =
-											egui::Stroke::new(1.0, colors.muted);
-										ui.checkbox(
-											&mut granted,
-											egui::RichText::new(capability_label(*capability))
-												.size(13.5),
-										)
-										.changed()
-									})
-									.inner;
-								if changed {
-									if granted {
-										consent.grants.push(*capability);
-									} else {
-										consent.grants.retain(|grant| grant != capability);
-									}
-								}
+								ui.spacing_mut().icon_width = 20.0;
+								ui.spacing_mut().icon_spacing = 10.0;
+								ui.visuals_mut().widgets.inactive.bg_stroke =
+									egui::Stroke::new(1.0, colors.muted);
+								ui.checkbox(
+									&mut granted,
+									egui::RichText::new(capability_label(*capability)).size(13.5),
+								)
+								.changed()
+							})
+							.inner;
+						if changed {
+							if granted {
+								consent.grants.push(*capability);
+							} else {
+								consent.grants.retain(|grant| grant != capability);
 							}
 						}
-						ui.label(
-							egui::RichText::new(
-								"Disabling removes the extension and its local data. Re-enabling starts fresh.",
-							)
-							.size(12.0)
-							.color(colors.muted),
-						);
-					});
-				ui.add_space(16.0);
-				ui.separator();
-				ui.add_space(12.0);
+					}
+				}
+				ui.label(
+					egui::RichText::new(
+						"Disabling removes the extension and its local data. Re-enabling starts fresh.",
+					)
+					.size(12.0)
+					.color(colors.muted),
+				);
+			});
+			d.footer(|ui| {
 				let ready = consent
 					.entry
 					.manifest
 					.capabilities
 					.iter()
 					.all(|capability| consent.grants.contains(capability));
-				ui.columns(2, |columns| {
-					if design::secondary_button(&mut columns[0], "Cancel").clicked() {
-						close = true;
-					}
-					let enable = columns[1]
-						.add_enabled_ui(ready && !self.busy, |ui| {
-							design::primary_button(ui, "Enable")
-						})
-						.inner;
-					if !ready {
-						enable.on_hover_text("Allow every listed permission to continue.");
-					} else if enable.clicked() {
-						self.queue(
-							ctx,
-							ExtensionRequest::Enable {
-								id: consent.entry.manifest.id.clone(),
-								grants: consent.grants.clone(),
-								sha256: consent.entry.sha256.clone(),
-								reviewed: consent.entry.reviewed,
-							},
-						);
-						close = true;
-					}
-				});
+				let enable = ui
+					.add_enabled_ui(ready && !self.busy, |ui| {
+						crate::dialog::action(ui, "Enable", crate::dialog::Action::Primary)
+					})
+					.inner;
+				if !ready {
+					enable.on_hover_text("Allow every listed permission to continue.");
+				} else if enable.clicked() {
+					self.queue(
+						ctx,
+						ExtensionRequest::Enable {
+							id: consent.entry.manifest.id.clone(),
+							grants: consent.grants.clone(),
+							sha256: consent.entry.sha256.clone(),
+							reviewed: consent.entry.reviewed,
+						},
+					);
+					close = true;
+				}
+				close |=
+					crate::dialog::action(ui, "Cancel", crate::dialog::Action::Neutral).clicked();
 			});
-		if !close && !modal.should_close() {
+		});
+		if !close && !response.close {
 			self.consent = Some(consent);
 		}
 	}
@@ -1413,15 +1374,20 @@ impl ExtensionUi {
 		editing: bool,
 	) {
 		if let Some(message) = self.error.take() {
-			let mut open = true;
-			egui::Window::new("Extension error")
-				.id(egui::Id::unique("extension-error"))
-				.open(&mut open)
-				.default_width(360.0)
-				.show(ctx, |ui| {
-					ui.label(&message);
+			let mut dismissed = false;
+			let response = crate::dialog::Dialog::new("extension-error", "Extension error")
+				.width(400.0)
+				.show(ctx, |d| {
+					d.content(|ui| {
+						crate::dialog::notice(ui, crate::dialog::Level::Error, &message);
+					});
+					d.footer(|ui| {
+						dismissed =
+							crate::dialog::action(ui, "Dismiss", crate::dialog::Action::Primary)
+								.clicked();
+					});
 				});
-			if open {
+			if !dismissed && !response.close {
 				self.error = Some(message);
 			}
 		}
@@ -1432,48 +1398,63 @@ impl ExtensionUi {
 			self.status = "Result discarded because the conversation or draft changed.".into();
 			return;
 		}
-		let mut open = true;
 		let mut applied = false;
 		let mut action = None;
-		egui::Window::new(
-			self.entries
-				.iter()
-				.find(|entry| entry.manifest.id == result.id)
-				.map_or("Extension tool", |entry| entry.manifest.name.as_str()),
-		)
-		.id(egui::Id::unique("extension-result"))
-		.open(&mut open)
-		.default_width(360.0)
-		.max_width(600.0)
-		.show(ctx, |ui| {
-			egui::ScrollArea::vertical()
-				.max_height(400.0)
-				.show(ui, |ui| {
+		let title = self
+			.entries
+			.iter()
+			.find(|entry| entry.manifest.id == result.id)
+			.map_or("Extension tool", |entry| entry.manifest.name.as_str())
+			.to_owned();
+		let mut close = false;
+		let response = crate::dialog::Dialog::new("extension-result", title)
+			.subtitle("Output from this extension. Nothing is applied until you choose to.")
+			.width(520.0)
+			.show(ctx, |d| {
+				d.scroll(240.0, |ui| {
 					if let Some(replacement) = &result.output.replacement {
-						ui.label("Proposed composer text");
-						ui.add(egui::Label::new(replacement).wrap());
-						if ui
-							.add_enabled(
-								!editing && result.context.draft.is_some(),
-								egui::Button::new("Apply to draft"),
-							)
-							.clicked()
-						{
-							if apply_proposal(state, &result.context, replacement) {
-								if let Some(channel) = state.selected {
-									changes.push(channel);
-								}
-								applied = true;
-							} else {
-								self.status =
-									"The draft changed or the proposal exceeds the draft limit."
-										.into();
-							}
-						}
+						crate::dialog::label(ui, "Proposed composer text");
+						let colors = crate::design::palette(ui);
+						egui::Frame::new()
+							.fill(colors.base)
+							.stroke(egui::Stroke::new(1.0, colors.border))
+							.corner_radius(8)
+							.inner_margin(egui::Margin::symmetric(12, 10))
+							.show(ui, |ui| {
+								ui.set_width(ui.available_width());
+								ui.add(egui::Label::new(replacement).wrap());
+							});
+						ui.add_space(10.0);
 					}
 					render_elements(ui, &result.output.panel, &mut result.values, &mut action);
 				});
-		});
+				d.footer(|ui| {
+					if let Some(replacement) = result.output.replacement.clone() {
+						ui.add_enabled_ui(!editing && result.context.draft.is_some(), |ui| {
+							if crate::dialog::action(
+								ui,
+								"Apply to Draft",
+								crate::dialog::Action::Primary,
+							)
+							.clicked()
+							{
+								if apply_proposal(state, &result.context, &replacement) {
+									if let Some(channel) = state.selected {
+										changes.push(channel);
+									}
+									applied = true;
+								} else {
+									self.status =
+										"The draft changed or the proposal exceeds the draft limit."
+											.into();
+								}
+							}
+						});
+					}
+					close |= crate::dialog::action(ui, "Close", crate::dialog::Action::Neutral)
+						.clicked();
+				});
+			});
 		if let Some(action) = action {
 			let mut invocation = result.invocation.clone();
 			invocation.action = action;
@@ -1489,7 +1470,7 @@ impl ExtensionUi {
 				},
 			);
 		}
-		if open && !applied {
+		if !close && !response.close && !applied {
 			self.result = Some(result);
 		}
 	}

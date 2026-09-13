@@ -1,5 +1,5 @@
 //! Visible, bounded invite directory using the shared administration and creation lanes.
-use crate::{avatars::Avatars, design, icons, server_invite::InviteDialog};
+use crate::{avatars::Avatars, design, dialog, icons, server_invite::InviteDialog};
 use client_core::{Command, State};
 use egui::{RichText, Vec2};
 use model::{
@@ -125,14 +125,10 @@ impl InvitesUi {
 			}
 			if state.invite_channel(guild).is_some()
 				&& ui
-					.add_enabled(
-						writable && !paused,
-						egui::Button::new(
-							RichText::new("Create invite link").color(colors.accent_text),
-						)
-						.fill(colors.accent)
-						.min_size(Vec2::new(160.0, 38.0)),
-					)
+					.add_enabled_ui(writable && !paused, |ui| {
+						design::button(ui, "Create Invite Link", design::ButtonKind::Primary)
+					})
+					.inner
 					.clicked()
 			{
 				state.clear_server_action_result(guild);
@@ -144,7 +140,7 @@ impl InvitesUi {
 		});
 		ui.add_space(18.0);
 		if let Some(error) = state.server_admin.error {
-			ui.colored_label(colors.danger, error);
+			design::notice(ui, design::Level::Error, error);
 			if ui
 				.add_enabled(
 					!state.server_admin.pending,
@@ -205,7 +201,7 @@ impl InvitesUi {
 								);
 							});
 						}
-						let height = (ui.ctx().content_rect().height() - 300.0).max(120.0);
+						let height = design::list_height(ui, 0.0);
 						ui.spacing_mut().item_spacing.y = 0.0;
 						egui::ScrollArea::vertical()
 							.id_salt("invites-table-y")
@@ -471,35 +467,21 @@ impl InvitesUi {
 				self.revoke = None;
 				return;
 			}
-			let mut close = false;
-			let mut revoke = false;
-			let modal =
-				egui::Modal::new(egui::Id::unique("revoke-server-invite")).show(ctx, |ui| {
-					ui.set_width((ctx.content_rect().width() - 64.0).clamp(180.0, 360.0));
-					ui.heading("Revoke invite?");
-					ui.label(
-						"People will no longer be able to join this server using this invite link.",
-					);
-					ui.add(egui::Label::new(RichText::new(code).monospace()).truncate());
-					if let Some(error) = state.server_admin.error {
-						ui.colored_label(design::palette(ui).danger, error);
-					}
-					ui.horizontal(|ui| {
-						close = ui
-							.add_enabled(!state.server_admin.saving, egui::Button::new("Cancel"))
-							.clicked();
-						revoke = ui
-							.add_enabled(
-								!state.server_admin.pending && !state.server_admin.needs_refresh,
-								egui::Button::new(
-									RichText::new("Revoke Invite")
-										.color(design::palette(ui).danger),
-								),
-							)
-							.clicked();
-					});
-				});
-			if revoke
+			let mut confirm = dialog::Confirm::new(
+				"revoke-server-invite",
+				"Revoke invite?",
+				format!(
+					"People will no longer be able to join this server with discord.gg/{code}."
+				),
+			)
+			.danger()
+			.confirm_label("Revoke Invite")
+			.enabled(!state.server_admin.pending && !state.server_admin.needs_refresh);
+			if let Some(error) = state.server_admin.error {
+				confirm = confirm.note(dialog::Level::Error, error);
+			}
+			let choice = confirm.show(ctx);
+			if choice == Some(dialog::Choice::Confirmed)
 				&& let Some(command) = state.request_server_admin(
 					guild,
 					server_admin::Action::Invites(Action::Revoke { code: code.clone() }),
@@ -507,7 +489,7 @@ impl InvitesUi {
 				commands.push(command);
 				self.revoking = true;
 			}
-			if close || (modal.should_close() && !state.server_admin.saving) {
+			if choice == Some(dialog::Choice::Cancelled) && !state.server_admin.saving {
 				self.revoke = None;
 			}
 		}

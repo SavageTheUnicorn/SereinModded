@@ -1,5 +1,5 @@
 //! Guild channel actions share one context menu and a session-scoped editor.
-use crate::{design, user_menu};
+use crate::{design, dialog, user_menu};
 use client_core::{
 	Command, State,
 	channel_actions::{Action, Edit, Mute},
@@ -286,103 +286,140 @@ impl ChannelMenu {
 			dialog.before = details.clone();
 			dialog.loaded = true;
 		}
-		let colors = design::palette_for(ctx);
 		let mut close = false;
-		let modal = egui::Modal::new(egui::Id::unique(("channel-dialog", self.generation)))
-			.frame(
-				egui::Frame::new()
-					.fill(colors.chat)
-					.stroke(egui::Stroke::new(1.0, colors.border))
-					.corner_radius(12)
-					.inner_margin(24),
-			)
-			.show(ctx, |ui| {
-				ui.set_width((ctx.content_rect().width() - 64.0).clamp(160.0, 440.0));
-				ui.heading(match dialog.kind {
-					Kind::Edit => "Edit Channel",
-					Kind::Duplicate => "Duplicate Channel",
-					Kind::Create => "Create Text Channel",
-					Kind::Delete => "Delete Channel?",
-				});
-				ui.add_space(12.0);
-				let allowed = state.can_manage_channel(dialog.channel);
-				let current =
-					dialog.kind != Kind::Edit || state.channel_details(dialog.channel).is_some();
+		let pending_now = pending;
+		let allowed = state.can_manage_channel(dialog.channel);
+		let current = dialog.kind != Kind::Edit || state.channel_details(dialog.channel).is_some();
+		let (title, subtitle) = match dialog.kind {
+			Kind::Edit => (
+				"Edit Channel",
+				"Rename this channel and adjust how people post in it.",
+			),
+			Kind::Duplicate => (
+				"Duplicate Channel",
+				"Copies settings and permissions. Messages are not copied.",
+			),
+			Kind::Create => (
+				"Create Text Channel",
+				"Text channels are where your members talk.",
+			),
+			Kind::Delete => (
+				"Delete Channel?",
+				"Deleting a channel removes its messages for everyone.",
+			),
+		};
+		let mut builder = dialog::Dialog::new(("channel-dialog", self.generation), title)
+			.subtitle(subtitle)
+			.width(if dialog.kind == Kind::Edit {
+				460.0
+			} else {
+				420.0
+			});
+		if dialog.kind == Kind::Delete {
+			builder = builder.danger();
+		}
+		let response = builder.show(ctx, |d| {
+			d.content(|ui| {
+				ui.spacing_mut().item_spacing.y = 10.0;
 				if !allowed {
-					ui.colored_label(
-						colors.warning,
+					dialog::notice(
+						ui,
+						dialog::Level::Warning,
 						"You no longer have permission to manage this channel.",
 					);
 				}
 				if !dialog.loaded {
-					ui.label(if pending {
-						"Loading channel settings…"
+					if pending_now {
+						ui.horizontal(|ui| {
+							ui.spinner();
+							ui.label("Loading channel settings…");
+						});
 					} else {
-						"Channel settings could not be loaded."
-					});
-					if ui
-						.add_enabled(allowed && !pending, egui::Button::new("Retry"))
-						.clicked() && let Some(command) =
-						state.request_channel_action(dialog.channel, Action::Load)
-					{
-						commands.push(command);
+						dialog::notice(
+							ui,
+							dialog::Level::Error,
+							"Channel settings could not be loaded.",
+						);
+						if ui
+							.add_enabled(allowed, egui::Button::new("Retry"))
+							.clicked() && let Some(command) =
+							state.request_channel_action(dialog.channel, Action::Load)
+						{
+							commands.push(command);
+						}
 					}
 				} else if dialog.kind == Kind::Delete {
-					ui.label(format!(
-						"Delete #{}? Its messages will be permanently deleted. This cannot be undone.",
-						dialog.draft.name
-					));
+					let colors = design::palette(ui);
+					ui.add(
+						egui::Label::new(
+							egui::RichText::new(format!(
+								"Are you sure you want to delete #{}? Its messages will be permanently deleted. This cannot be undone.",
+								dialog.draft.name
+							))
+							.size(14.0)
+							.color(colors.text),
+						)
+						.wrap(),
+					);
 				} else {
-					ui.add_enabled_ui(allowed && !pending, |ui| {
-						let label = ui.label("Channel name");
-						let name = ui
-							.add(
-								egui::TextEdit::singleline(&mut dialog.draft.name)
-									.char_limit(100)
-									.desired_width(f32::INFINITY),
-							)
-							.labelled_by(label.id);
+					ui.add_enabled_ui(allowed && !pending_now, |ui| {
+						let label = dialog::label(ui, "Channel name");
+						let name = dialog::input(
+							ui,
+							egui::TextEdit::singleline(&mut dialog.draft.name)
+								.hint_text("new-channel")
+								.char_limit(100),
+						)
+						.labelled_by(label.id);
 						if name.changed() {
 							dialog.draft.name.shrink_to_fit();
 						}
 						if dialog.kind == Kind::Edit {
-							let label = ui.label("Topic");
-							let topic = ui
-								.add(
-									egui::TextEdit::multiline(&mut dialog.draft.topic)
-										.char_limit(1024)
-										.desired_rows(3)
-										.desired_width(f32::INFINITY),
-								)
-								.labelled_by(label.id);
+							ui.add_space(14.0);
+							let label = dialog::label(ui, "Topic");
+							let topic = dialog::input(
+								ui,
+								egui::TextEdit::multiline(&mut dialog.draft.topic)
+									.hint_text("Let everyone know how to use this channel")
+									.char_limit(1024)
+									.desired_rows(3),
+							)
+							.labelled_by(label.id);
 							if topic.changed() {
 								dialog.draft.topic.shrink_to_fit();
 							}
-							ui.horizontal(|ui| {
-								ui.label("Slowmode");
-								ui.add(
-									egui::DragValue::new(&mut dialog.draft.slowmode)
-										.range(0..=21600)
-										.suffix(" seconds"),
-								);
-							});
-							ui.checkbox(&mut dialog.draft.nsfw, "Age-restricted channel");
-						} else if dialog.kind == Kind::Duplicate {
-							ui.label(
-								"Copies this channel's settings and permissions. Messages are not copied.",
+							ui.add_space(14.0);
+							dialog::label(ui, "Slowmode");
+							ui.add(
+								egui::DragValue::new(&mut dialog.draft.slowmode)
+									.range(0..=21600)
+									.suffix(" seconds"),
+							);
+							dialog::hint(
+								ui,
+								"Members will be restricted to one message in this interval.",
+							);
+							ui.add_space(6.0);
+							design::switch(
+								ui,
+								"Age-restricted channel",
+								Some("Members must confirm they are of age before viewing."),
+								&mut dialog.draft.nsfw,
 							);
 						}
 					});
 				}
 				if let Some(status) = state.channel_action_status(dialog.channel) {
-					ui.colored_label(colors.warning, status);
+					dialog::notice(ui, dialog::Level::Error, status);
 				}
 				if dialog.loaded && !current {
-					ui.label(
+					dialog::notice(
+						ui,
+						dialog::Level::Warning,
 						"Channel settings need to be refreshed before saving. Reloading replaces this draft.",
 					);
 					if ui
-						.add_enabled(allowed && !pending, egui::Button::new("Reload Channel"))
+						.add_enabled(allowed && !pending_now, egui::Button::new("Reload Channel"))
 						.clicked() && let Some(command) =
 						state.request_channel_action(dialog.channel, Action::Load)
 					{
@@ -390,67 +427,70 @@ impl ChannelMenu {
 						dialog.loaded = false;
 					}
 				}
-				ui.add_space(16.0);
-				ui.horizontal(|ui| {
-					close = ui
-						.button(if pending { "Close" } else { "Cancel" })
-						.clicked();
-					let valid = dialog.kind == Kind::Delete
-						|| if dialog.kind == Kind::Edit {
-							dialog.draft.valid()
-						} else {
-							client_core::channel_actions::valid_name(&dialog.draft.name)
-						};
-					let label = if pending {
-						"Working…"
-					} else {
-						match dialog.kind {
-							Kind::Edit => "Save Changes",
-							Kind::Duplicate => "Duplicate Channel",
-							Kind::Create => "Create Channel",
-							Kind::Delete => "Delete Channel",
-						}
-					};
-					if ui
-						.add_enabled(
-							allowed
-								&& dialog.loaded && current
-								&& valid && !pending && (state.demo || state.gateway_connected),
-							egui::Button::new(egui::RichText::new(label).color(
-								if dialog.kind == Kind::Delete {
-									colors.danger
-								} else {
-									colors.text
-								},
-							)),
-						)
-						.clicked()
-					{
-						let action = match dialog.kind {
-							Kind::Edit => Action::Edit {
-								before: dialog.before.clone(),
-								after: dialog.draft.clone(),
-							},
-							Kind::Duplicate => Action::Duplicate {
-								name: dialog.draft.name.clone(),
-							},
-							Kind::Create => Action::CreateText {
-								name: dialog.draft.name.clone(),
-							},
-							Kind::Delete => Action::Delete,
-						};
-						if let Some(command) = state.request_channel_action(dialog.channel, action)
-						{
-							commands.push(command);
-							dialog.submitted = true;
-						}
-					}
-				});
 				if state.demo {
-					ui.small("Offline preview · no server changes");
+					dialog::hint(ui, "Offline preview · no server changes");
 				}
 			});
-		if close || modal.should_close() {
+			d.footer(|ui| {
+				let valid = dialog.kind == Kind::Delete
+					|| if dialog.kind == Kind::Edit {
+						dialog.draft.valid()
+					} else {
+						client_core::channel_actions::valid_name(&dialog.draft.name)
+					};
+				let label = if pending_now {
+					"Working…"
+				} else {
+					match dialog.kind {
+						Kind::Edit => "Save Changes",
+						Kind::Duplicate => "Duplicate Channel",
+						Kind::Create => "Create Channel",
+						Kind::Delete => "Delete Channel",
+					}
+				};
+				let kind = if dialog.kind == Kind::Delete {
+					dialog::Action::Danger
+				} else {
+					dialog::Action::Primary
+				};
+				ui.add_enabled_ui(
+					allowed
+						&& dialog.loaded && current
+						&& valid && !pending_now
+						&& (state.demo || state.gateway_connected),
+					|ui| {
+						if dialog::action(ui, label, kind).clicked() {
+							let action = match dialog.kind {
+								Kind::Edit => Action::Edit {
+									before: dialog.before.clone(),
+									after: dialog.draft.clone(),
+								},
+								Kind::Duplicate => Action::Duplicate {
+									name: dialog.draft.name.clone(),
+								},
+								Kind::Create => Action::CreateText {
+									name: dialog.draft.name.clone(),
+								},
+								Kind::Delete => Action::Delete,
+							};
+							if let Some(command) =
+								state.request_channel_action(dialog.channel, action)
+							{
+								commands.push(command);
+								dialog.submitted = true;
+							}
+						}
+					},
+				);
+				close |= dialog::action(
+					ui,
+					if pending_now { "Close" } else { "Cancel" },
+					dialog::Action::Neutral,
+				)
+				.clicked();
+			});
+		});
+		if close || response.close {
 			if pending {
 				self.feedback = Some(dialog.channel);
 			}
@@ -468,28 +508,33 @@ impl ChannelMenu {
 		if self.feedback.is_none() && !self.preference_error {
 			return;
 		}
-		let mut open = true;
-		egui::Window::new("Channel action")
-			.id(egui::Id::unique("channel-feedback"))
-			.collapsible(false)
-			.resizable(false)
-			.open(&mut open)
-			.show(ctx, |ui| {
-				ui.set_max_width((ctx.content_rect().width() - 64.0).clamp(160.0, 360.0));
-				if self.preference_error {
-					ui.label("Your favorites and pins are full. Remove one before adding another.");
-				}
-				if let Some(id) = self.feedback {
-					ui.label(if state.channel_action_pending() {
-						"Updating channel settings…"
-					} else {
-						state
-							.channel_action_status(id)
-							.unwrap_or("The channel action could not be started.")
-					});
-				}
+		let mut message = String::new();
+		if self.preference_error {
+			message.push_str("Your favorites and pins are full. Remove one before adding another.");
+		}
+		if let Some(id) = self.feedback {
+			if !message.is_empty() {
+				message.push_str("\n\n");
+			}
+			message.push_str(if state.channel_action_pending() {
+				"Updating channel settings…"
+			} else {
+				state
+					.channel_action_status(id)
+					.unwrap_or("The channel action could not be started.")
 			});
-		if !open {
+		}
+		let dismissed = dialog::Dialog::new("channel-feedback", "Channel action")
+			.width(380.0)
+			.show(ctx, |d| {
+				let mut dismissed = false;
+				d.content(|ui| dialog::notice(ui, dialog::Level::Warning, &message));
+				d.footer(|ui| {
+					dismissed = dialog::action(ui, "Dismiss", dialog::Action::Primary).clicked();
+				});
+				dismissed
+			});
+		if dismissed.inner || dismissed.close {
 			self.feedback = None;
 			self.preference_error = false;
 		}

@@ -72,48 +72,13 @@ impl MessagingUi {
 		self.account_menu.open = open;
 		if self.account_menu.custom_open {
 			let ctx = anchor.ctx.clone();
-			let margin = if ctx.content_rect().width() < 420.0 {
-				16
-			} else {
-				24
-			};
-			let mut close = false;
-			let response = egui::Modal::new(egui::Id::unique("custom-status-editor"))
-				.frame(
-					egui::Frame::new()
-						.fill(colors.chat)
-						.stroke(egui::Stroke::new(1.0, colors.border))
-						.corner_radius(14)
-						.inner_margin(margin),
-				)
-				.show(&ctx, |ui| {
-					ui.set_width(
-						(ctx.content_rect().width() - f32::from(margin) * 2.0 - 32.0)
-							.clamp(160.0, 420.0),
-					);
-					ui.horizontal_top(|ui| {
-						let width = (ui.available_width() - 36.0).max(1.0);
-						ui.allocate_ui_with_layout(
-							vec2(width, 28.0),
-							egui::Layout::top_down(egui::Align::Min),
-							|ui| {
-								ui.set_width(width);
-								ui.add(
-									egui::Label::new(
-										design::semibold(ui, "Custom status", 20.0)
-											.color(colors.text_strong),
-									)
-									.wrap(),
-								);
-							},
-						);
-						close =
-							icons::button(ui, icons::Icon::Close, 28.0, "Close dialog").clicked();
-					});
-					ui.add_space(16.0);
-					self.custom_status_editor(ui, state);
+			let response = crate::dialog::Dialog::new("custom-status-editor", "Custom status")
+				.subtitle("Shown next to your name across Discord.")
+				.width(420.0)
+				.show(&ctx, |d| {
+					d.content(|ui| self.custom_status_editor(ui, state));
 				});
-			if close || response.should_close() {
+			if response.close {
 				self.account_menu.custom_open = false;
 			}
 		}

@@ -3983,22 +3983,64 @@ impl eframe::App for Desktop {
 			self.queue_cache_for(model::Id(0), cache::Operation::SaveThemeVariant(key));
 		}
 		if self.confirming_close || self.confirming_logout {
-			egui::Window::new("Leave this session?").collapsible(false).show(&ctx,|ui|{
-                ui.label("Saved text drafts survive exit; selected files must be reselected. Logout removes local account data. Edits and uncertain sends need your attention.");
-                if self.forgetting{ui.label("Wait for saved-login removal to finish.");}
-                if self.extensions.cleanup_pending(){ui.label("Removing extension data before closing.");}
-                if self.cache_clears.pending(){ui.label("Cached history cleanup is pending; closing now may leave deleted messages on disk.");}
-                if !self.fixture_only && self.app_settings.state.needs_attention(){ui.label(self.app_settings.state.status());}
-                if !self.fixture_only && self.reading.needs_attention(){ui.label(self.reading.status());}
-				if !self.fixture_only && self.game_activity.needs_attention(){ui.label(self.game_activity.status());}
-                if !self.fixture_only && self.tray_setting.needs_attention(){ui.label(self.tray_setting.status());}
-                ui.horizontal(|ui|{
-                    if ui.button("Keep working").clicked(){self.confirming_close=false;self.confirming_logout=false;self.download_close_pending=false;}
-                    if ui.add_enabled(!self.forgetting,egui::Button::new("Discard and continue")).clicked(){
-                        if self.confirming_close{self.close_approved=true;self.uploads.cancel();if self.downloads.is_active(){self.downloads.cancel();self.download_close_pending=true;}else{ctx.send_viewport_cmd(egui::ViewportCommand::Close);}}else{self.logout(&ctx);}
-                    }
-                });
-            });
+			let mut notes: Vec<&str> = Vec::new();
+			if self.forgetting {
+				notes.push("Wait for saved-login removal to finish.");
+			}
+			if self.extensions.cleanup_pending() {
+				notes.push("Removing extension data before closing.");
+			}
+			if self.cache_clears.pending() {
+				notes.push(
+					"Cached history cleanup is pending; closing now may leave deleted messages on disk.",
+				);
+			}
+			if !self.fixture_only && self.app_settings.state.needs_attention() {
+				notes.push(self.app_settings.state.status());
+			}
+			if !self.fixture_only && self.reading.needs_attention() {
+				notes.push(self.reading.status());
+			}
+			if !self.fixture_only && self.game_activity.needs_attention() {
+				notes.push(self.game_activity.status());
+			}
+			if !self.fixture_only && self.tray_setting.needs_attention() {
+				notes.push(self.tray_setting.status());
+			}
+			let mut confirm = ui::dialog::Confirm::new(
+				"leave-session",
+				"Leave this session?",
+				"Saved text drafts survive exit; selected files must be reselected. Logging out removes local account data.",
+			)
+			.danger()
+			.confirm_label("Discard and Continue")
+			.cancel_label("Keep Working")
+			.enabled(!self.forgetting);
+			if !notes.is_empty() {
+				confirm = confirm.note(ui::dialog::Level::Warning, notes.join("\n"));
+			}
+			match confirm.show(&ctx) {
+				Some(ui::dialog::Choice::Confirmed) => {
+					if self.confirming_close {
+						self.close_approved = true;
+						self.uploads.cancel();
+						if self.downloads.is_active() {
+							self.downloads.cancel();
+							self.download_close_pending = true;
+						} else {
+							ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+						}
+					} else {
+						self.logout(&ctx);
+					}
+				}
+				Some(ui::dialog::Choice::Cancelled) => {
+					self.confirming_close = false;
+					self.confirming_logout = false;
+					self.download_close_pending = false;
+				}
+				None => {}
+			}
 		}
 		self.frame_metrics.reflows = self.messaging.timeline_reflows();
 		self.frame_metrics.finish();

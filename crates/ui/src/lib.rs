@@ -39,6 +39,7 @@ pub fn synthetic_own_profile(user: &model::User) -> model::UserProfile {
 	profiles::synthetic(user, None)
 }
 mod contact_editor;
+pub mod dialog;
 mod join_server;
 mod keybinds;
 mod profile_edit;
@@ -2559,17 +2560,15 @@ impl MessagingUi {
 						self.member_rows(ui, state);
 					});
 			} else {
-				let mut open = self.members_narrow_open;
-				egui::Window::new("Members")
-					.open(&mut open)
-					.collapsible(false)
-					.resizable(false)
-					.default_width(248.0)
-					.default_height(350.0)
-					.show(&ctx, |ui| {
-						self.member_rows(ui, state);
+				let response = dialog::Dialog::new("members-narrow", "Members")
+					.subtitle("Everyone with access to this conversation.")
+					.width(360.0)
+					.show(&ctx, |d| {
+						d.scroll(180.0, |ui| self.member_rows(ui, state));
 					});
-				self.members_narrow_open = open;
+				if response.close {
+					self.members_narrow_open = false;
+				}
 			}
 		} else if state.members.is_some() {
 			commands.push(state.close_members());
@@ -2965,32 +2964,39 @@ impl MessagingUi {
 			self.deleting = None;
 		}
 		if let Some((channel, message)) = self.deleting {
-			egui::Window::new("Delete message from Discord?")
-				.collapsible(false)
-				.show(&ctx, |ui| {
-					ui.label(
-						state
-							.channels
-							.iter()
-							.find(|c| c.id == channel)
-							.map_or("Original conversation unavailable", |c| c.name.as_str()),
-					);
-					ui.label("This removes the selected message from the conversation.");
-					let allowed = state.can_delete(channel, message);
-					if !allowed {
-						ui.weak("Deleting this message is unavailable.");
-					}
-					if ui
-						.add_enabled(allowed, egui::Button::new("Delete message"))
-						.clicked() && let Some(command) = state.prepare_delete(channel, message)
-					{
+			let allowed = state.can_delete(channel, message);
+			let conversation = state
+				.channels
+				.iter()
+				.find(|c| c.id == channel)
+				.map_or("this conversation", |c| c.name.as_str());
+			let mut confirm = dialog::Confirm::new(
+				"delete-message",
+				"Delete message?",
+				format!(
+					"This permanently removes the selected message from {conversation} for everyone."
+				),
+			)
+			.danger()
+			.confirm_label("Delete")
+			.cancel_label("Keep Message")
+			.enabled(allowed);
+			if !allowed {
+				confirm = confirm.note(
+					dialog::Level::Warning,
+					"Deleting this message is unavailable.",
+				);
+			}
+			match confirm.show(&ctx) {
+				Some(dialog::Choice::Confirmed) => {
+					if let Some(command) = state.prepare_delete(channel, message) {
 						commands.push(command);
-						self.deleting = None;
 					}
-					if ui.button("Keep message").clicked() {
-						self.deleting = None;
-					}
-				});
+					self.deleting = None;
+				}
+				Some(dialog::Choice::Cancelled) => self.deleting = None,
+				None => {}
+			}
 		}
 		self.voice_ptt_active = self.voice_push_to_talk
 			&& state.voice.active.is_some()

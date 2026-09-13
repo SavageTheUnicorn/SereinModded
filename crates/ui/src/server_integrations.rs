@@ -1,5 +1,5 @@
 //! Permission-aware integration cards and a single bounded webhook draft.
-use crate::{avatars::Avatars, design, icons};
+use crate::{avatars::Avatars, design, dialog, icons};
 use client_core::{Command, State};
 use egui::{RichText, Vec2};
 use model::{
@@ -51,6 +51,11 @@ impl IntegrationsUi {
 	}
 	pub fn has_changes(&self) -> bool {
 		self.draft != self.baseline || self.submitted
+	}
+	/// Overview and the webhook lists virtualize their own rows, so they own the page scroll.
+	/// The editor form is short and scrolls with the settings content instead.
+	pub fn scrolls_itself(&self) -> bool {
+		matches!(self.page, Page::Overview | Page::Webhooks | Page::Follows)
 	}
 	pub fn overlay_open(&self) -> bool {
 		self.delete.is_some()
@@ -138,7 +143,6 @@ impl IntegrationsUi {
 		avatars: &mut Avatars,
 		commands: &mut Vec<Command>,
 	) {
-		let colors = design::palette(ui);
 		let mut action = None;
 		if self.page != Page::Overview {
 			ui.horizontal(|ui| {
@@ -187,7 +191,7 @@ impl IntegrationsUi {
 		});
 		ui.add_space(12.0);
 		if let Some(error) = state.server_admin.error.or(self.error) {
-			ui.colored_label(colors.danger, error);
+			design::notice(ui, design::Level::Error, error);
 		}
 		if state.server_admin.needs_refresh {
 			ui.weak("Reload integrations before making more changes. Your draft will be kept.");
@@ -239,7 +243,7 @@ impl IntegrationsUi {
 	) {
 		ui.label("Customize your server with integrations. Manage webhooks, followed channels, and apps connected to your server.");
 		ui.hyperlink_to("Learn more about managing integrations.", HELP);
-		divider(ui);
+		design::divider(ui);
 		if state.can_manage_guild_webhooks(guild)
 			&& let Some(webhooks) = &snapshot.webhooks
 		{
@@ -261,7 +265,7 @@ impl IntegrationsUi {
 			) {
 				self.page = Page::Follows;
 			}
-			divider(ui);
+			design::divider(ui);
 		}
 		if state.can_manage_guild(guild)
 			&& let Some(integrations) = &snapshot.integrations
@@ -274,7 +278,7 @@ impl IntegrationsUi {
 			if integrations.len() == model::server_integrations::MAX_INTEGRATIONS {
 				ui.weak("Showing the first 50 integrations returned by Discord.");
 			}
-			let height = (ui.ctx().content_rect().height() - 360.0).max(180.0);
+			let height = design::list_height(ui, 0.0);
 			egui::ScrollArea::vertical()
 				.id_salt("integration-apps")
 				.max_height(height)
@@ -399,7 +403,7 @@ impl IntegrationsUi {
 		}
 		egui::ScrollArea::vertical()
 			.id_salt(("integration-webhooks", follows))
-			.max_height((ui.ctx().content_rect().height() - 270.0).max(160.0))
+			.max_height(design::list_height(ui, 0.0))
 			.auto_shrink([false, true])
 			.show_rows(ui, 88.0, rows.len(), |ui, range| {
 				for webhook in &rows[range] {
@@ -553,7 +557,7 @@ impl IntegrationsUi {
 				ui.label(format!("Added by {}", user.name));
 			});
 		}
-		divider(ui);
+		design::divider(ui);
 		if let Some(app) = &integration.application
 			&& let Some(webhooks) = &snapshot.webhooks
 		{
@@ -595,25 +599,24 @@ impl IntegrationsUi {
 			return;
 		};
 		ui.add_space(12.0);
-		let label = ui.label(design::medium(ui, "Name", 15.0));
-		ui.add(
-			egui::TextEdit::singleline(&mut draft.name)
-				.char_limit(80)
-				.desired_width(f32::INFINITY)
-				.margin(Vec2::new(12.0, 10.0)),
+		let label = design::label(ui, "Name");
+		design::input(
+			ui,
+			egui::TextEdit::singleline(&mut draft.name).char_limit(80),
 		)
 		.labelled_by(label.id);
 		if draft.name.capacity() > 320 {
 			draft.name.shrink_to_fit();
 		}
 		if !model::server_integrations::valid_webhook_name(&draft.name) {
-			ui.colored_label(
-				design::palette(ui).danger,
+			design::notice(
+				ui,
+				design::Level::Error,
 				"Use 1–80 characters without control characters or the reserved names Discord and Clyde.",
 			);
 		}
 		ui.add_space(16.0);
-		ui.label(design::medium(ui, "Channel", 15.0));
+		design::label(ui, "Channel");
 		let name = draft
 			.channel
 			.and_then(|id| state.channel(id))
@@ -695,21 +698,33 @@ impl IntegrationsUi {
 			return;
 		}
 		let integration = matches!(deletion.action, Action::DeleteIntegration { .. });
-		let mut confirm = false;
-		let mut cancel = false;
-		let modal = egui::Modal::new(egui::Id::unique("delete-server-integration")).show(ctx, |ui| {
-            ui.set_width((ctx.content_rect().width() - 64.0).clamp(180.0, 400.0));
-            ui.label(design::semibold(ui, if integration { "Remove integration?" } else { "Delete webhook?" }, 20.0));
-            ui.label(format!("Remove {}?", deletion.name));
-            ui.label(if integration { "This removes the integration, its associated bot, and its webhooks from this server." } else { "This webhook will stop delivering messages. A followed channel will also stop sending posts to this server." });
-            if let Some(error) = state.server_admin.error { ui.colored_label(design::palette(ui).danger, error); }
-            ui.add_space(16.0);
-            ui.horizontal(|ui| {
-                cancel = ui.add_enabled(!self.deleting, egui::Button::new("Cancel")).clicked();
-                confirm = ui.add_enabled(writable(state), egui::Button::new(RichText::new("Remove").color(design::palette(ui).danger))).clicked();
-            });
-        });
-		if confirm
+		let mut confirm = dialog::Confirm::new(
+			"delete-server-integration",
+			if integration {
+				"Remove integration?"
+			} else {
+				"Delete webhook?"
+			},
+			if integration {
+				format!(
+					"Removing {} also removes its bot and every webhook it owns from this server.",
+					deletion.name
+				)
+			} else {
+				format!(
+					"{} will stop delivering messages. A followed channel will also stop sending posts to this server.",
+					deletion.name
+				)
+			},
+		)
+		.danger()
+		.confirm_label(if integration { "Remove" } else { "Delete" })
+		.enabled(writable(state));
+		if let Some(error) = state.server_admin.error {
+			confirm = confirm.note(dialog::Level::Error, error);
+		}
+		let choice = confirm.show(ctx);
+		if choice == Some(dialog::Choice::Confirmed)
 			&& let Some(command) = state.request_server_admin(
 				guild,
 				server_admin::Action::Integrations(deletion.action.clone()),
@@ -717,7 +732,7 @@ impl IntegrationsUi {
 			commands.push(command);
 			self.deleting = true;
 		}
-		if (cancel || modal.should_close()) && !self.deleting {
+		if choice == Some(dialog::Choice::Cancelled) && !self.deleting {
 			self.delete = None;
 		}
 	}
@@ -739,19 +754,11 @@ fn webhook_name(webhook: &Webhook) -> &str {
 		.or(webhook.name.as_deref())
 		.unwrap_or("Webhook")
 }
-fn divider(ui: &mut egui::Ui) {
-	ui.add_space(24.0);
-	ui.separator();
-	ui.add_space(24.0);
-}
 fn primary(ui: &mut egui::Ui, text: &str, enabled: bool) -> egui::Response {
-	let colors = design::palette(ui);
-	ui.add_enabled(
-		enabled,
-		egui::Button::new(RichText::new(text).color(colors.accent_text))
-			.fill(colors.accent)
-			.min_size(Vec2::new(0.0, 36.0)),
-	)
+	ui.add_enabled_ui(enabled, |ui| {
+		design::button(ui, text, design::ButtonKind::Primary)
+	})
+	.inner
 }
 fn icon(ui: &mut egui::Ui, glyph: icons::Icon, size: f32) {
 	let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), egui::Sense::hover());

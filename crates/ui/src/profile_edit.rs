@@ -98,7 +98,7 @@ impl Editor {
 			});
 		}
 		if let Some(error) = state.own_profile.error {
-			ui.colored_label(colors.danger, error);
+			design::notice(ui, design::Level::Error, error);
 			if !state.own_profile.loading
 				&& !state.own_profile.saving
 				&& ui.button("Reload profile").clicked()
@@ -152,7 +152,11 @@ impl Editor {
 		let changes = draft.changes(profile);
 		let changed = changes != ProfileEdit::default();
 		if !changes.valid() {
-			ui.colored_label(colors.danger, "Check character limits and remove control characters. A display name cannot contain only spaces.");
+			design::notice(
+				ui,
+				design::Level::Error,
+				"Check character limits and remove control characters. A display name cannot contain only spaces.",
+			);
 		}
 		ui.add_space(16.0);
 		egui::Frame::new()
@@ -314,18 +318,12 @@ fn field(
 	} else {
 		egui::TextEdit::singleline(value)
 	};
-	ui.add(
+	design::input(
+		ui,
 		edit.id(egui::Id::unique(id))
 			.char_limit(limit)
-			.desired_width(f32::INFINITY)
 			.font(egui::FontId::proportional(15.0))
-			.text_color(colors.text)
-			.frame(
-				egui::Frame::new()
-					.fill(colors.base)
-					.corner_radius(4)
-					.inner_margin(egui::Margin::symmetric(12, 11)),
-			),
+			.text_color(colors.text),
 	)
 	.labelled_by(label_id);
 }

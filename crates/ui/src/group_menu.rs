@@ -164,48 +164,38 @@ impl GroupMenu {
 		}
 		let colors = design::palette_for(ctx);
 		let mut close = false;
-		let modal = egui::Modal::new(egui::Id::unique("group-editor"))
-			.frame(
-				egui::Frame::new()
-					.fill(colors.chat)
-					.stroke(egui::Stroke::new(1.0, colors.border))
-					.corner_radius(12)
-					.inner_margin(24),
-			)
-			.show(ctx, |ui| {
-				ui.set_width((ctx.content_rect().width() - 80.0).clamp(180.0, 536.0));
-				ui.horizontal(|ui| {
-					let width = ui.available_width() - 36.0;
-					ui.allocate_ui_with_layout(
-						egui::vec2(width, 28.0),
-						egui::Layout::top_down(egui::Align::Min),
-						|ui| {
-							ui.set_width(width);
-							ui.label(design::semibold(
-								ui,
-								if dialog.edit {
-									"Edit Group"
-								} else {
-									"Leave Group?"
-								},
-								20.0,
-							));
-						},
-					);
-					close = icons::button(ui, icons::Icon::Close, 28.0, "Close dialog").clicked();
-				});
-				let busy = dialog.submitted.is_some() || state.group_action_pending();
+		let busy = dialog.submitted.is_some() || state.group_action_pending();
+		let mut builder = crate::dialog::Dialog::new(
+			"group-editor",
+			if dialog.edit {
+				"Edit Group"
+			} else {
+				"Leave Group?"
+			},
+		)
+		.width(440.0);
+		builder = if dialog.edit {
+			builder.subtitle("Give this group a name and an icon everyone will recognise.")
+		} else {
+			builder.danger().subtitle(format!(
+				"You will need an invitation to rejoin {}.",
+				dialog.name
+			))
+		};
+		let response = builder.show(ctx, |d| {
+			d.content(|ui| {
+				ui.spacing_mut().item_spacing.y = 10.0;
 				if dialog.edit {
-					ui.add_space(24.0);
+					ui.add_space(6.0);
 					ui.vertical_centered(|ui| {
 						ui.add_enabled_ui(!busy && !dialog.choosing, |ui| {
 							let (rect, mut response) = ui.allocate_exact_size(
-								egui::Vec2::splat(144.0),
+								egui::Vec2::splat(120.0),
 								egui::Sense::click(),
 							);
 							if let Some(preview) = &dialog.preview {
 								egui::Image::new(preview)
-									.corner_radius(72)
+									.corner_radius(60)
 									.paint_at(ui, rect);
 							} else {
 								let mut channel = state.channel(dialog.channel).unwrap().clone();
@@ -214,7 +204,7 @@ impl GroupMenu {
 								}
 								let image = ui
 									.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
-										avatars.show_group(ui, &channel, 144.0, state.demo)
+										avatars.show_group(ui, &channel, 120.0, state.demo)
 									})
 									.inner;
 								response = response.union(image);
@@ -265,82 +255,58 @@ impl GroupMenu {
 							dialog.preview = None;
 						}
 					});
-					ui.add_space(24.0);
+					ui.add_space(10.0);
 					ui.add_enabled_ui(!busy, |ui| {
-						let response = ui.add_sized(
-							[ui.available_width(), 44.0],
+						let label = crate::dialog::label(ui, "Group name");
+						let response = crate::dialog::input(
+							ui,
 							egui::TextEdit::singleline(&mut dialog.name)
 								.char_limit(100)
 								.hint_text("Group name")
 								.id(egui::Id::unique(("group-name", self.revision))),
-						);
+						)
+						.labelled_by(label.id);
 						if dialog.focus_name {
 							response.request_focus();
 							dialog.focus_name = false;
 						}
 					});
-				} else {
-					ui.add_space(16.0);
-					ui.label(format!(
-						"Leave {}? You will need an invitation to rejoin.",
-						dialog.name
-					));
-					if let Some(reason) = state.leave_group_reason(dialog.channel) {
-						ui.colored_label(colors.warning, reason);
-					}
+				} else if let Some(reason) = state.leave_group_reason(dialog.channel) {
+					crate::dialog::notice(ui, crate::dialog::Level::Warning, reason);
 				}
 				if let Some(error) = dialog.error {
-					ui.colored_label(colors.danger, error);
+					crate::dialog::notice(ui, crate::dialog::Level::Error, error);
 				}
-				ui.add_space(24.0);
-				ui.horizontal(|ui| {
-					let width = (ui.available_width() - 8.0) / 2.0;
-					if ui
-						.add_sized([width, 44.0], egui::Button::new("Cancel").corner_radius(8))
-						.clicked()
-					{
-						close = true;
-					}
-					let changed =
-						dialog.name != dialog.original || !matches!(dialog.icon, Patch::Absent);
-					let valid = if dialog.edit {
-						!dialog.name.trim().is_empty() && changed
+				if state.demo {
+					crate::dialog::hint(ui, "Offline preview · no group changes");
+				}
+			});
+			d.footer(|ui| {
+				let changed =
+					dialog.name != dialog.original || !matches!(dialog.icon, Patch::Absent);
+				let valid = if dialog.edit {
+					!dialog.name.trim().is_empty() && changed
+				} else {
+					state.leave_group_reason(dialog.channel).is_none()
+				};
+				let label = if busy {
+					if dialog.edit {
+						"Saving…"
 					} else {
-						state.leave_group_reason(dialog.channel).is_none()
-					};
-					if ui
-						.add_enabled_ui(!busy && !dialog.choosing && valid, |ui| {
-							ui.add_sized(
-								[width, 44.0],
-								egui::Button::new(
-									design::semibold(
-										ui,
-										if busy {
-											if dialog.edit {
-												"Saving…"
-											} else {
-												"Leaving…"
-											}
-										} else if dialog.edit {
-											"Save"
-										} else {
-											"Leave Group"
-										},
-										15.0,
-									)
-									.color(colors.accent_text),
-								)
-								.fill(if dialog.edit {
-									colors.accent
-								} else {
-									colors.danger
-								})
-								.corner_radius(8),
-							)
-						})
-						.inner
-						.clicked()
-					{
+						"Leaving…"
+					}
+				} else if dialog.edit {
+					"Save"
+				} else {
+					"Leave Group"
+				};
+				let kind = if dialog.edit {
+					crate::dialog::Action::Primary
+				} else {
+					crate::dialog::Action::Danger
+				};
+				ui.add_enabled_ui(!busy && !dialog.choosing && valid, |ui| {
+					if crate::dialog::action(ui, label, kind).clicked() {
 						let command = if dialog.edit {
 							state.edit_group(
 								dialog.channel,
@@ -361,11 +327,11 @@ impl GroupMenu {
 						}
 					}
 				});
-				if state.demo {
-					ui.small("Offline preview · no group changes");
-				}
+				close |=
+					crate::dialog::action(ui, "Cancel", crate::dialog::Action::Neutral).clicked();
 			});
-		if close || modal.should_close() {
+		});
+		if close || response.close {
 			self.dialog = None;
 			self.icon_request = None;
 		}
