@@ -22,6 +22,7 @@ pub struct TimelineView {
 	pub(super) invite_requests: Vec<String>,
 	pub(super) invite_join: Option<String>,
 	pub(super) edit_started: bool,
+	pub(super) reply_started: bool,
 	pub(super) quick_delete: Option<(Id, Id)>,
 	pub(super) channel_reference: Option<Id>,
 	pub(super) reply_target: Option<Id>,
@@ -773,7 +774,7 @@ impl TimelineView {
 			scroll = scroll.vertical_scroll_offset(offset);
 		}
 		let mut measurements = Vec::new();
-		let mut selected_reply = state.reply;
+		let mut selected_reply = None;
 		// ScrollArea consumes wheel input while applying it; retain the viewing gesture.
 		let scroll_delta = ui.input(|input| input.smooth_scroll_delta().y);
 		let allow_hover =
@@ -1483,7 +1484,7 @@ impl TimelineView {
 						}
 						self.toolbar = Some((*id, toolbar_rect));
 					}
-					if selected_reply == Some(*id)
+					if selected_reply.or(state.reply) == Some(*id)
 						|| self.highlighted.is_some_and(|(target, _)| target == *id)
 					{
 						ui.painter().set(
@@ -1564,7 +1565,10 @@ impl TimelineView {
 			.rows
 			.get(anchor)
 			.map(|(id, _)| (*id, output.state.offset.y - anchor_top));
-		state.reply = selected_reply;
+		if selected_reply.is_some() {
+			state.reply = selected_reply;
+			self.reply_started = true;
+		}
 		let distance_from_bottom =
 			(output.content_size.y - output.state.offset.y - output.inner_rect.height()).max(0.0);
 		let at_bottom = distance_from_bottom <= 3.0;

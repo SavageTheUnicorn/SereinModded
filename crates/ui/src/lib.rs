@@ -2426,6 +2426,7 @@ impl MessagingUi {
 					.is_some_and(|known| known.supports_text());
 		}
 		if self.navigation_channel != state.selected {
+			self.focus_switched_composer = state.selected.is_some();
 			self.navigation_channel = state.selected;
 			self.guild = state
 				.selected
@@ -2736,6 +2737,10 @@ impl MessagingUi {
 							self.edit_undo_cleared = false;
 							self.composer_edit = None;
 							self.edit_sent = false;
+						}
+						if std::mem::take(&mut self.timeline.reply_started) {
+							self.focus_switched_composer = true;
+							ctx.request_repaint();
 						}
 						if let Some(target) = self.timeline.reply_target.take() {
 							if let Some(command) = state.open_reply_target(target) {
