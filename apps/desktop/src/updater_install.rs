@@ -647,7 +647,7 @@ pub(super) fn prepare_restart(directory: &Path, installation: &Path) -> Result<P
 	#[cfg(not(any(target_os = "macos", windows)))]
 	{
 		let _ = (installation, marker);
-		return Err("In-app installation is unsupported on this platform.".into());
+		Err("In-app installation is unsupported on this platform.".into())
 	}
 	#[cfg(any(target_os = "macos", windows))]
 	{

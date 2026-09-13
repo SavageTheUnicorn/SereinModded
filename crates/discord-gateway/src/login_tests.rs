@@ -163,6 +163,8 @@ async fn oversized_frames_stop_login_during_and_after_hello() {
 				let _ = socket
 					.send(Frame::Text(" ".repeat(MAX_WIRE + 1).into()))
 					.await;
+				// Keep the peer open until the client reports the capacity error.
+				socket
 			};
 			let client = run_inner(
 				Arc::new(
@@ -181,7 +183,7 @@ async fn oversized_frames_stop_login_during_and_after_hello() {
 				},
 				Some(&endpoint),
 			);
-			let ((), result) = tokio::join!(server, client);
+			let (_socket, result) = tokio::join!(server, client);
 			assert_eq!(
 				result,
 				Err(Failure::CapacityAt(

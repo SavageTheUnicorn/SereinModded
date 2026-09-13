@@ -104,11 +104,19 @@ mod tests {
 				"Compressed Gateway payload exceeds 4 MiB; connection stopped"
 			))
 		);
-		let mut bomb = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
-		bomb.write_all(&vec![b'x'; MAX_WIRE + 1]).unwrap();
-		bomb.flush().unwrap();
+		// Give Sync enough output space to emit its marker in the same call.
+		let mut bomb = flate2::Compress::new(flate2::Compression::fast(), true);
+		let mut compressed = Vec::with_capacity(MAX_WIRE + 1024);
+		bomb.compress_vec(
+			&vec![b'x'; MAX_WIRE + 1],
+			&mut compressed,
+			flate2::FlushCompress::Sync,
+		)
+		.unwrap();
+		assert_eq!(bomb.total_in(), (MAX_WIRE + 1) as u64);
+		assert!(compressed.ends_with(&[0, 0, 255, 255]));
 		assert_eq!(
-			Decoder::default().frame(Frame::Binary(bomb.get_ref().clone().into())),
+			Decoder::default().frame(Frame::Binary(compressed.into())),
 			Err(Failure::CapacityAt(
 				"Decompressed Gateway payload exceeds 4 MiB; connection stopped"
 			))
