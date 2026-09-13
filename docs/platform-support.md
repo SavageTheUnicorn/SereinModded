@@ -46,16 +46,16 @@ See [camera limits and validation](voice.md#camera-in-calls-macos-windows-and-li
 Windows compilation and isolated Linux adapter tests do not establish working
 physical capture or delivery to an official Discord client; these remain unverified.
 
-## Opt-in minimize to tray (September 11, 2026)
+## Opt-in tray icon (September 13, 2026)
 
-Windows General settings offer Minimize to tray, off by default. Minimizing
-hides the window only after successful Shell icon registration. The icon supports
+Windows General settings offer Show Serein in System Tray, off by default. Minimizing
+keeps the window in the taskbar, including taskbar clicks and automatic startup. The icon supports
 keyboard/mouse restore and a Show Serein / Quit menu. Quit uses the normal unsaved
 work/download exit checks; the window Close button retains normal exit behavior.
-Disabling restores a hidden window, and Shell recovery failure leaves it accessible.
+Disabling removes the tray icon without changing the window's minimized state.
 The adapter uses existing user32/Shell APIs and dependencies, with no background
 polling. A synthetic native Windows test verifies registration,
-hide/restore, own-window taskbar recovery, Quit event and cleanup. Linux/macOS have
+minimize/restore, own-window taskbar recovery, Quit event and cleanup. Linux/macOS have
 an explicitly disabled control; their tray integration is not implemented.
 
 ## Opt-in automatic startup
@@ -65,7 +65,7 @@ Serein minimized preference. Both default off. Registration uses the current use
 Run key; no administrator access, service, scheduled task or new dependency is needed.
 Windows Startup Apps can override this registration. Disable startup before deleting
 a portable installation, or re-enable it after moving the executable.
-Minimized launches stay in the taskbar unless the saved tray preference is enabled;
+Minimized launches stay in the taskbar even when the saved tray preference is enabled;
 the tray can attach safely after a minimized launch. Tray failures leave the window
 recoverable. The Close button still exits, and the tray Quit action retains unsaved
 work checks. macOS/Linux autostart remains explicitly unavailable.

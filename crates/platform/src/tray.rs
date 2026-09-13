@@ -1,4 +1,4 @@
-//! Opt-in native minimize-to-tray. Closing the window keeps its existing application behavior.
+//! Opt-in native tray icon. Minimizing and closing keep their normal window behavior.
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -42,7 +42,7 @@ impl Tray {
 		_window: std::sync::Arc<winit::window::Window>,
 		_wake: impl Fn() + 'static,
 	) -> Result<Self, &'static str> {
-		Err("Minimize to tray is currently available on Windows only.")
+		Err("The tray icon is currently available on Windows only.")
 	}
 	pub fn take_event(&self) -> Option<Event> {
 		None
@@ -85,7 +85,6 @@ mod native {
 		hooked: Cell<bool>,
 		enabled: Cell<bool>,
 		present: Cell<bool>,
-		hidden: Cell<bool>,
 		events: Events,
 		wake: Box<dyn Fn()>,
 	}
@@ -162,7 +161,6 @@ mod native {
 					hooked: Cell::new(false),
 					enabled: Cell::new(true),
 					present: Cell::new(false),
-					hidden: Cell::new(false),
 					events: Events::default(),
 					wake: Box::new(wake),
 				}),
@@ -194,14 +192,6 @@ mod native {
 			if !tray.state.add_icon() {
 				return Err(UNAVAILABLE);
 			}
-			// The saved tray preference can arrive after a minimized autostart launch.
-			// SAFETY: hwnd belongs to the retained window and the tray icon now exists.
-			unsafe {
-				if IsIconic(hwnd).as_bool() {
-					tray.state.hidden.set(true);
-					let _ = ShowWindow(hwnd, SW_HIDE);
-				}
-			}
 			Ok(tray)
 		}
 
@@ -232,7 +222,6 @@ mod native {
 			}
 		}
 		fn restore(&self) {
-			self.hidden.set(false);
 			// SAFETY: called while the retained window/subclass is live on its owning thread.
 			unsafe {
 				let _ = ShowWindow(self.icon.hWnd, SW_RESTORE);
@@ -298,9 +287,6 @@ mod native {
 					}
 				}
 				// A newer hook may still call ours: retain disabled state until WM_NCDESTROY.
-				if self.state.hidden.get() {
-					self.state.restore();
-				}
 			}
 			self.state.remove_icon();
 		}
@@ -350,7 +336,6 @@ mod native {
 		}
 		if message == WM_NCDESTROY {
 			let hooked = state.hooked.replace(false);
-			state.hidden.set(false);
 			state.remove_icon();
 			// SAFETY: remove only our property as the window is destroyed.
 			let _ = unsafe { RemovePropW(hwnd, w!("Serein.TrayState")) };
@@ -362,19 +347,7 @@ mod native {
 			}
 		}
 		// SAFETY: every unhandled message follows the original winit subclass chain.
-		let result = unsafe { CallWindowProcW(state.previous, hwnd, message, wparam, lparam) };
-		if message == WM_SIZE
-			&& wparam.0 == SIZE_MINIMIZED as usize
-			&& state.present.get()
-			&& state.enabled.get()
-			&& state.hooked.get()
-			&& !state.hidden.get()
-		{
-			state.hidden.set(true);
-			// SAFETY: only a successfully registered tray can hide its own minimized window.
-			let _ = unsafe { ShowWindow(hwnd, SW_HIDE) };
-		}
-		result
+		unsafe { CallWindowProcW(state.previous, hwnd, message, wparam, lparam) }
 	}
 
 	#[cfg(test)]
@@ -408,8 +381,8 @@ mod native {
 			// SAFETY: every API here targets only this test-owned synthetic window/menu/icon.
 			unsafe {
 				let _ = ShowWindow(hwnd, SW_MINIMIZE);
-				assert!(!IsWindowVisible(hwnd).as_bool());
-				assert!(tray.state.hidden.get());
+				assert!(IsWindowVisible(hwnd).as_bool());
+				assert!(IsIconic(hwnd).as_bool());
 				let _ = SendMessageW(
 					hwnd,
 					icon.uCallbackMessage,
@@ -427,7 +400,7 @@ mod native {
 				assert_eq!(tray.take_event(), Some(Event::Quit));
 				assert!(IsWindow(Some(hwnd)).as_bool()); // Quit is an app event, never forced destruction.
 				let _ = ShowWindow(hwnd, SW_MINIMIZE);
-				assert!(!IsWindowVisible(hwnd).as_bool());
+				assert!(IsWindowVisible(hwnd).as_bool());
 				drop(tray);
 				assert!(IsWindowVisible(hwnd).as_bool());
 				assert!(GetPropW(hwnd, w!("Serein.TrayState")).is_invalid());
@@ -439,11 +412,11 @@ mod native {
 				// Startup can minimize before the asynchronous preference enables the tray.
 				let _ = ShowWindow(hwnd, SW_MINIMIZE);
 				let late_tray = Tray::new(window.clone(), || {}).unwrap();
-				assert!(late_tray.state.hidden.get());
-				assert!(!IsWindowVisible(hwnd).as_bool());
+				assert!(IsIconic(hwnd).as_bool());
+				assert!(IsWindowVisible(hwnd).as_bool());
 				drop(late_tray);
 				assert!(IsWindowVisible(hwnd).as_bool());
-				assert!(!IsIconic(hwnd).as_bool());
+				assert!(IsIconic(hwnd).as_bool());
 			}
 			assert_eq!(wakes.get(), 2);
 			window.set_visible(false);

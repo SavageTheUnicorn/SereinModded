@@ -460,15 +460,16 @@ looks up metadata. The saved boolean and database schema are unchanged.
 
 ### Tray and account activity privacy (September 11, 2026)
 
-Minimize to tray is off by default. One strict integer in the independent
+The tray icon is off by default. One strict integer in the existing independent
 `minimize_to_tray` singleton table survives restart/logout; disabling deletes its
 row. Schema 12 receives the additive table without migrating messages. Demo toggles
 are memory-only. Failed loads stay off and failed saves remain visible.
 
 The Windows adapter owns one icon/menu and a window procedure hook on the existing
 UI thread. Three event bits coalesce Show/Quit/failure; there is no worker, polling
-timer, autostart or new dependency. It restores the window before removing a hidden
-tray or reporting Shell failure. Closing still follows existing application exit gates.
+timer, autostart or new dependency. Minimizing stays in the taskbar; enabling or disabling
+the tray icon does not hide or restore the window. Shell failure restores the window.
+Closing still follows existing application exit gates.
 
 While local game sharing is enabled, one cancellable account-settings operation reads
 Discord's actual sharing preference. A one-slot request channel permits an explicit

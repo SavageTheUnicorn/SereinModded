@@ -598,8 +598,8 @@ impl MessagingUi {
 		ui.add_enabled_ui(self.tray_available, |ui| {
 			design::switch(
 				ui,
-				"Minimize Serein to System Tray",
-				Some("Keep Serein running in the notification area when minimized."),
+				"Show Serein in System Tray",
+				Some("Show a notification-area icon. Minimized windows stay in the taskbar."),
 				&mut self.minimize_to_tray,
 			);
 		});
