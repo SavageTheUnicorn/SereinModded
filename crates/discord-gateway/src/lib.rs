@@ -1522,7 +1522,10 @@ mod tests {
 					} else {
 						assert_eq!(handshake["op"], 2);
 						assert!(handshake["d"].get("session_id").is_none());
-						assert_eq!(handshake["d"]["properties"]["browser"], "Chrome");
+						assert_eq!(
+							handshake["d"]["properties"]["browser"],
+							client_core::fingerprint::browser()
+						);
 						assert_eq!(
 							handshake["d"]["properties"]["browser_user_agent"],
 							client_core::fingerprint::user_agent()

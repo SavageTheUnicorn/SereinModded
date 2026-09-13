@@ -6,8 +6,10 @@
 //! browser-shaped identity on every transport keeps the session classified as an ordinary
 //! web client. Nothing here carries account data; it is the same for every user.
 
-/// Browser version advertised in every fingerprint field; bump together when refreshing.
+/// Chrome version advertised on Windows and Linux; bump together when refreshing.
 const CHROME_MAJOR: &str = "128";
+/// Safari version advertised on macOS, where the verification widget runs in WebKit.
+const SAFARI_VERSION: &str = "18.5";
 /// Build number of the official web client this fingerprint mirrors.
 pub const CLIENT_BUILD_NUMBER: u64 = 328_246;
 pub const LOCALE: &str = "en-US";
@@ -30,12 +32,40 @@ fn platform_token() -> &'static str {
 	}
 }
 
-/// `User-Agent` header value shared by REST, uploads and the Gateway identify.
+/// Browser name Discord expects in super-properties, matched to the engine the embedded
+/// hCaptcha widget actually runs in. A passcode solved in WebKit but submitted with a Chrome
+/// fingerprint reads as a relayed captcha and triggers phone verification.
+pub fn browser() -> &'static str {
+	if cfg!(target_os = "macos") {
+		"Safari"
+	} else {
+		"Chrome"
+	}
+}
+
+/// Browser version paired with [`browser`].
+pub fn browser_version() -> String {
+	if cfg!(target_os = "macos") {
+		SAFARI_VERSION.to_owned()
+	} else {
+		format!("{CHROME_MAJOR}.0.0.0")
+	}
+}
+
+/// `User-Agent` header value shared by REST, uploads, the Gateway identify and the
+/// embedded verification webview.
 pub fn user_agent() -> String {
-	format!(
-		"Mozilla/5.0 ({}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{CHROME_MAJOR}.0.0.0 Safari/537.36",
-		platform_token()
-	)
+	if cfg!(target_os = "macos") {
+		format!(
+			"Mozilla/5.0 ({}) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/{SAFARI_VERSION} Safari/605.1.15",
+			platform_token()
+		)
+	} else {
+		format!(
+			"Mozilla/5.0 ({}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{CHROME_MAJOR}.0.0.0 Safari/537.36",
+			platform_token()
+		)
+	}
 }
 
 /// Gateway `identify.d.properties` and the decoded `X-Super-Properties` payload.
@@ -44,15 +74,16 @@ pub fn properties() -> String {
 	// literal or a controlled ASCII string, so no escaping is required.
 	format!(
 		concat!(
-			"{{\"os\":\"{os}\",\"browser\":\"Chrome\",\"device\":\"\",\"system_locale\":\"{locale}\",",
-			"\"browser_user_agent\":\"{ua}\",\"browser_version\":\"{chrome}.0.0.0\",\"os_version\":\"\",",
+			"{{\"os\":\"{os}\",\"browser\":\"{browser}\",\"device\":\"\",\"system_locale\":\"{locale}\",",
+			"\"browser_user_agent\":\"{ua}\",\"browser_version\":\"{version}\",\"os_version\":\"\",",
 			"\"referrer\":\"\",\"referring_domain\":\"\",\"referrer_current\":\"\",\"referring_domain_current\":\"\",",
 			"\"release_channel\":\"stable\",\"client_build_number\":{build},\"client_event_source\":null}}"
 		),
 		os = os_name(),
 		locale = LOCALE,
+		browser = browser(),
 		ua = user_agent(),
-		chrome = CHROME_MAJOR,
+		version = browser_version(),
 		build = CLIENT_BUILD_NUMBER,
 	)
 }
@@ -110,8 +141,11 @@ mod tests {
 		let text = properties();
 		assert!(text.starts_with('{') && text.ends_with('}'));
 		assert!(text.contains(&format!("\"browser_user_agent\":\"{}\"", user_agent())));
-		assert!(text.contains("\"browser\":\"Chrome\""));
+		assert!(text.contains(&format!("\"browser\":\"{}\"", browser())));
+		assert!(text.contains(&format!("\"browser_version\":\"{}\"", browser_version())));
 		assert!(user_agent().starts_with("Mozilla/5.0 ("));
+		assert_eq!(user_agent().contains("Chrome/"), browser() == "Chrome");
+		assert_eq!(user_agent().contains("Version/"), browser() == "Safari");
 		assert!(
 			super_properties()
 				.bytes()

@@ -50,7 +50,10 @@ impl CaptchaView {
 			&config(challenge, dark, &capability).to_string(),
 		);
 		let (send, results) = mpsc::sync_channel(1);
+		// hCaptcha scores the solving environment and Discord compares it with the REST
+		// fingerprint that later submits the passcode; the two must present one identity.
 		let builder = WebViewBuilder::new()
+			.with_user_agent(client_core::fingerprint::user_agent())
 			.with_visible(false)
 			.with_incognito(true).with_devtools(false)
 			.with_custom_protocol("serein-captcha".into(), move |_, request| {
