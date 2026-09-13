@@ -1,5 +1,14 @@
 # Local storage policy and audit
 
+Explicit media clipboard copies (September 13) reuse the bounded attachment
+download worker. One original video, at most 100 MiB, remains in a randomized
+`serein-clipboard-*` OS temporary directory while its file clipboard entry is
+usable. The next media copy, logout, or normal exit releases it; pasting requires
+the app to remain open. Image staging files are removed after decoding. All file
+work and cleanup run outside rendering. Forced termination or filesystem failures
+can leave a temporary file; cleanup errors are visible. Clipboard contents belong
+to the OS and may also be retained by clipboard managers. No cache schema changes.
+
 Channel shortcuts (September 12, schema 15): favorites and pins are device-local,
 account-isolated SQLite preferences. Both lists together contain at most 256 IDs,
 with at most 4 KiB retained vector storage and an 8 KiB serialized record. Loading

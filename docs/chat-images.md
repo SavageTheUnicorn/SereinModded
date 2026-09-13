@@ -14,11 +14,33 @@ Each message admits at most 10 attachments and 64 KiB of attachment metadata. Fi
 
 ## Explicit original downloads
 
+Right-click an image attachment, its enlarged viewer image, or an inline video for
+**Copy image/video**, **Save image/video as…**, and **Copy link**. Save uses the same
+native destination dialog and bounded original download below. Copy and Save share
+one transfer slot and are disabled for synthetic demo attachments. Spoiler media
+must first be revealed. Embedded images and thumbnails offer the same menu. They
+copy/save a PNG rendition from the existing validated service media proxy, up to
+2048 pixels per edge and 16 MiB encoded. Missing or unsafe proxy URLs fail visibly;
+arbitrary external image origins are never fetched directly. Embedded video links
+retain their existing external-open behavior because no inline player is available.
+
+Copy image downloads the original and places decoded pixels on the OS clipboard;
+PNG, JPEG, GIF (first frame), and WebP are supported by the installed decoder.
+Unsupported formats fail visibly; saving the original remains available. Copy is
+limited to 4096 pixels per edge, 4,194,304 pixels total, and a 32 MiB decoder
+allocation budget. Copy video places the original file on the native file clipboard
+for applications that accept pasted files; it does not copy a screenshot or URL.
+One video file, at most 100 MiB, stays in a randomized OS temporary directory until
+the next media copy starts, logout, or normal exit. Starting a replacement releases the previous copy even if the new transfer fails. Keep Serein open until pasting. Images
+use the same temporary download staging but release the file after decoding.
+Clipboard ownership is retained for Linux selection support. Forced termination
+or a cleanup failure can leave temporary files; cleanup failures are reported.
+
 Saving starts only after the user chooses a destination in the native dialog. Cocoa/Windows dialogs and the Linux desktop FileChooser portal own this interaction; the macOS dialog future is constructed on the UI thread. The app retains one dialog/download slot until it finishes. Cancel during destination selection prevents the transfer but the native dialog still needs to be dismissed. Downloads are disabled for all synthetic demo attachments. Suggested names preserve ordinary extensions while removing unsafe path/control characters; an empty result becomes the extensionless `attachment`.
 
 The separate credential-free download client accepts only HTTPS `cdn.discordapp.com/attachments/{channel}/{attachment}/{filename}` originals with the selected attachment ID and permitted signed `ex`/`is`/`hm` query parameters. It does not use proxies, follow redirects, send account credentials, or write URLs to status messages/logs. Any attachment type is eligible with a known size of 1 byte through 100 MiB; this is a local save limit, not an account entitlement. The completed response must exactly match that size. Signed URL rejection or a changed size requires reloading the conversation. Media-proxy transformations are not saved in place of the original. Discord's [attachment fields](https://docs.discord.com/developers/resources/message#attachment-object) and [signed CDN URL reference](https://docs.discord.com/developers/reference#signed-attachment-cdn-urls) were rechecked September 10, 2026; live normal-user delivery remains unverified.
 
-One dedicated worker streams the response, writes blocks of at most 32 KiB and coalesces progress to at most ten updates per second. Connection/read/whole-request timeouts are 15/30/300 seconds. It neither decodes the downloaded file nor holds a complete original image in memory. A randomized hidden sibling `.serein-*.partial` file is created exclusively, flushed, then published. Native Save confirmation authorizes replacing the selected existing regular file only after the complete transfer; an incomplete or cancelled response cannot truncate it. New destinations use an atomic hard link and temporary-file removal, preserving a file that appears meanwhile. Filesystems without hard-link support fail visibly rather than using a destructive fallback. Symlink and directory destinations are rejected.
+One dedicated worker streams the response, writes blocks of at most 32 KiB and coalesces progress to at most ten updates per second. Connection/read/whole-request timeouts are 15/30/300 seconds. Saving neither decodes the downloaded file nor holds a complete original image in memory. A randomized hidden sibling `.serein-*.partial` file is created exclusively, flushed, then published. Native Save confirmation authorizes replacing the selected existing regular file only after the complete transfer; an incomplete or cancelled response cannot truncate it. New destinations use an atomic hard link and temporary-file removal, preserving a file that appears meanwhile. Filesystems without hard-link support fail visibly rather than using a destructive fallback. Symlink and directory destinations are rejected.
 
 Cancellation is checked during transfer and again after flushing, immediately before publication. Logout and application teardown cancel the worker; normal window close waits for it to finish. Closing the image viewer alone does not cancel a requested download. Cleanup failures appear in status. Forced termination or filesystem failures can leave a partial sibling; cleanup is not a crash-proof guarantee. User-selected downloads are outside the application cache and are not removed by cache clearing or logout.
 

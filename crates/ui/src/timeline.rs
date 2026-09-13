@@ -1160,6 +1160,7 @@ impl TimelineView {
 											&mut self.formatted,
 											avatars,
 											&mut self.opening,
+											&mut self.download,
 											profile,
 											state,
 										) {
@@ -4474,6 +4475,7 @@ mod tests {
 					&mut FormatCache::default(),
 					&mut crate::avatars::Avatars::default(),
 					&mut None,
+					&mut crate::attachments::DownloadUi::default(),
 					&mut None,
 					&State {
 						demo: true,

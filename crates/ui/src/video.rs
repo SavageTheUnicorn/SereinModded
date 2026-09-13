@@ -127,14 +127,19 @@ impl VideoUi {
 			})
 			.id()
 	}
-	pub fn show(&mut self, ui: &mut egui::Ui, message: &Message, attachment: &Attachment) {
+	pub fn show(
+		&mut self,
+		ui: &mut egui::Ui,
+		message: &Message,
+		attachment: &Attachment,
+	) -> egui::Response {
 		let colors = crate::design::palette(ui);
 		let active = self.active.as_ref().is_some_and(|(channel, id, file)| {
 			*channel == message.channel && *id == message.id && file == attachment
 		});
 		let state = if active { self.state } else { VideoState::Idle };
 		let width = ui.available_width().clamp(1.0, MAX_WIDTH);
-		let (stage, response) =
+		let (stage, mut response) =
 			ui.allocate_exact_size(stage_size(attachment, width), egui::Sense::click());
 		let label = match state {
 			VideoState::Loading => "Cancel",
@@ -279,6 +284,10 @@ impl VideoUi {
 			self.toggle(message, attachment, state);
 		}
 		let mut controls_focused = false;
+		let context_click = ui.input(|i| {
+			i.pointer.button_down(egui::PointerButton::Secondary)
+				|| i.pointer.button_released(egui::PointerButton::Secondary)
+		});
 		if show_controls {
 			let bar = egui::Rect::from_min_max(
 				egui::pos2(stage.left(), stage.bottom() - BAR_HEIGHT),
@@ -329,7 +338,8 @@ impl VideoUi {
 					);
 					seek.widget_info(|| egui::WidgetInfo::slider(can_seek, position, "Seek video"));
 					controls_focused |= seek.has_focus();
-					if seek.on_hover_text("Seek video").changed() {
+					response |= seek.clone();
+					if seek.on_hover_text("Seek video").changed() && !context_click {
 						self.command = Some(VideoCommand::Seek(position));
 					}
 					ui.horizontal(|ui| {
@@ -379,6 +389,7 @@ impl VideoUi {
 								glyph_color,
 							),
 						}
+						response |= glyph.clone();
 						if glyph.on_hover_text(label).clicked() {
 							self.toggle(message, attachment, state);
 						}
@@ -397,20 +408,23 @@ impl VideoUi {
 						);
 						ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
 							ui.spacing_mut().slider_width = 56.0;
+							let mut volume_value = self.volume;
 							let volume = ui.add(
-								egui::Slider::new(&mut self.volume, 0.0..=1.0)
+								egui::Slider::new(&mut volume_value, 0.0..=1.0)
 									.show_value(false)
 									.trailing_fill(true),
 							);
 							volume.widget_info(|| {
 								egui::WidgetInfo::slider(
 									ui.is_enabled(),
-									self.volume as f64,
+									volume_value as f64,
 									"Video volume",
 								)
 							});
 							controls_focused |= volume.has_focus();
-							if volume.on_hover_text("Video volume").changed() {
+							response |= volume.clone();
+							if volume.on_hover_text("Video volume").changed() && !context_click {
+								self.volume = volume_value;
 								self.command = Some(VideoCommand::Volume(self.volume));
 							}
 							crate::icons::inline(
@@ -439,6 +453,7 @@ impl VideoUi {
 			}) {
 			self.seen = true;
 		}
+		response
 	}
 }
 fn stage_size(attachment: &Attachment, width: f32) -> egui::Vec2 {

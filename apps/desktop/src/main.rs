@@ -3495,10 +3495,12 @@ impl eframe::App for Desktop {
 		let download_status = match self.downloads.poll() {
 			downloads::Status::Idle => String::new(),
 			downloads::Status::Choosing => "Choose where to save the attachment…".into(),
+			downloads::Status::Downloading { total: 0, .. } => "Loading image…".into(),
 			downloads::Status::Downloading { received, total } => {
 				format!("Downloading: {} / {} KiB", received / 1024, total / 1024)
 			}
 			downloads::Status::Saved | downloads::Status::Cancelled => String::new(),
+			downloads::Status::Copied => "Copied to clipboard".into(),
 			downloads::Status::Failed(error) => (*error).into(),
 		};
 		self.messaging.downloads().active = self.downloads.is_active();
@@ -3511,8 +3513,10 @@ impl eframe::App for Desktop {
 			self.extension_close_pending = false;
 			ctx.send_viewport_cmd(egui::ViewportCommand::Close);
 		}
-		if close_requested && self.downloads.is_active() {
+		if close_requested {
 			self.downloads.cancel();
+		}
+		if close_requested && self.downloads.is_active() {
 			self.download_close_pending = true;
 			ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
 		}
@@ -3778,6 +3782,27 @@ impl eframe::App for Desktop {
 			}
 			if std::mem::take(&mut self.messaging.downloads().cancel_requested) {
 				self.downloads.cancel();
+			}
+			if let Some((media, copy)) = self.messaging.downloads().embed_request.take()
+				&& !self.state.demo
+				&& !self.fixture_only
+				&& let Err(error) = self.downloads.start_embed(
+					media,
+					copy,
+					self.runtime.handle(),
+					&ctx,
+					self.window.clone(),
+				) {
+				self.state.status = error;
+			}
+			if let Some(attachment) = self.messaging.downloads().copy_request.take()
+				&& !self.state.demo
+				&& !self.fixture_only
+				&& let Err(error) =
+					self.downloads
+						.start_copy(attachment, self.runtime.handle(), &ctx)
+			{
+				self.state.status = error;
 			}
 			if let Some(attachment) = self.messaging.downloads().request.take()
 				&& !self.state.demo

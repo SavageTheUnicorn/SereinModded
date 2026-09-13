@@ -258,7 +258,7 @@ fn cdn_url(key: &str) -> Option<String> {
 }
 
 // Only service-provided image objects reach this path. Never fetch an arbitrary embed source.
-fn embed_url(source: &str, edge: u32) -> Option<String> {
+pub(crate) fn embed_url(source: &str, edge: u32) -> Option<String> {
 	if source.len() > 2048 || source.bytes().any(|b| b.is_ascii_control() || b == b'\\') {
 		return None;
 	}

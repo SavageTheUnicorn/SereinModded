@@ -1,5 +1,6 @@
 //! Native embed cards. External links share the timeline's explicit confirmation.
 use crate::{
+	attachments::{DownloadUi, embed_context_menu},
 	avatars::Avatars,
 	markdown::{FormatCache, external_url},
 };
@@ -151,6 +152,7 @@ fn gallery(
 	embeds: &[Embed],
 	images: &mut Avatars,
 	opening: &mut Option<String>,
+	download: &mut DownloadUi,
 	demo: bool,
 ) {
 	let width = ui.available_width().clamp(1.0, 480.0);
@@ -169,13 +171,10 @@ fn gallery(
 					.as_deref()
 					.or(media.proxy_url.as_deref())
 					.and_then(external_url);
-				let response = images.show_banner(ui, media, rect.size(), demo).interact(
-					if target.is_some() {
-						egui::Sense::click()
-					} else {
-						egui::Sense::hover()
-					},
-				);
+				let image = images.show_banner(ui, media, rect.size(), demo);
+				let response =
+					ui.interact(image.rect, image.id.with("media"), egui::Sense::click());
+				embed_context_menu(&response, media, download, demo);
 				response.widget_info(|| {
 					egui::WidgetInfo::labeled(
 						if target.is_some() {
@@ -256,12 +255,30 @@ fn gif_for_embed(embed: &Embed, gifs: &client_core::gifs::Gifs) -> Option<Gif> {
 	gif.valid().then_some(gif)
 }
 
+fn image_preview(
+	ui: &mut egui::Ui,
+	image: &model::EmbedMedia,
+	size: egui::Vec2,
+	images: &mut Avatars,
+	download: &mut DownloadUi,
+	demo: bool,
+) {
+	let painted = images.show_embed(ui, image, size, demo);
+	let response = ui.interact(painted.rect, painted.id.with("media"), egui::Sense::click());
+	response.widget_info(|| {
+		egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), "Image actions")
+	});
+	embed_context_menu(&response, image, download, demo);
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn show(
 	ui: &mut egui::Ui,
 	message: &Message,
 	cache: &mut FormatCache,
 	images: &mut Avatars,
 	opening: &mut Option<String>,
+	download: &mut DownloadUi,
 	profile: &mut Option<model::User>,
 	state: &client_core::State,
 ) -> Option<Gif> {
@@ -277,7 +294,7 @@ pub fn show(
 		let embed = &group[0];
 		ui.push_id(("embed", index), |ui| {
 			if count > 1 && inline_image(embed).is_some() {
-				gallery(ui, group, images, opening, demo);
+				gallery(ui, group, images, opening, download, demo);
 				if group.iter().any(|e| e.limited) {
 					ui.small("Embed display limited");
 				}
@@ -286,9 +303,18 @@ pub fn show(
 			}
 			if let Some(image) = inline_image(embed) {
 				let gif = gif_for_embed(embed, &state.gifs);
-				let response = images
-					.show_gif_embed(ui, embed, gif.as_ref(), egui::vec2(480.0, 320.0), demo)
-					.interact(egui::Sense::click());
+				let painted =
+					images.show_gif_embed(ui, embed, gif.as_ref(), egui::vec2(480.0, 320.0), demo);
+				let response =
+					ui.interact(painted.rect, painted.id.with("media"), egui::Sense::click());
+				response.widget_info(|| {
+					egui::WidgetInfo::labeled(
+						egui::WidgetType::Button,
+						ui.is_enabled(),
+						"Open image",
+					)
+				});
+				embed_context_menu(&response, image, download, demo);
 				let star = gif.map(|gif| {
 					let favorite = state.is_gif_favorite(&gif);
 					let star_rect = egui::Rect::from_min_size(
@@ -426,7 +452,14 @@ pub fn show(
 									}
 								});
 								if let Some(image) = thumbnail {
-									images.show_embed(ui, image, egui::vec2(84.0, 84.0), demo);
+									image_preview(
+										ui,
+										image,
+										egui::vec2(84.0, 84.0),
+										images,
+										download,
+										demo,
+									);
 								}
 							});
 							let mut field = 0;
@@ -469,19 +502,28 @@ pub fn show(
 								field += count;
 							}
 							if count > 1 {
-								gallery(ui, group, images, opening, demo);
+								gallery(ui, group, images, opening, download, demo);
 							} else if let Some(image) = &embed.image {
-								images.show_embed(
+								image_preview(
 									ui,
 									image,
 									egui::vec2(ui.available_width(), 320.0),
+									images,
+									download,
 									demo,
 								);
 							}
 							if thumbnail.is_none()
 								&& let Some(image) = &embed.thumbnail
 							{
-								images.show_embed(ui, image, egui::vec2(84.0, 84.0), demo);
+								image_preview(
+									ui,
+									image,
+									egui::vec2(84.0, 84.0),
+									images,
+									download,
+									demo,
+								);
 							}
 							if embed.video.is_some()
 								|| matches!(embed.kind.as_str(), "video" | "gifv")
@@ -569,6 +611,135 @@ pub fn estimated_height(embeds: &[Embed]) -> f32 {
 mod tests {
 	use super::*;
 
+	#[test]
+	fn image_previews_dispatch_copy_and_save_without_opening_links() {
+		for variant in 0..5 {
+			for copy in [true, false] {
+				let mut message = test_support::message(1, model::Id(2));
+				let media = model::EmbedMedia {
+					url: Some("https://cdn.discordapp.com/attachments/2/42/preview.png".into()),
+					width: 160,
+					height: 90,
+					..Default::default()
+				};
+				message.embeds = vec![Embed {
+					kind: match variant {
+						0 | 4 => "image",
+						1 => "gifv",
+						_ => "rich",
+					}
+					.into(),
+					url: Some("https://example.org/post".into()),
+					image: (variant != 3).then(|| media.clone()),
+					thumbnail: (variant == 3).then(|| media.clone()),
+					..Default::default()
+				}];
+				if variant == 4 {
+					message.embeds.push(message.embeds[0].clone());
+					message.embeds[0].image.as_mut().unwrap().url =
+						Some("https://cdn.discordapp.com/attachments/2/43/other.png".into());
+				}
+				let ctx = egui::Context::default();
+				let mut images = Avatars::default();
+				let mut cache = FormatCache::default();
+				let mut opening = None;
+				let mut download = DownloadUi::default();
+				let mut frame = |events| {
+					ctx.run_ui(
+						egui::RawInput {
+							screen_rect: Some(egui::Rect::from_min_size(
+								egui::Pos2::ZERO,
+								egui::vec2(640.0, 700.0),
+							)),
+							events,
+							..Default::default()
+						},
+						|ui| {
+							assert!(
+								show(
+									ui,
+									&message,
+									&mut cache,
+									&mut images,
+									&mut opening,
+									&mut download,
+									&mut None,
+									&client_core::State::default()
+								)
+								.is_none()
+							);
+						},
+					)
+				};
+				frame(vec![]).drop_without_applying_deltas();
+				let output = frame(vec![]);
+				let pos = output
+					.shapes
+					.iter()
+					.filter_map(|shape| match &shape.shape {
+						egui::Shape::Rect(shape)
+							if shape.corner_radius == egui::CornerRadius::same(5)
+								&& shape.rect.width() > 40.0
+								&& shape.rect.height() > 30.0 =>
+						{
+							Some(shape.rect.center())
+						}
+						_ => None,
+					})
+					.next_back()
+					.expect("rendered image");
+				output.drop_without_applying_deltas();
+				for pressed in [true, false] {
+					frame(vec![
+						egui::Event::PointerMoved(pos),
+						egui::Event::PointerButton {
+							pos,
+							button: egui::PointerButton::Secondary,
+							pressed,
+							modifiers: egui::Modifiers::NONE,
+						},
+					])
+					.drop_without_applying_deltas();
+				}
+				let output = frame(vec![]);
+				let label = if copy {
+					"Copy image"
+				} else {
+					"Save image as…"
+				};
+				let target = output
+					.shapes
+					.iter()
+					.find_map(|shape| match &shape.shape {
+						egui::Shape::Text(text) if text.galley.job.text == label => {
+							Some(text.pos + text.galley.rect.center().to_vec2())
+						}
+						_ => None,
+					})
+					.unwrap_or_else(|| panic!("missing {label} for embed variant {variant}"));
+				output.drop_without_applying_deltas();
+				for pressed in [true, false] {
+					frame(vec![
+						egui::Event::PointerMoved(target),
+						egui::Event::PointerButton {
+							pos: target,
+							button: egui::PointerButton::Primary,
+							pressed,
+							modifiers: egui::Modifiers::NONE,
+						},
+					])
+					.drop_without_applying_deltas();
+				}
+				assert_eq!(download.embed_request, Some((media, copy)));
+				assert!(
+					download.request.is_none()
+						&& download.copy_request.is_none()
+						&& opening.is_none()
+				);
+			}
+		}
+	}
+
 	fn gallery_embeds(count: usize) -> Vec<Embed> {
 		(0..count)
 			.map(|index| Embed {
@@ -644,6 +815,7 @@ mod tests {
 							&mut cache,
 							&mut images,
 							&mut None,
+							&mut DownloadUi::default(),
 							&mut None,
 							&client_core::State::default(),
 						);
@@ -705,7 +877,14 @@ mod tests {
 							|ui| {
 								ui.set_width(width);
 								origin = ui.cursor().min;
-								gallery(ui, &embeds, &mut images, &mut opening, false);
+								gallery(
+									ui,
+									&embeds,
+									&mut images,
+									&mut opening,
+									&mut DownloadUi::default(),
+									false,
+								);
 							},
 						)
 						.drop_without_applying_deltas();

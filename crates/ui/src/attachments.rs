@@ -1,4 +1,6 @@
 //! Inline service attachments; decoded pixels reuse the existing bounded media cache.
+#[cfg(test)]
+mod context_tests;
 use crate::{
 	avatars::Avatars,
 	design,
@@ -285,9 +287,9 @@ pub fn show(
 					ui.horizontal_top(|ui| {
 						for attachment in row {
 							ui.push_id(("attachment", attachment.id), |ui| {
-								let response = images
-									.show_embed(ui, &attachment.media, size, demo)
-									.interact(egui::Sense::click());
+								let image = images.show_embed(ui, &attachment.media, size, demo);
+								let response =
+									ui.interact(image.rect, image.id.with("media"), Sense::click());
 								response.widget_info(|| {
 									egui::WidgetInfo::labeled(
 										egui::WidgetType::Button,
@@ -295,6 +297,7 @@ pub fn show(
 										format!("View image {}", attachment.filename),
 									)
 								});
+								media_context_menu(&response, attachment, download, demo);
 								if response
 									.on_hover_text(
 										attachment
@@ -315,7 +318,8 @@ pub fn show(
 			for attachment in group {
 				ui.push_id(("attachment", attachment.id), |ui| {
 					if attachment.is_video() {
-						video.show(ui, message, attachment);
+						let response = video.show(ui, message, attachment);
+						media_context_menu(&response, attachment, download, demo);
 						ui.horizontal_wrapped(|ui| {
 							download_button(ui, attachment, download, demo);
 							open_original(ui, attachment, opening);
@@ -361,11 +365,107 @@ fn open_original(ui: &mut egui::Ui, attachment: &Attachment, opening: &mut Optio
 #[derive(Default)]
 pub struct DownloadUi {
 	pub request: Option<Attachment>,
+	pub copy_request: Option<Attachment>,
+	pub embed_request: Option<(model::EmbedMedia, bool)>,
 	pub cancel_requested: bool,
 	pub active: bool,
 	pub status: String,
 }
+fn media_context_menu(
+	response: &egui::Response,
+	attachment: &Attachment,
+	download: &mut DownloadUi,
+	demo: bool,
+) {
+	if let Some(copy) = media_menu(
+		response,
+		attachment.is_video(),
+		attachment.media.url.as_deref(),
+		download,
+		demo,
+	) {
+		if copy {
+			download.copy_request = Some(attachment.clone());
+		} else {
+			download.request = Some(attachment.clone());
+		}
+	}
+}
+pub(crate) fn embed_context_menu(
+	response: &egui::Response,
+	media: &model::EmbedMedia,
+	download: &mut DownloadUi,
+	demo: bool,
+) {
+	if let Some(copy) = media_menu(
+		response,
+		false,
+		media.url.as_deref().or(media.proxy_url.as_deref()),
+		download,
+		demo,
+	) {
+		download.embed_request = Some((media.clone(), copy));
+	}
+}
+fn media_menu(
+	response: &egui::Response,
+	video: bool,
+	url: Option<&str>,
+	download: &DownloadUi,
+	demo: bool,
+) -> Option<bool> {
+	if !video && response.has_focus() {
+		response.ctx.layer_painter(response.layer_id).rect_stroke(
+			response.rect,
+			5,
+			Stroke::new(2.0, design::palette_for(&response.ctx).accent),
+			StrokeKind::Inside,
+		);
+	}
+	let mut popup = crate::user_menu::popup(response, response.id.with("media-menu"));
+	// Drag-only video sliders do not set secondary_clicked, but still belong to the media.
+	if response.contains_pointer() && response.ctx.input(|i| i.pointer.secondary_clicked()) {
+		popup = popup
+			.open_memory(Some(egui::SetOpenCommand::Bool(true)))
+			.at_pointer_fixed();
+	}
+	let mut action = None;
+	popup.show(|ui| {
+		let idle = !demo && !download.busy();
+		let kind = if video { "video" } else { "image" };
+		for (copy, label) in [
+			(true, format!("Copy {kind}")),
+			(false, format!("Save {kind} as…")),
+		] {
+			if ui
+				.add_enabled(idle, egui::Button::new(label))
+				.on_disabled_hover_text(if demo {
+					"Unavailable for synthetic attachments"
+				} else {
+					"A media transfer is already active"
+				})
+				.clicked()
+			{
+				action = Some(copy);
+				ui.close();
+			}
+		}
+		if let Some(url) = url.and_then(external_url)
+			&& ui.button("Copy link").clicked()
+		{
+			ui.ctx().copy_text(url);
+			ui.close();
+		}
+	});
+	action
+}
 impl DownloadUi {
+	fn busy(&self) -> bool {
+		self.active
+			|| self.request.is_some()
+			|| self.copy_request.is_some()
+			|| self.embed_request.is_some()
+	}
 	pub fn show_status(&mut self, ui: &mut egui::Ui) {
 		if self.active || !self.status.is_empty() {
 			ui.horizontal_wrapped(|ui| {
@@ -384,10 +484,7 @@ fn download_button(
 	demo: bool,
 ) {
 	if ui
-		.add_enabled(
-			!demo && !download.active && download.request.is_none(),
-			egui::Button::new("Download"),
-		)
+		.add_enabled(!demo && !download.busy(), egui::Button::new("Download"))
 		.on_hover_text("Choose where to save this file · up to 100 MiB")
 		.on_disabled_hover_text(if demo {
 			"Downloads are disabled for synthetic attachments"
@@ -511,15 +608,16 @@ pub fn viewer(
 					egui::Layout::centered_and_justified(egui::Direction::TopDown),
 				),
 				|ui| {
-					images
-						.show_large(ui, &attachment.media, fitted, demo)
-						.interact(Sense::click())
+					let image = images.show_large(ui, &attachment.media, fitted, demo);
+					let response = ui
+						.interact(image.rect, image.id.with("media"), Sense::click())
 						.on_hover_text(
 							attachment
 								.description
 								.as_deref()
 								.unwrap_or(&attachment.filename),
 						);
+					media_context_menu(&response, attachment, download, demo);
 				},
 			);
 			// Top bar: position counter on the left, actions on the right.
@@ -546,7 +644,7 @@ pub fn viewer(
 				|ui| {
 					ui.spacing_mut().item_spacing.x = 8.0;
 					close = glass_button(ui, Icon::Close, 40.0, "Close (Esc)").clicked();
-					let idle = !demo && !download.active && download.request.is_none();
+					let idle = !demo && !download.busy();
 					if ui
 						.add_enabled_ui(idle, |ui| {
 							glass_button(ui, Icon::Download, 40.0, "Download")

@@ -89,7 +89,7 @@ pub fn attachment_destination(
 	}
 }
 
-fn safe_filename(filename: &str) -> String {
+pub fn safe_filename(filename: &str) -> String {
 	let name: String = filename
 		.chars()
 		.filter(|c| {
