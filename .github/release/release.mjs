@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { appendFileSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { execFileSync } from 'node:child_process';
@@ -13,6 +14,29 @@ assert(['nightly', 'production'].includes(channel), 'Choose nightly or productio
 const planPath = 'target/release-plan.json';
 const plan = mode === 'publish' ? JSON.parse(readFileSync(planPath, 'utf8')) : null;
 if (plan) assert.equal(channel, plan.channel, 'Release channel changed');
+const caskPath = 'Casks/serein.rb';
+
+function updateCask() {
+  const asset = `release-assets/serein-${plan.gitTag}-macOS-ARM64.zip`;
+  const checksum = createHash('sha256').update(readFileSync(asset)).digest('hex');
+  const source = readFileSync(caskPath, 'utf8');
+  assert.match(source, /^  version "[^"]+"$/m, 'Cannot locate Homebrew cask version');
+  assert.match(source, /^  sha256 "[0-9a-f]{64}"$/m, 'Cannot locate Homebrew cask checksum');
+  writeFileSync(caskPath, source
+    .replace(/(^  version ")[^"]+("$)/m, `$1${plan.version}$2`)
+    .replace(/(^  sha256 ")[^"]+("$)/m, `$1${checksum}$2`));
+}
+
+function commitNightlyCask() {
+  const sha = execFileSync('git', ['rev-parse', `HEAD:${caskPath}`], { encoding: 'utf8' }).trim();
+  execFileSync('gh', [
+    'api', `repos/${process.env.GH_REPO}/contents/${caskPath}`, '--method', 'PUT',
+    '--field', `message=chore(release): update Homebrew cask for ${plan.version} [skip ci]`,
+    '--field', `content=${readFileSync(caskPath).toString('base64')}`,
+    '--field', `sha=${sha}`, '--field', 'branch=main',
+  ], { stdio: 'inherit' });
+}
+if (plan) updateCask();
 const conventional = { preset: 'conventionalcommits' };
 const plugins = [
   [require.resolve('@semantic-release/commit-analyzer'), conventional],
@@ -21,7 +45,7 @@ const plugins = [
 if (plan && channel === 'production') {
   plugins.push(
     [require.resolve('@semantic-release/git'), {
-      assets: ['Cargo.toml', 'Cargo.lock', 'fuzz/Cargo.lock', 'packaging/macos/Info.plist'],
+      assets: ['Cargo.toml', 'Cargo.lock', 'fuzz/Cargo.lock', 'packaging/macos/Info.plist', caskPath],
       message: 'chore(release): ${nextRelease.version} [skip ci]',
     }],
     [require.resolve('@semantic-release/github'), {
@@ -70,5 +94,6 @@ if (mode === 'plan') {
     { stdio: 'inherit' });
     execFileSync('gh', ['release', 'edit', plan.gitTag, '--draft=false', '--prerelease', '--latest=false'],
     { stdio: 'inherit' });
+    commitNightlyCask();
   }
 }
