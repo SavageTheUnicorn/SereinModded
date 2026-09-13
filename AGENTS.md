@@ -2,7 +2,7 @@
 
 ## Product boundaries
 
-Read `SPEC.md` completely before changing scope. This is an unofficial native client for
+Read the documentation completely before changing scope. This is an unofficial native client for
 existing Discord accounts, never a backend, bot replacement or Electron/web messaging wrapper.
 Preserve unrelated work. More specific `AGENTS.md` files apply inside their subtrees.
 

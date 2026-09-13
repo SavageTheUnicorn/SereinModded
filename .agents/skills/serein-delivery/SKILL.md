@@ -5,7 +5,7 @@ description: Deliver Serein feature and fix requests as tested pull requests wit
 
 # Serein delivery
 
-Follow root `AGENTS.md` and `SPEC.md`. This skill supplies the evidence and PR procedure;
+Follow root `AGENTS.md` and the documentation. This skill supplies the evidence and PR procedure;
 it does not grant new account, deployment, microphone or credential permissions.
 
 ## `!fast` local delivery

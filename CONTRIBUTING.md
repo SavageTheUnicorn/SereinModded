@@ -1,6 +1,6 @@
 # Contributing
 
-Read SPEC.md and AGENTS.md first, including the final owner-approved webview and local-storage changes. Build with the pinned toolchain and committed Cargo.lock.
+Read AGENTS.md and the documentation first, including the final owner-approved webview and local-storage changes. Build with the pinned toolchain and committed Cargo.lock.
 
 Run `cargo xtask check`, `node tests/login-handoff.cjs`, and `cargo replay`. Default tests must be synthetic/offline; SQLite tests use temporary disposable data. Never put actual Discord credentials into tests, CI, screenshots or reports. Keep the normal-user live gate manual and owner-controlled.
 

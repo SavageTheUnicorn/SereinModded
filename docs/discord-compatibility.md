@@ -239,7 +239,7 @@ September 10 continuation: Gateway documentation was rechecked for heartbeat, Re
 
 ## Authentication evidence and changed requirements
 
-The owner superseded the initial storage/login constraints during implementation: official-login webview, saved OS credential-store token, and subsequently bounded local SQLite caches/drafts are now required/allowed. SPEC.md records the final policy.
+The owner superseded the initial storage/login constraints during implementation: official-login webview, saved OS credential-store token, and subsequently bounded local SQLite caches/drafts are now required/allowed. The documentation records the final policy.
 
 [Discord Userdoccers’ original protocol research](https://docs.discord.food/authentication), checked 2026-09-09, describes normal-user password login, MFA tickets, and authentication tokens. It is unofficial evidence, not Discord approval. The final implementation delegates that login to Discord’s hosted UI instead of implementing these endpoints itself. Email/phone login, QR, TOTP, CAPTCHA, passkeys and device verification are offered only as the official page permits in the platform engine; none was tested with a real account here.
 
