@@ -50,13 +50,22 @@ if ($Uninstall) {
 $distDir = $PSScriptRoot
 $executable = Join-Path $distDir 'serein.exe'
 if (!(Test-Path -LiteralPath $executable)) {
-    throw "serein.exe not found in $distDir. Run this script from the release package directory."
+    $candidate = Join-Path (Join-Path $distDir '..\..\dist') 'serein.exe'
+    if (Test-Path -LiteralPath $candidate) {
+        $distDir = (Resolve-Path (Join-Path $distDir '..\..\dist')).Path
+        $executable = $candidate
+    } else {
+        throw "serein.exe not found in $distDir. Run this script from the release package directory or build the project first."
+    }
 }
 
 [IO.Directory]::CreateDirectory($installDir) | Out-Null
 
 # Copy payload
 Copy-Item -Path "$distDir\*" -Destination $installDir -Recurse -Force
+if ($PSCommandPath -and (Test-Path -LiteralPath $PSCommandPath)) {
+    Copy-Item -LiteralPath $PSCommandPath -Destination (Join-Path $installDir 'setup.ps1') -Force
+}
 
 # Create Start Menu shortcut with AUMID
 $notificationScript = Join-Path $installDir 'install-notifications.ps1'

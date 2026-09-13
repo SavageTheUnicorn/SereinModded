@@ -112,6 +112,9 @@ jobs:
         with:
           key: release
           cache-on-failure: true
+      - name: Install NSIS
+        if: runner.os == 'Windows'
+        run: choco install nsis --no-progress -y
       - name: Offline checks
         run: cargo xtask check
       - uses: oven-sh/setup-bun@v2.2.0

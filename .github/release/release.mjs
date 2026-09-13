@@ -4,6 +4,7 @@ import { appendFileSync, mkdirSync, readFileSync, readdirSync, writeFileSync } f
 import { createRequire } from 'node:module';
 import { execFileSync } from 'node:child_process';
 import semanticRelease from 'semantic-release';
+import { generateReleaseNotes } from './notes.mjs';
 
 const require = createRequire(import.meta.url);
 const mode = process.argv[2];
@@ -40,7 +41,7 @@ if (plan) updateCask();
 const conventional = { preset: 'conventionalcommits' };
 const plugins = [
   [require.resolve('@semantic-release/commit-analyzer'), conventional],
-  [require.resolve('@semantic-release/release-notes-generator'), conventional],
+  [{ generateNotes: (config, context) => generateReleaseNotes(channel, config, context) }, conventional],
 ];
 if (plan && channel === 'production') {
   plugins.push(
@@ -73,8 +74,10 @@ if (mode === 'plan') {
   appendFileSync(process.env.GITHUB_OUTPUT, `release=${Boolean(result)}\n`);
   if (result) {
     const { version: stableVersion, gitHead, notes } = result.nextRelease;
+    const date = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+    const runNumber = process.env.GITHUB_RUN_NUMBER || '1';
     const version = channel === 'nightly'
-      ? `${stableVersion}-nightly.${process.env.GITHUB_RUN_NUMBER}.${process.env.GITHUB_RUN_ATTEMPT}`
+      ? `${stableVersion}-nightly.${date}.${runNumber}`
       : stableVersion;
     const gitTag = `v${version}`;
     mkdirSync('target', { recursive: true });

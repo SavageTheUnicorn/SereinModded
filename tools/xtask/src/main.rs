@@ -275,8 +275,6 @@ fn package() -> Result<(), String> {
 			root.join("install-notifications.ps1"),
 		)
 		.map_err(|e| e.to_string())?;
-		std::fs::copy("packaging/windows/setup.ps1", root.join("setup.ps1"))
-			.map_err(|e| e.to_string())?;
 	}
 	let source = std::env::var_os("CARGO_TARGET_DIR")
 		.map_or_else(|| PathBuf::from("target"), PathBuf::from)
@@ -319,7 +317,6 @@ fn package() -> Result<(), String> {
 			return Err("macOS app icon compilation failed".into());
 		}
 	}
-	std::fs::create_dir_all(resources.join("docs")).map_err(|e| e.to_string())?;
 	std::fs::create_dir_all(resources.join("licenses")).map_err(|e| e.to_string())?;
 	for file in [
 		"NotoSansCJK-LICENSE.txt",
@@ -368,11 +365,6 @@ fn package() -> Result<(), String> {
 		std::path::Path::new("assets/licenses/voice"),
 		&resources.join("licenses/voice"),
 	)?;
-	// Ship the corresponding modified MPL component source with every binary.
-	copy_directory(
-		std::path::Path::new("vendor/hpke-rs"),
-		&resources.join("source/hpke-rs"),
-	)?;
 	copy_directory(
 		std::path::Path::new("assets/licenses/audio"),
 		&resources.join("licenses/audio"),
@@ -388,13 +380,6 @@ fn package() -> Result<(), String> {
 		"THIRD_PARTY_NOTICES.md",
 	] {
 		std::fs::copy(file, resources.join(file)).map_err(|e| e.to_string())?;
-	}
-	for entry in std::fs::read_dir("docs").map_err(|e| e.to_string())? {
-		let entry = entry.map_err(|e| e.to_string())?;
-		if entry.file_type().map_err(|e| e.to_string())?.is_file() {
-			std::fs::copy(entry.path(), resources.join("docs").join(entry.file_name()))
-				.map_err(|e| e.to_string())?;
-		}
 	}
 	if cfg!(target_os = "macos") {
 		// Seal only after every bundle resource has been staged. Ad-hoc signing

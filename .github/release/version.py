@@ -8,7 +8,7 @@ import tomllib
 
 
 def update(version):
-    if not re.fullmatch(r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-nightly\.[1-9][0-9]*\.[1-9][0-9]*)?', version):
+    if not re.fullmatch(r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-nightly\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))?', version):
         raise ValueError('Expected a stable or nightly semantic version')
     manifest = pathlib.Path('Cargo.toml')
     source = manifest.read_text()

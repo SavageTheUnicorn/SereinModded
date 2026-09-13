@@ -6,6 +6,7 @@ import { load } from 'js-yaml';
 import { analyzeCommits } from '@semantic-release/commit-analyzer';
 import { generateNotes } from '@semantic-release/release-notes-generator';
 import getLastRelease from './node_modules/semantic-release/lib/get-last-release.js';
+import { generateReleaseNotes } from './notes.mjs';
 
 const logger = { log() {} };
 for (const [message, expected] of [
@@ -18,7 +19,7 @@ for (const [message, expected] of [
 }
 assert.equal(getLastRelease({
   branch: { type: 'release', tags: [
-    { version: '1.1.0-nightly.9.1', gitTag: 'v1.1.0-nightly.9.1', channels: [null] },
+    { version: '1.1.0-nightly.20260913.9', gitTag: 'v1.1.0-nightly.20260913.9', channels: [null] },
     { version: '1.0.0', gitTag: 'v1.0.0', channels: [null] },
   ] }, options: { tagFormat: 'v${version}' },
 }).version, '1.0.0');
@@ -28,6 +29,24 @@ const notes = await generateNotes({ preset: 'conventionalcommits' }, {
   lastRelease: { gitTag: 'v1.0.0' }, nextRelease: { version: '1.0.1', gitTag: 'v1.0.1' },
 });
 assert(notes.includes('fix scrolling'));
+
+const releaseNotesContext = {
+  cwd: process.cwd(), logger, options: { repositoryUrl: 'https://github.com/ViceVerse-cz/Serein' },
+  commits: [
+    { hash: 'eb98a663421d6e142fe0f5f3be6f175a1b95a8e9', message: 'feat(ui): add category and channel permission settings (#149)' },
+    { hash: 'baec1dfc7b5755b0f063a1ea16d05f81936d0dc0', message: 'feat(audio): bundle notification sounds (#140)' },
+  ],
+  lastRelease: { gitTag: 'v1.0.0' },
+  nextRelease: { version: '1.0.0', gitHead: 'v1.0.0-nightly.10.1' },
+};
+const prodNotes = await generateReleaseNotes('production', { preset: 'conventionalcommits' }, releaseNotesContext);
+assert(prodNotes.includes('category and channel permission settings'));
+assert(prodNotes.includes('notification sounds'));
+
+const nightlyNotes = await generateReleaseNotes('nightly', { preset: 'conventionalcommits' }, releaseNotesContext);
+assert(nightlyNotes.includes('category and channel permission settings'));
+assert(!nightlyNotes.includes('notification sounds'));
+
 const workflow = load(readFileSync('.github/workflows/release.yml', 'utf8'));
 assert.deepEqual(Object.keys(workflow.on), ['workflow_dispatch']);
 for (const job of Object.values(workflow.jobs)) {
@@ -50,7 +69,7 @@ with tempfile.TemporaryDirectory() as directory:
         (fixture / path).parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(root / path, fixture / path)
     os.chdir(fixture)
-    for version in ['1.2.3-nightly.9.1', '1.2.3']:
+    for version in ['1.2.3-nightly.20260913.9', '1.2.3']:
         subprocess.run([os.sys.executable, str(root / '.github/release/version.py'), version], check=True)
         assert tomllib.loads(pathlib.Path('Cargo.toml').read_text())['workspace']['package']['version'] == version
         for lock in ['Cargo.lock', 'fuzz/Cargo.lock']:
