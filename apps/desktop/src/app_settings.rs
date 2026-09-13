@@ -26,6 +26,7 @@ impl Settings {
 	pub fn observe(&mut self, ui: &ui::MessagingUi) {
 		let value = AppPreferences {
 			notifications_enabled: ui.notifications_enabled,
+			notification_options: ui.notification_options,
 			show_hidden_channels: ui.show_hidden_channels,
 			primary_color: ui.primary_color,
 			voice_noise_suppression: ui.voice_noise_suppression,
@@ -48,6 +49,7 @@ impl Settings {
 	pub fn apply(&self, ui: &mut ui::MessagingUi) {
 		let value = &self.current;
 		ui.notifications_enabled = value.notifications_enabled;
+		ui.notification_options = value.notification_options;
 		ui.show_hidden_channels = value.show_hidden_channels;
 		ui.primary_color = value.primary_color;
 		ui.voice_noise_suppression = value.voice_noise_suppression;

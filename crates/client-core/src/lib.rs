@@ -13,6 +13,7 @@ mod permissions_tests;
 
 pub mod invites;
 pub mod message_actions;
+pub mod notification_settings;
 pub mod notifications;
 pub mod presence;
 pub mod profile;
@@ -49,6 +50,11 @@ pub const EVENT_SLOTS: usize = 8; // UI drain batch; reliable events share a 32 
 pub const COMMAND_SLOTS: usize = 16; // ordinary commands <=16 KiB; one pending group icon <=350 KiB
 
 pub enum Command {
+	AccountNotificationSettings {
+		request: u64,
+		section: model::notification_settings::Section,
+		change: Option<model::notification_settings::Change>,
+	},
 	ChannelAction {
 		guild: Id,
 		channel: Id,
@@ -187,6 +193,11 @@ pub enum Command {
 	},
 }
 pub enum Event {
+	SocialNotification(model::notification_settings::SocialNotification),
+	AccountNotificationSettings {
+		request: u64,
+		result: Result<model::notification_settings::Snapshot, auth::Failure>,
+	},
 	InviteChallenge {
 		request: u64,
 		challenge: Box<captcha::Challenge>,
@@ -360,6 +371,7 @@ pub struct NavigationIndex {
 }
 
 pub struct State {
+	pub notification_settings: notification_settings::Settings,
 	pub guild_folders: Option<model::guild_folders::Settings>,
 	pub folders_pending: bool,
 	pub folders_error: Option<&'static str>,
@@ -433,6 +445,7 @@ pub struct State {
 impl Default for State {
 	fn default() -> Self {
 		Self {
+			notification_settings: Default::default(),
 			guild_folders: None,
 			folders_pending: false,
 			folders_error: None,
@@ -857,6 +870,15 @@ impl State {
 		})
 	}
 	pub fn command_rejected(&mut self, command: Command) {
+		if let Command::AccountNotificationSettings { request, .. } = command {
+			self.apply_account_notification_settings(
+				request,
+				Err(auth::Failure::ProtocolAt(
+					"Notification settings were not queued; try again",
+				)),
+			);
+			return;
+		}
 		if let Command::ServerAdmin { guild, request, .. } = command {
 			let _ = self.apply_server_admin(server_admin::Event {
 				guild,
@@ -1359,6 +1381,14 @@ impl State {
 			}
 			Event::ReadState(event) => self.apply_read_state(event),
 			Event::NotificationPreferences(event) => self.apply_notification_preferences(event),
+			Event::SocialNotification(item) => {
+				self.receive_social_notification(item);
+				Ok(())
+			}
+			Event::AccountNotificationSettings { request, result } => {
+				self.apply_account_notification_settings(request, result);
+				Ok(())
+			}
 			Event::UserAction(event) => self.apply_user_action(event),
 			Event::ServerAction(event) => self.apply_server_action(event),
 			Event::ChannelAction(event) => self.apply_channel_action(event),
@@ -2058,6 +2088,9 @@ impl State {
 				Ok(())
 			}
 			Event::Disconnected => {
+				self.interrupt_notification_settings(auth::Failure::ProtocolAt(
+					"Disconnected; reload notification settings",
+				));
 				self.cancel_message_actions();
 				self.cancel_user_action();
 				self.cancel_server_action();
@@ -2270,6 +2303,7 @@ impl State {
 			_ => {}
 		}
 		if failure.ends_session() {
+			self.interrupt_notification_settings(failure);
 			self.interrupt_own_profile();
 			self.local_game_activity = Default::default();
 			self.cancel_message_actions();
@@ -2384,6 +2418,7 @@ impl Event {
 					.result
 					.as_ref()
 					.map_or(0, model::server_admin::Result::bytes),
+				Self::SocialNotification(item) => item.body.capacity(),
 				Self::GuildFolders(result) => result
 					.as_ref()
 					.map_or(0, model::guild_folders::Settings::heap_bytes),

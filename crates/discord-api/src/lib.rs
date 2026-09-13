@@ -5,6 +5,7 @@ mod channel_actions;
 mod forum;
 mod group_actions;
 mod guild_folders;
+mod notification_settings;
 mod profile_edit;
 pub mod rpc;
 mod server_actions;
@@ -435,6 +436,14 @@ impl DiscordApi {
 	}
 	pub async fn execute(&self, command: Command) -> Event {
 		match command {
+			Command::AccountNotificationSettings {
+				request,
+				section,
+				change,
+			} => Event::AccountNotificationSettings {
+				request,
+				result: self.account_notification_settings(section, change).await,
+			},
 			Command::ServerAdmin {
 				guild,
 				request,

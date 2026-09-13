@@ -189,6 +189,14 @@ impl State {
 			if index.is_some_and(|i| self.direct_presences[i] == resolved) {
 				continue;
 			}
+			if index.is_some_and(|i| self.direct_presences[i].status.as_deref() == Some("offline"))
+				&& matches!(resolved.status.as_deref(), Some("online" | "idle" | "dnd"))
+			{
+				self.notify_friend_change(
+					update.user,
+					model::notification_settings::SocialKind::FriendsOnline,
+				);
+			}
 			if let Some(index) = index {
 				retained_bytes -= self.direct_presences.remove(index).heap_bytes();
 			}

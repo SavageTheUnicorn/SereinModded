@@ -1032,3 +1032,35 @@ documents a 45-day retention window; this client does not archive audit history.
 Developer documentation describes the protocol, not approval or evidence of
 normal-user session interoperability. Parser, reducer and local HTTP tests are
 synthetic; live normal-account behavior remains unverified.
+
+
+## User notification preferences
+
+Notification Overview reads `/users/@me/settings-proto/1` and performs a fresh,
+version-guarded PATCH for the explicitly changed field. Receiving stream alerts is
+`voice_and_video.stream_notifications_enabled` (root 5, field 7), not the outbound
+`notifications.notify_friends_on_go_live` setting. Friend online, anniversary,
+profile updates and upcoming event preferences use notification fields 12, 14, 16
+and 22; reaction notifications use field 7 (all 0, DMs 1, none 2). Untouched subtree
+fields and unknown enum values are retained. These are unofficial user-account APIs.
+Schema evidence: [discord-protos](https://github.com/discord-userdoccers/discord-protos/blob/master/discord_protos/discord_users/v1/PreloadedUserSettings.proto),
+[receiving versus sending stream notifications](https://github.com/dolfies/discord.py-self/blob/master/discord/settings.py).
+
+Email preferences read and PATCH `/users/@me/email-settings`, with explicit category
+changes inside `settings.categories`. Unsubscribe disables announcements, tips and
+recommendations; communication, social, family-center and unknown preferences are
+left alone. [Primary client implementation](https://github.com/dolfies/discord.py-self/blob/master/discord/http.py).
+Responses must confirm the change; errors remain visible per section.
+
+Desktop alerts consume received `NOTIFICATION_CENTER_ITEM_CREATE` items for
+`go_live_push`, `scheduled_guild_event_started` and `reaction_sent`; completed,
+acknowledged and unknown kinds are ignored. A bounded queue checks current
+preferences, DND, mutes and blocks again before delivery. Received direct-presence
+changes from known offline to online notify for existing friends; received
+`USER_UPDATE` name/avatar changes notify only when the friend profile was already
+known. Initial snapshots do not create these alerts. No additional polling is used.
+There is no verified local friendship-anniversary notification event; that control
+updates Discord's real account preference for its server-generated notifications.
+The scheduled-event alert above means an event started, not a locally fabricated
+advance reminder. [Notification center research](https://docs.discord.food/resources/notification-center).
+Offline parser, reducer and HTTP checks are not evidence of live Discord delivery.

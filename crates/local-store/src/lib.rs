@@ -14,6 +14,7 @@ pub struct LocalStore(Connection);
 #[serde(default)]
 pub struct AppPreferences {
 	pub notifications_enabled: bool,
+	pub notification_options: model::notification_preferences::Device,
 	pub show_hidden_channels: bool,
 	pub primary_color: Option<[u8; 3]>,
 	pub voice_noise_suppression: bool,
@@ -29,6 +30,7 @@ impl Default for AppPreferences {
 	fn default() -> Self {
 		Self {
 			notifications_enabled: false,
+			notification_options: Default::default(),
 			show_hidden_channels: false,
 			primary_color: None,
 			voice_noise_suppression: false,
@@ -1024,6 +1026,12 @@ mod tests {
 		let mut value = AppPreferences {
 			notifications_enabled: true,
 			primary_color: Some([80, 120, 220]),
+			notification_options: model::notification_preferences::Device {
+				current_channel: true,
+				disable_sounds: true,
+				unread_badge: false,
+				..Default::default()
+			},
 			voice_noise_suppression: true,
 			voice_input: Some("synthetic microphone".into()),
 			output_percent: 75,

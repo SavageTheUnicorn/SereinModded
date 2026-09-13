@@ -10,6 +10,7 @@ pub(super) struct Settings {
 	page: Page,
 	query: String,
 	editor: crate::profile_edit::Editor,
+	pub(super) notifications: crate::notification_settings::Navigation,
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -74,7 +75,7 @@ impl Page {
 			Self::Profile => "Choose how you appear across Discord.",
 			Self::General => "Startup and window behavior on this device.",
 			Self::Appearance => "Theme, colour preset, zoom and layout.",
-			Self::Notifications => "Desktop alerts saved on this device.",
+			Self::Notifications => "Choose which notifications you receive and how they appear.",
 			Self::Activity => "Show others what you are playing.",
 			Self::Voice => "Microphone, speakers and voice processing.",
 			Self::Keybinds => "Keyboard shortcuts for Serein.",
@@ -93,7 +94,9 @@ impl Page {
 			Self::Appearance => {
 				"appearance customization primary accent hex window tray minimize theme dark light system zoom reading layout sidebar people reset colour color preset animate animated gifs autoplay hide image links confirm confirmation external browser"
 			}
-			Self::Notifications => "notifications desktop system alerts",
+			Self::Notifications => {
+				"notifications desktop system alerts overview sounds badges email streaming friends reactions"
+			}
 			Self::Activity => "game activity playing osu status presence sharing",
 			Self::Voice => {
 				"voice audio microphone speakers devices volume gain noise suppression push to talk"
@@ -272,7 +275,9 @@ impl MessagingUi {
 										ui.add_space(8.0);
 										self.reading_settings(ui, state.demo);
 									}
-									Page::Notifications => self.notification_settings(ui, state),
+									Page::Notifications => {
+										self.notification_settings(ui, state, commands)
+									}
 									Page::Activity => self.activity_settings(ui, state),
 									Page::Voice => self.voice_settings_content(
 										ui,
@@ -304,6 +309,22 @@ impl MessagingUi {
 			.auto_shrink([false, false])
 			.show(ui, |ui| {
 				ui.spacing_mut().item_spacing.y = 2.0;
+				if self.settings.page == Page::Notifications
+					&& let Some(user) = &state.user
+				{
+					ui.horizontal(|ui| {
+						self.avatars.show(ui, user, 48.0, state.demo);
+						ui.vertical(|ui| {
+							ui.add(
+								egui::Label::new(design::semibold(ui, &user.name, 16.0)).truncate(),
+							);
+							if ui.link("Edit Profiles").clicked() {
+								self.settings.page = Page::Profile;
+							}
+						});
+					});
+					ui.add_space(16.0);
+				}
 				self.settings_search(ui);
 				ui.add_space(12.0);
 				let query = self.settings.query.to_lowercase();
@@ -325,6 +346,22 @@ impl MessagingUi {
 					for page in visible {
 						if nav_item(ui, page.label(), self.settings.page == page).clicked() {
 							self.settings.page = page;
+						}
+						if page == Page::Notifications && self.settings.page == page {
+							ui.indent("notification-sections", |ui| {
+								for tab in crate::notification_settings::Tab::ALL {
+									if nav_item(
+										ui,
+										tab.label(),
+										self.settings.notifications.active == tab,
+									)
+									.clicked()
+									{
+										self.settings.notifications.jump = Some(tab);
+										self.settings.notifications.active = tab;
+									}
+								}
+							});
 						}
 					}
 				}
@@ -844,51 +881,6 @@ impl MessagingUi {
 				{
 					self.discord_activity_sharing_request = Some(enable);
 				}
-			}
-		});
-	}
-
-	fn notification_settings(&mut self, ui: &mut egui::Ui, state: &State) {
-		let colors = design::palette(ui);
-		ui.label(design::eyebrow(ui, "Desktop", colors.muted));
-		design::card(ui, |ui| {
-			ui.add_enabled_ui(!state.demo || self.notification_test_available, |ui| {
-				design::switch(
-					ui,
-					"Enable Desktop Notifications",
-					Some("Show system notifications for new activity while Serein is open."),
-					&mut self.notifications_enabled,
-				);
-			});
-			ui.separator();
-			ui.label(
-				RichText::new(
-					"Message previews are hidden. OS notification history may remain after logout. Your choice is saved on this device.",
-				)
-				.size(12.0)
-				.color(colors.muted),
-			);
-			ui.label(
-				RichText::new(if state.demo && !self.notification_test_available {
-					"Offline preview never sends system notifications."
-				} else {
-					self.notification_status
-				})
-				.size(12.0)
-				.color(colors.muted),
-			);
-			if self.notification_test_available
-				&& self.notifications_enabled
-				&& ui.button("Send generic test notification").clicked()
-			{
-				self.notification_test_requested = true;
-			}
-			if !state.demo && !state.notification_preferences_known() {
-				ui.label(
-					RichText::new("Alerts wait for your Discord notification preferences.")
-						.size(12.0)
-						.color(colors.warning),
-				);
 			}
 		});
 	}

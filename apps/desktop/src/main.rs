@@ -15,6 +15,8 @@ mod extension_bridge;
 mod extensions;
 mod game_activity;
 mod group_icon;
+mod notification_runtime;
+mod notification_sounds;
 mod reading_settings;
 mod screen;
 #[cfg(feature = "demo")]
@@ -247,6 +249,7 @@ struct Desktop {
 	/// Offline fixture flags start (and optionally pause) the demo attachment without input.
 	demo_video_autoplay: Option<bool>,
 	notifications: platform::notifications::Notifications,
+	notification_runtime: notification_runtime::Runtime,
 	uploads: uploads::Uploads,
 	group_icon: group_icon::GroupIcon,
 	server_icon: group_icon::GroupIcon,
@@ -1076,6 +1079,7 @@ impl Desktop {
 			} else {
 				None
 			},
+			notification_runtime: Default::default(),
 			notifications: {
 				let wake = cc.egui_ctx.clone();
 				platform::notifications::Notifications::new(move || wake.request_repaint())
@@ -1188,6 +1192,7 @@ impl Desktop {
 	}
 	fn logout(&mut self, ctx: &egui::Context) {
 		self.captcha.close();
+		self.notification_runtime.clear(&self.window);
 		let extension_logout = self.extensions.logout(ctx);
 		self.role_icon.cancel();
 		self.role_icon_scope = None;
@@ -1763,6 +1768,8 @@ impl Desktop {
 		#[cfg(feature = "demo")]
 		if self.state.demo {
 			let event = match command {
+				// Demo preference changes are applied synchronously by client-core.
+				Command::AccountNotificationSettings { .. } => return,
 				Command::ChannelAction {
 					guild,
 					channel,
@@ -3137,6 +3144,13 @@ impl Desktop {
 				self.queue_cache(cache::Operation::SaveDraft { channel, content });
 			}
 			if ready && self.state.auth == AuthState::Authenticated {
+				if !self.fixture_only
+					&& !self.state.demo
+					&& let Some(command) = self.state.request_notification_settings(
+						model::notification_settings::Section::Overview,
+					) {
+					self.command(command);
+				}
 				// The worker survives logout; each accepted account READY restores its own drafts.
 				if !self.messaging.draft_restore_pending {
 					self.messaging.draft_restore_pending =
@@ -3393,14 +3407,14 @@ impl eframe::App for Desktop {
 		if self.state.auth != AuthState::Authenticated && !self.state.demo {
 			self.notifications.clear();
 		}
-		while let Some(notification) = self.state.take_notification() {
-			if !self.fixture_only
-				&& self.messaging.notifications_enabled
-				&& self.messaging.own_presence.status != model::PresenceStatus::DoNotDisturb
-				&& !(focused && self.messaging.viewing_latest(notification.channel))
-			{
-				self.notifications.notify();
-			}
+		if let Some(kind) = self.notification_runtime.poll(
+			&mut self.state,
+			&mut self.messaging,
+			&self.window,
+			ctx,
+			self.fixture_only,
+		) {
+			self.notifications.notify_kind(kind);
 		}
 		self.messaging.voice_ptt_active = focused && ptt_down && !ctx.egui_wants_keyboard_input();
 	}
@@ -3671,6 +3685,9 @@ impl eframe::App for Desktop {
 		} else if self.state.user.is_some() {
 			self.messaging.storage_status = self.cache_status;
 			self.messaging.notification_status = self.notifications.status().label();
+			if self.app_settings.state.failed {
+				self.messaging.notification_sound_status = "Could not save device notification settings. Changes apply only until restart.";
+			}
 			let mut commands = self.messaging.show(ui, &mut self.state);
 			if let Some(command) = self.captcha.sync(
 				&mut self.state,

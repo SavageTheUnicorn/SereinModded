@@ -30,6 +30,7 @@ mod invites;
 mod local_time;
 mod markdown;
 mod mentions;
+mod notification_settings;
 mod notifications;
 mod pending;
 mod profiles;
@@ -234,6 +235,9 @@ pub struct MessagingUi {
 	/// Latest media activity, capped at 64 IDs (512 bytes) by the voice host.
 	pub voice_speaking: Vec<Id>,
 	pub notifications_enabled: bool,
+	pub notification_options: model::notification_preferences::Device,
+	pub notification_preview: Option<model::notification_preferences::Sound>,
+	pub notification_sound_status: &'static str,
 	pub notification_test_available: bool,
 	pub notification_test_requested: bool,
 	pub notification_status: &'static str,
@@ -667,13 +671,6 @@ impl MessagingUi {
 						{
 							self.reconnect_requested = true;
 						}
-						ui.add(
-							egui::Label::new(
-								RichText::new(state.status).size(11.0).color(colors.muted),
-							)
-							.truncate(),
-						)
-						.on_hover_text(state.status);
 					},
 				);
 			});

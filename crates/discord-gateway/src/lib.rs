@@ -893,6 +893,9 @@ async fn run_inner(
 										calls.passive(update,owner_id,&emit)?;
 										emit(Event::ReadState(client_core::read_state::Event::Latest(latest.into_iter().map(|c|(c.id,c.last_message_id)).collect())))?;
 									}
+									"NOTIFICATION_CENTER_ITEM_CREATE" => {
+										if let Ok(Some(item))=notification_settings::social_notification(packet.d.get().as_bytes()){emit(Event::SocialNotification(item))?;}
+									}
 									"MESSAGE_UPDATE" => emit(Event::Patch(decode::<PatchDto>(packet.d.get().as_bytes()).map_err(|_| Failure::Protocol)?.into_model()))?,
 									"MESSAGE_REACTION_ADD" | "MESSAGE_REACTION_REMOVE" | "MESSAGE_REACTION_REMOVE_ALL" | "MESSAGE_REACTION_REMOVE_EMOJI" => {
 										let target=decode::<ReactionTarget>(packet.d.get().as_bytes()).map_err(|_|Failure::Protocol)?;

@@ -54,10 +54,31 @@ impl Status {
 	}
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+	Message,
+	Streaming,
+	UpcomingEvent,
+	Reaction,
+	FriendsOnline,
+	ProfileUpdates,
+}
+impl Kind {
+	fn body(self) -> &'static str {
+		match self {
+			Self::Message => "You have a new message.",
+			Self::Streaming => "Someone you know started streaming.",
+			Self::UpcomingEvent => "A server event is starting.",
+			Self::Reaction => "Someone reacted to your message.",
+			Self::FriendsOnline => "A friend came online.",
+			Self::ProfileUpdates => "A friend updated their profile.",
+		}
+	}
+}
 #[derive(Clone, Copy)]
 struct Command {
 	generation: u64,
-	alert: bool,
+	alert: Option<Kind>,
 }
 
 /// Created without OS calls or a thread. The worker starts only after explicit opt-in.
@@ -115,7 +136,7 @@ impl Notifications {
 		if let Some(send) = &self.send {
 			let _ = send.try_send(Command {
 				generation,
-				alert: false,
+				alert: None,
 			});
 		}
 	}
@@ -138,13 +159,16 @@ impl Notifications {
 		if let Some(send) = &self.send {
 			let _ = send.try_send(Command {
 				generation,
-				alert: false,
+				alert: None,
 			});
 		}
 	}
 
 	/// Queue a privacy-preserving generic alert. False means disabled, unavailable or overloaded.
 	pub fn notify(&self) -> bool {
+		self.notify_kind(Kind::Message)
+	}
+	pub fn notify_kind(&self, kind: Kind) -> bool {
 		if !matches!(self.status(), Status::Ready | Status::QueueFull) {
 			return false;
 		}
@@ -152,7 +176,7 @@ impl Notifications {
 		let Some(send) = &self.send else { return false };
 		match send.try_send(Command {
 			generation,
-			alert: true,
+			alert: Some(kind),
 		}) {
 			Ok(()) => true,
 			Err(error) => {
@@ -227,7 +251,7 @@ fn worker(
 			wake();
 		}
 		if outcome != Status::Ready
-			|| !command.alert
+			|| command.alert.is_none()
 			|| command.generation != generation
 			|| current.load(Ordering::Acquire) != generation
 		{
@@ -235,7 +259,7 @@ fn worker(
 		}
 		// Keep at most one generic notification/response handle, including in OS history where supported.
 		close(&mut outstanding);
-		outcome = match show() {
+		outcome = match show(command.alert.expect("checked above")) {
 			Ok(handle) => {
 				outstanding = Some(handle);
 				Status::Ready
@@ -289,30 +313,33 @@ fn authorize() -> Status {
 	}
 }
 
-fn show() -> Result<NotificationHandle, ()> {
+fn show(kind: Kind) -> Result<NotificationHandle, ()> {
 	#[cfg(target_os = "macos")]
 	{
 		// The blocking wrapper mistakes a busy AppKit run loop for a stopped one.
 		// Await the OS completion on this worker; never block the native UI thread.
-		futures_lite::future::block_on(notification().show_async()).map_err(|_| ())
+		futures_lite::future::block_on(notification(kind).show_async()).map_err(|_| ())
 	}
 	#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 	{
-		notification().show().map_err(|_| ())
+		notification(kind).show().map_err(|_| ())
 	}
 	#[cfg(target_os = "windows")]
 	{
-		notification().show().map(|_| ()).map_err(|_| ())
+		notification(kind).show().map(|_| ()).map_err(|_| ())
 	}
 }
 
-fn notification() -> notify_rust::Notification {
+fn notification(kind: Kind) -> notify_rust::Notification {
 	let mut notification = notify_rust::Notification::new();
 	notification
 		.appname("Serein")
 		.summary("Serein")
-		.body("You have a new message.")
+		.body(kind.body())
 		.timeout(5_000);
+	// Sound is played independently by the bounded local audio worker.
+	#[cfg(target_os = "linux")]
+	notification.hint(notify_rust::Hint::SuppressSound(true));
 	#[cfg(target_os = "windows")]
 	notification.app_id("org.serein.desktop");
 	notification
@@ -337,7 +364,7 @@ mod tests {
 
 	#[test]
 	fn disabled_is_lazy_and_fixed_queue_is_bounded_and_invalidated() {
-		let alert = notification();
+		let alert = notification(Kind::Message);
 		assert_eq!(alert.summary, "Serein");
 		assert_eq!(alert.body, "You have a new message.");
 		let mut notifications = Notifications::new(|| {});
@@ -358,7 +385,7 @@ mod tests {
 		assert_eq!(notifications.status(), Status::QueueFull);
 		notifications.dismiss();
 		assert_eq!(notifications.status(), Status::Ready);
-		for command in receive.try_iter().filter(|command| command.alert) {
+		for command in receive.try_iter().filter(|command| command.alert.is_some()) {
 			assert_ne!(
 				command.generation,
 				notifications.generation.load(Ordering::Acquire)
@@ -368,7 +395,7 @@ mod tests {
 		notifications.clear();
 		assert_eq!(notifications.status(), Status::Disabled);
 		assert!(!notifications.notify());
-		for command in receive.try_iter().filter(|command| command.alert) {
+		for command in receive.try_iter().filter(|command| command.alert.is_some()) {
 			assert_ne!(
 				command.generation,
 				notifications.generation.load(Ordering::Acquire)
