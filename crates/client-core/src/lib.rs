@@ -1,6 +1,7 @@
 //! Single UI-thread state owner. Adapters deliver generation-tagged typed events.
 pub mod archives;
 pub mod auth;
+pub mod captcha;
 pub mod channel_actions;
 pub mod fingerprint;
 pub mod forum;
@@ -88,6 +89,7 @@ pub enum Command {
 	JoinInvite {
 		code: String,
 		request: u64,
+		captcha: Option<Box<captcha::Retry>>,
 	},
 	Invite {
 		code: String,
@@ -185,6 +187,10 @@ pub enum Command {
 	},
 }
 pub enum Event {
+	InviteChallenge {
+		request: u64,
+		challenge: Box<captcha::Challenge>,
+	},
 	ChannelAction(channel_actions::Event),
 	ServerAdmin(server_admin::Event),
 	ServerSettings(server_settings::Event),
@@ -1374,6 +1380,10 @@ impl State {
 				removed,
 			} => self.apply_threads_sync(guild, parents, threads, removed),
 			Event::Reactions(event) => self.apply_reactions(event),
+			Event::InviteChallenge { request, challenge } => {
+				self.apply_invite_challenge(request, *challenge);
+				Ok(())
+			}
 			Event::JoinInvite { request, result } => {
 				self.apply_invite_join(request, result);
 				Ok(())
@@ -2356,6 +2366,7 @@ impl Event {
 	pub fn bytes(&self) -> usize {
 		size_of::<Self>()
 			+ match self {
+				Self::InviteChallenge { challenge, .. } => challenge.bytes(),
 				Self::GroupAction(group_actions::Event::Written {
 					result: Ok(Some(patch)),
 					..

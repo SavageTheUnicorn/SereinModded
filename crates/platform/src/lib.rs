@@ -1,4 +1,5 @@
-//! The only credential-persistence boundary; the only webview is a temporary login surface.
+//! Credential persistence and temporary owner-operated login/verification surfaces.
+pub mod captcha;
 pub mod game_activity;
 pub mod notifications;
 pub mod save;

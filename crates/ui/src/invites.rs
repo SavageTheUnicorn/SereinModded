@@ -135,6 +135,7 @@ pub fn show(
 				requests.push(code.clone());
 			}
 			let current = state.invite_join.code == code;
+			let verification = current && state.invite_challenge().is_some();
 			let pending = current && state.invite_join.pending;
 			let accepted = current && matches!(state.invite_join.result, Some(Ok(_)));
 			let join_error = current
@@ -192,6 +193,8 @@ pub fn show(
 								// Action first so the text column gets whatever width remains.
 								let label = if member {
 									"Joined"
+								} else if verification {
+									"Verify"
 								} else if pending {
 									"Joining…"
 								} else if accepted {
@@ -202,9 +205,12 @@ pub fn show(
 								ui.with_layout(
 									egui::Layout::right_to_left(egui::Align::Center),
 									|ui| {
-										let enabled = state.can_join_invite(&code) && !member;
+										let enabled = (verification
+											|| state.can_join_invite(&code)) && !member;
 										ui.add_enabled_ui(enabled, |ui| {
-											let fill = if enabled {
+											let fill = if verification {
+												colors.accent
+											} else if enabled {
 												colors.positive
 											} else {
 												colors.selected
@@ -253,8 +259,9 @@ pub fn show(
 													match embed
 														.and_then(|e| e.description.as_deref())
 														.and_then(counts)
-														.filter(|_| join_error.is_none())
-													{
+														.filter(|_| {
+															join_error.is_none() && !verification
+														}) {
 														Some((online, members)) => {
 															dot_stat(
 																ui,
@@ -271,7 +278,9 @@ pub fn show(
 															);
 														}
 														None => {
-															let text = if let Some(f) = join_error {
+															let text = if verification {
+																"Verification required"
+															} else if let Some(f) = join_error {
 																f.label()
 															} else if let Some(d) =
 																embed.and_then(|e| {
@@ -289,18 +298,20 @@ pub fn show(
 																egui::Label::new(
 																	egui::RichText::new(text)
 																		.size(13.0)
-																		.color(
-																			if join_error.is_some()
-																			{
-																				colors.danger
-																			} else {
-																				colors.muted
-																			},
-																		),
+																		.color(if verification {
+																			colors.accent
+																		} else if join_error
+																			.is_some()
+																		{
+																			colors.danger
+																		} else {
+																			colors.muted
+																		}),
 																)
 																.truncate()
 																.selectable(false),
-															);
+															)
+															.on_hover_text(text);
 														}
 													}
 												});

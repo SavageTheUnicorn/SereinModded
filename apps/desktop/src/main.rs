@@ -3,6 +3,7 @@ mod app_settings;
 mod audio;
 mod avatars;
 mod cache;
+mod captcha;
 #[cfg(feature = "demo")]
 mod channel_demo;
 mod clipboard;
@@ -236,6 +237,7 @@ struct Desktop {
 	extensions: extension_bridge::Bridge,
 	extension_close_pending: bool,
 	login: Option<platform::LoginView>,
+	captcha: captcha::Captcha,
 	connection: Option<connection::Connection>,
 	state: State,
 	messaging: ui::MessagingUi,
@@ -930,6 +932,10 @@ impl Desktop {
 			state.status = "Offline fixture · media viewer opened at startup";
 		}
 		#[cfg(feature = "demo")]
+		if demo && std::env::args().any(|arg| arg == "--demo-captcha") {
+			messaging.preview_verification(&mut state);
+		}
+		#[cfg(feature = "demo")]
 		if demo && std::env::args().any(|arg| arg == "--demo-attachment=file") {
 			// Non-image variant: exercises the file-kind glyph and extension badge.
 			messaging.preview_attachment("quarterly-report.pdf", 1_482_311, None);
@@ -1054,6 +1060,7 @@ impl Desktop {
 			extensions: extension_bridge::Bridge::default(),
 			extension_close_pending: false,
 			login: None,
+			captcha: captcha::Captcha::default(),
 			connection: None,
 			state,
 			messaging,
@@ -1178,6 +1185,7 @@ impl Desktop {
 		));
 	}
 	fn logout(&mut self, ctx: &egui::Context) {
+		self.captcha.close();
 		let extension_logout = self.extensions.logout(ctx);
 		self.role_icon.cancel();
 		self.role_icon_scope = None;
@@ -3297,6 +3305,17 @@ impl eframe::App for Desktop {
 		);
 		self.messaging.sync_reading_zoom(ctx);
 		self.poll(ctx);
+		self.state.expire_invite_challenge();
+		if self.state.invite_challenge().is_some() {
+			ctx.request_repaint_after(Duration::from_secs(1));
+		}
+		if self.login.is_some()
+			|| self.state.auth != AuthState::Authenticated
+			|| ctx.input(|input| input.viewport().close_requested())
+		{
+			self.captcha.close();
+			self.messaging.verification.active = false;
+		}
 		self.extensions.tick(
 			&mut self.state,
 			&mut self.messaging,
@@ -3650,7 +3669,16 @@ impl eframe::App for Desktop {
 		} else if self.state.user.is_some() {
 			self.messaging.storage_status = self.cache_status;
 			self.messaging.notification_status = self.notifications.status().label();
-			let commands = self.messaging.show(ui, &mut self.state);
+			let mut commands = self.messaging.show(ui, &mut self.state);
+			if let Some(command) = self.captcha.sync(
+				&mut self.state,
+				&mut self.messaging,
+				&self.window,
+				&ctx,
+				!self.fixture_only && !self.confirming_close && !self.confirming_logout,
+			) {
+				commands.push(command);
+			}
 			let player = self.messaging.audio();
 			if !player.seen
 				|| player.active.is_none()

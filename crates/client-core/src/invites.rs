@@ -8,6 +8,73 @@ pub type Cache = BTreeMap<String, (Instant, Option<Result<model::InvitePreview, 
 pub use model::server_invites::valid_code;
 
 impl State {
+	pub fn expire_invite_challenge(&mut self) {
+		if self
+			.invite_join
+			.challenge
+			.as_ref()
+			.is_some_and(|(at, _)| at.elapsed() >= crate::captcha::LIFETIME)
+		{
+			self.invites.remove(&self.invite_join.code);
+			self.cancel_invite_join();
+			self.invite_join.result =
+				Some(Err(Failure::ProtocolAt("Verification expired; join again")));
+		}
+	}
+	pub fn invite_challenge(&self) -> Option<(u64, &crate::captcha::Challenge)> {
+		let (at, challenge) = self.invite_join.challenge.as_ref()?;
+		(self.invite_join.pending && at.elapsed() < crate::captcha::LIFETIME)
+			.then_some((self.invite_join.sequence, challenge))
+	}
+	pub fn cancel_invite_challenge(&mut self, request: u64) {
+		if request == self.invite_join.sequence && self.invite_join.challenge.is_some() {
+			self.cancel_invite_join();
+			self.invite_join.result = Some(Err(Failure::ProtocolAt(
+				"Verification cancelled; join again",
+			)));
+		}
+	}
+	pub fn resume_invite_challenge(
+		&mut self,
+		request: u64,
+		solution: crate::captcha::Solution,
+	) -> Option<Command> {
+		if self.demo
+			|| !self.gateway_connected
+			|| self.auth != crate::auth::AuthState::Authenticated
+			|| self.invite_challenge()?.0 != request
+		{
+			return None;
+		}
+		let (at, challenge) = self.invite_join.challenge.take()?;
+		// The new identity makes a duplicated response to the first attempt stale.
+		self.invite_join.sequence = self.invite_join.sequence.wrapping_add(1);
+		Some(Command::JoinInvite {
+			code: self.invite_join.code.clone(),
+			request: self.invite_join.sequence,
+			captcha: Some(Box::new(crate::captcha::Retry {
+				code: self.invite_join.code.clone(),
+				request: self.invite_join.sequence,
+				challenge,
+				solution,
+				expires: (at + crate::captcha::LIFETIME)
+					.min(Instant::now() + Duration::from_secs(120)),
+			})),
+		})
+	}
+	pub(crate) fn apply_invite_challenge(
+		&mut self,
+		request: u64,
+		challenge: crate::captcha::Challenge,
+	) {
+		if self.invite_join.pending
+			&& self.invite_join.sequence == request
+			&& self.invite_join.challenge.is_none()
+		{
+			self.invite_join.challenge = Some((Instant::now(), challenge));
+			self.status = "Verify to join this server";
+		}
+	}
 	pub fn request_invite(&mut self, code: String) -> Option<Command> {
 		if !self.selected.is_some_and(|c| self.can_read_history(c)) {
 			return None;
@@ -142,6 +209,7 @@ pub struct Join {
 	pub pending: bool,
 	pub result: Option<Result<model::Id, Failure>>,
 	sequence: u64,
+	challenge: Option<(Instant, crate::captcha::Challenge)>,
 }
 impl State {
 	pub fn can_join_invite(&self, code: &str) -> bool {
@@ -165,22 +233,29 @@ impl State {
 		self.invite_join.code = code;
 		self.invite_join.pending = true;
 		self.invite_join.result = None;
+		self.invite_join.challenge = None;
 		Some(Command::JoinInvite {
 			code: self.invite_join.code.clone(),
 			request: self.invite_join.sequence,
+			captcha: None,
 		})
 	}
 	pub(crate) fn cancel_invite_join(&mut self) {
+		self.invite_join.challenge = None;
 		if self.invite_join.pending {
 			self.invite_join.pending = false;
 			self.invite_join.result = Some(Err(Failure::Ambiguous));
 		}
 	}
 	pub(crate) fn apply_invite_join(&mut self, request: u64, result: Result<model::Id, Failure>) {
-		if !self.invite_join.pending || request != self.invite_join.sequence {
+		if !self.invite_join.pending
+			|| request != self.invite_join.sequence
+			|| self.invite_join.challenge.is_some()
+		{
 			return;
 		}
 		self.invite_join.pending = false;
+		self.invite_join.challenge = None;
 		self.invite_join.result = Some(result);
 		self.status = match result {
 			Ok(_) => {
@@ -199,6 +274,80 @@ impl State {
 #[cfg(test)]
 mod join_tests {
 	use super::*;
+	#[test]
+	fn invite_challenge_is_single_use_scoped_expiring_and_redacted() {
+		let challenge = || {
+			crate::captcha::Challenge::new(
+				"synthetic-sitekey".into(),
+				Some("private-rqdata".into()),
+				Some("private-rqtoken".into()),
+				None,
+				false,
+			)
+			.unwrap()
+		};
+		let solution = || crate::captcha::Solution::new("private-solution".into()).unwrap();
+		assert!(!format!("{:?}", challenge()).contains("private"));
+		assert!(!format!("{:?}", solution()).contains("private"));
+		assert!(crate::captcha::Solution::new("bad\r\nheader".into()).is_none());
+		assert!(crate::captcha::Solution::new("x".repeat(8193)).is_none());
+		let mut state = State {
+			auth: crate::auth::AuthState::Authenticated,
+			gateway_connected: true,
+			..State::default()
+		};
+		state.invite_join.pending = true;
+		state.invite_join.code = "synthetic".into();
+		state.apply_invite_challenge(1, challenge());
+		assert!(state.invite_challenge().is_none());
+		state.apply_invite_challenge(0, challenge());
+		assert!(state.resume_invite_challenge(1, solution()).is_none());
+		assert!(state.invite_challenge().is_some());
+		let Command::JoinInvite {
+			code,
+			request,
+			captcha: Some(retry),
+		} = state.resume_invite_challenge(0, solution()).unwrap()
+		else {
+			panic!("retry missing")
+		};
+		assert!(retry.matches(&code, request));
+		assert!(!retry.matches("another", request));
+		assert!(state.resume_invite_challenge(0, solution()).is_none());
+		state.apply_invite_challenge(0, challenge());
+		assert!(state.invite_challenge().is_none());
+		state.apply_invite_challenge(request, challenge());
+		state.invite_join.challenge.as_mut().unwrap().0 = Instant::now() - crate::captcha::LIFETIME;
+		assert!(state.resume_invite_challenge(request, solution()).is_none());
+		state.invites.insert(
+			"synthetic".into(),
+			(Instant::now() - crate::captcha::LIFETIME, None),
+		);
+		state
+			.invites
+			.insert("another".into(), (Instant::now(), None));
+		state.expire_invite_challenge();
+		assert!(!state.invites.contains_key("synthetic"));
+		assert!(state.invites.contains_key("another"));
+		assert!(!state.invite_join.pending);
+		state.apply_invite_challenge(request, challenge());
+		assert!(state.invite_challenge().is_none());
+		assert_eq!(state.auth, crate::auth::AuthState::Authenticated);
+		state.invite_join.pending = true;
+		state.apply_invite_challenge(request, challenge());
+		state.cancel_invite_challenge(request);
+		assert!(state.resume_invite_challenge(request, solution()).is_none());
+		assert_eq!(
+			state.invite_join.result,
+			Some(Err(Failure::ProtocolAt(
+				"Verification cancelled; join again"
+			)))
+		);
+		state.invite_join.pending = true;
+		state.apply_invite_challenge(request, challenge());
+		state.logout();
+		assert!(state.invite_challenge().is_none());
+	}
 	#[test]
 	fn join_requires_a_fresh_preview_and_ignores_duplicate_and_stale_writes() {
 		let mut state = State {

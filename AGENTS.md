@@ -11,6 +11,8 @@ Preserve unrelated work. More specific `AGENTS.md` files apply inside their subt
   payloads and queues by bytes as well as items; do expensive work outside rendering/audio callbacks.
 - Saved tokens belong only in the OS credential store, never a plaintext fallback. Keep active
   secrets redacted in memory. Official login may use an ephemeral authentication-only webview.
+  User-solved invite CAPTCHAs may use a temporary verification-only webview with a
+  service-supplied public sitekey and bounded, session-only passcode handoff.
 - No credential extraction from other applications, challenge bypass, telemetry, unbounded logs,
   backend, account system, relay or separate voice infrastructure.
 - Default tests and screenshots use synthetic/offline data. Live tests require the owner to

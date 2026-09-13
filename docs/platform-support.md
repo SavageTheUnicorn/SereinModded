@@ -46,6 +46,17 @@ See [camera limits and validation](voice.md#camera-in-calls-macos-windows-and-li
 Windows compilation and isolated Linux adapter tests do not establish working
 physical capture or delivery to an official Discord client; these remain unverified.
 
+## Invite verification (September 13, 2026)
+
+Invite verification additionally uses a temporary WebView2 child on Windows. It
+loads a local verification page and hCaptcha's official widget after the user
+chooses Verify. The local custom-protocol origin is
+`https://serein-captcha.verification.invalid/`; it is not a Discord page, public
+server or account-login surface. No account token enters it. Domain restrictions,
+provider rejection and missing WebView2 fail visibly. macOS/Linux invite CAPTCHA
+views are currently unavailable; official-login webviews are unchanged. Widget
+loading and synthetic checks do not establish live Discord challenge acceptance.
+
 ## Opt-in tray icon (September 13, 2026)
 
 Windows General settings offer Show Serein in System Tray, off by default. Minimizing

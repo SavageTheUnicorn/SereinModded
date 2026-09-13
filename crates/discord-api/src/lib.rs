@@ -50,6 +50,48 @@ pub struct DiscordApi {
 	#[cfg(test)]
 	upload_origin: Option<std::net::SocketAddr>,
 }
+// Unofficial wire fields: discord.py-self errors.py CaptchaRequired and http.py request.
+// Borrow ordinary fields; escaped JSON strings are bounded by the 64 KiB wire cap.
+fn invite_captcha(bytes: &[u8]) -> Option<client_core::captcha::Challenge> {
+	use std::borrow::Cow;
+	#[derive(serde::Deserialize)]
+	struct Captcha<'a> {
+		#[serde(borrow)]
+		captcha_service: Cow<'a, str>,
+		#[serde(borrow)]
+		captcha_sitekey: Cow<'a, str>,
+		#[serde(borrow)]
+		captcha_rqdata: Option<Cow<'a, str>>,
+		#[serde(borrow)]
+		captcha_rqtoken: Option<Cow<'a, str>>,
+		#[serde(borrow)]
+		captcha_session_id: Option<Cow<'a, str>>,
+		#[serde(default)]
+		should_serve_invisible: bool,
+	}
+	impl Drop for Captcha<'_> {
+		fn drop(&mut self) {
+			for value in [
+				&mut self.captcha_rqdata,
+				&mut self.captcha_rqtoken,
+				&mut self.captcha_session_id,
+			] {
+				if let Some(Cow::Owned(value)) = value {
+					zeroize::Zeroize::zeroize(value);
+				}
+			}
+		}
+	}
+	let mut c: Captcha<'_> = serde_json::from_slice(bytes).ok()?;
+	(c.captcha_service == "hcaptcha").then_some(())?;
+	client_core::captcha::Challenge::new(
+		c.captcha_sitekey.to_string(),
+		c.captcha_rqdata.take().map(Cow::into_owned),
+		c.captcha_rqtoken.take().map(Cow::into_owned),
+		c.captcha_session_id.take().map(Cow::into_owned),
+		c.should_serve_invisible,
+	)
+}
 /// Headers Discord's web client sends on every REST call; without them a normal-user
 /// session is classified as automated and quarantined (spam flag, attachment limits).
 fn fingerprint_headers() -> Result<reqwest::header::HeaderMap, Failure> {
@@ -125,6 +167,18 @@ impl DiscordApi {
 		body: Option<serde_json::Value>,
 		max_bytes: usize,
 	) -> Result<Vec<u8>, Failure> {
+		self.request_with_captcha(method, path, body, max_bytes, None, None)
+			.await
+	}
+	async fn request_with_captcha(
+		&self,
+		method: Method,
+		path: &str,
+		body: Option<serde_json::Value>,
+		max_bytes: usize,
+		retry: Option<&client_core::captcha::Retry>,
+		mut challenge: Option<&mut Option<client_core::captcha::Challenge>>,
+	) -> Result<Vec<u8>, Failure> {
 		// Only typed adapter methods construct paths. Never accept a URL or route from UI/content.
 		if !path.starts_with('/')
 			|| path.contains("://")
@@ -162,6 +216,22 @@ impl DiscordApi {
 			.client
 			.request(method, format!("{base}{path}"))
 			.header(AUTHORIZATION, authorization);
+		if let Some(retry) = retry {
+			if retry.expired() {
+				return Err(Failure::ProtocolAt("Verification expired; join again"));
+			}
+			for (name, value) in [
+				("x-captcha-key", Some(retry.passcode())),
+				("x-captcha-rqtoken", retry.rqtoken()),
+				("x-captcha-session-id", retry.session_id()),
+			] {
+				if let Some(value) = value {
+					let mut value = HeaderValue::from_str(value).map_err(|_| Failure::Protocol)?;
+					value.set_sensitive(true);
+					request = request.header(name, value);
+				}
+			}
+		}
 		if let Some(body) = body {
 			request = request.json(&body);
 		}
@@ -202,7 +272,7 @@ impl DiscordApi {
 		{
 			return Err(Failure::Capacity);
 		}
-		let mut bytes = Vec::new();
+		let mut bytes = zeroize::Zeroizing::new(Vec::new());
 		while let Some(chunk) = response.chunk().await.map_err(|_| {
 			if write {
 				Failure::Ambiguous
@@ -218,6 +288,20 @@ impl DiscordApi {
 		if !status.is_success() {
 			let error = decode::<ErrorBody>(&bytes).unwrap_or_default();
 			if error.captcha_key.is_some() || matches!(error.code, Some(60003 | 50014)) {
+				if matches!(status, StatusCode::BAD_REQUEST | StatusCode::FORBIDDEN)
+					&& error.captcha_key.is_some()
+					&& !matches!(error.code, Some(60003 | 50014))
+					&& let Some(output) = challenge.as_mut()
+				{
+					if let Some(parsed) = invite_captcha(&bytes) {
+						**output = Some(parsed);
+						return Err(Failure::Challenged);
+					}
+					return Err(Failure::ProtocolAt(
+						"This invite's verification is unavailable; try joining in Discord",
+					));
+				}
+
 				self.stop();
 				return Err(Failure::Challenged);
 			}
@@ -239,7 +323,7 @@ impl DiscordApi {
 				Failure::Protocol
 			});
 		}
-		Ok(bytes)
+		Ok(std::mem::take(&mut *bytes))
 	}
 	pub async fn gateway_url(&self) -> Result<String, Failure> {
 		let bytes = self
@@ -301,27 +385,49 @@ impl DiscordApi {
 		discord_protocol::invites::decode(&bytes).map_err(|_| Failure::Protocol)
 	}
 	// Unofficial user endpoint; observed in discord.py-self/http.py accept_invite (2026-09-11).
-	// No challenge solving or retry. An unreadable success body is an uncertain write.
-	async fn join_invite(&self, code: &str) -> Result<model::Id, Failure> {
-		if !client_core::invites::valid_code(code) {
-			return Err(Failure::Protocol);
-		}
-		let bytes = self
-			.request_limited(
+	// One explicit human solution may resume this specific write; never loop/retry automatically.
+	async fn join_invite(
+		&self,
+		code: &str,
+		request: u64,
+		captcha: Option<Box<client_core::captcha::Retry>>,
+	) -> Event {
+		let mut challenge = None;
+		let result = if client_core::invites::valid_code(code)
+			&& captcha.as_ref().is_none_or(|c| c.matches(code, request))
+		{
+			self.request_with_captcha(
 				Method::POST,
 				&format!("/invites/{code}"),
 				Some(serde_json::json!({})),
 				64 * 1024,
+				captcha.as_deref(),
+				Some(&mut challenge),
 			)
 			.await
-			.map_err(|f| {
-				f.protocol_at(
-					"Invite rejected · it may be expired, invalid, or require joining in Discord",
-				)
-			})?;
-		discord_protocol::invites::decode(&bytes)
-			.map(|p| p.guild)
-			.map_err(|_| Failure::Ambiguous)
+			.and_then(|bytes| {
+				discord_protocol::invites::decode(&bytes)
+					.map(|p| p.guild)
+					.map_err(|_| Failure::Ambiguous)
+			})
+		} else {
+			Err(Failure::Protocol)
+		};
+		if let Some(challenge) = challenge {
+			Event::InviteChallenge {
+				request,
+				challenge: Box::new(challenge),
+			}
+		} else {
+			Event::JoinInvite {
+				request,
+				result: result.map_err(|f| {
+					f.protocol_at(
+						"Invite rejected - it may be expired, invalid, or require joining in Discord",
+					)
+				}),
+			}
+		}
 	}
 	pub async fn execute(&self, command: Command) -> Event {
 		match command {
@@ -357,10 +463,11 @@ impl DiscordApi {
 					result: self.group_action(action).await,
 				})
 			}
-			Command::JoinInvite { code, request } => Event::JoinInvite {
+			Command::JoinInvite {
+				code,
 				request,
-				result: self.join_invite(&code).await,
-			},
+				captcha,
+			} => self.join_invite(&code, request, captcha).await,
 			Command::GuildFolders(settings) => Event::GuildFolders(match settings {
 				Some(settings) => self.save_guild_folders(settings).await,
 				None => self.guild_folders().await,
@@ -971,6 +1078,184 @@ fn safe_delay(seconds: Option<f64>) -> Result<Duration, Failure> {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	#[tokio::test]
+	async fn invite_captcha_preserves_fatal_auth_and_malformed_challenges() {
+		assert_eq!(invite_captcha(br#"{"captcha_service":"hcaptcha","captcha_sitekey":"synthetic-sitekey","captcha_rqdata":"escaped\/data"}"#).unwrap().rqdata(), Some("escaped/data"));
+		for (status, code, service) in [
+			("403 Forbidden", 0, "hcaptcha"),
+			("400 Bad Request", 60003, "hcaptcha"),
+			("400 Bad Request", 50014, "hcaptcha"),
+			("400 Bad Request", 0, "unsupported"),
+		] {
+			let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+			let mut api = DiscordApi::new(Arc::new(
+				SessionSecret::from_owner_input("SYNTHETIC_INVITE_OWNER_TOKEN".into()).unwrap(),
+			))
+			.unwrap();
+			api.base = format!("http://{}", listener.local_addr().unwrap());
+			let server = tokio::spawn(async move {
+				let (mut stream, _) = listener.accept().await.unwrap();
+				let mut buffer = [0; 4096];
+				assert!(stream.read(&mut buffer).await.unwrap() > 0);
+				let body = serde_json::json!({"code":code,"captcha_key":["required"],"captcha_service":service,"captcha_sitekey":"synthetic-sitekey"}).to_string();
+				stream
+					.write_all(
+						format!(
+							"HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+							body.len()
+						)
+						.as_bytes(),
+					)
+					.await
+					.unwrap();
+			});
+			let event = api
+				.execute(Command::JoinInvite {
+					code: "synthetic".into(),
+					request: 1,
+					captcha: None,
+				})
+				.await;
+			if matches!(code, 60003 | 50014) {
+				assert!(matches!(
+					event,
+					Event::JoinInvite {
+						result: Err(Failure::Challenged),
+						..
+					}
+				));
+				assert!(api.stopped());
+			} else {
+				if service == "hcaptcha" {
+					assert!(matches!(event, Event::InviteChallenge { .. }));
+				} else {
+					assert!(matches!(
+						event,
+						Event::JoinInvite {
+							result: Err(Failure::ProtocolAt(_)),
+							..
+						}
+					));
+				}
+				assert!(!api.stopped());
+			}
+			server.await.unwrap();
+		}
+		assert!(
+			invite_captcha(br#"{"captcha_service":"hcaptcha","captcha_sitekey":"bad/sitekey"}"#)
+				.is_none()
+		);
+	}
+	#[tokio::test]
+	async fn invite_captcha_only_resumes_explicit_matching_write() {
+		let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+		let mut api = DiscordApi::new(Arc::new(
+			SessionSecret::from_owner_input("SYNTHETIC_INVITE_OWNER_TOKEN".into()).unwrap(),
+		))
+		.unwrap();
+		api.base = format!("http://{}", listener.local_addr().unwrap());
+		let server = tokio::spawn(async move {
+			for attempt in 0..3 {
+				let (mut stream, _) = listener.accept().await.unwrap();
+				let mut bytes = Vec::new();
+				while !bytes.windows(4).any(|w| w == b"\r\n\r\n") {
+					let mut buf = [0; 1024];
+					let n = stream.read(&mut buf).await.unwrap();
+					assert!(n > 0);
+					bytes.extend_from_slice(&buf[..n]);
+					assert!(bytes.len() < 16384);
+				}
+				let request = std::str::from_utf8(&bytes).unwrap();
+				assert!(request.starts_with("POST /invites/synthetic HTTP/1.1"));
+				assert_eq!(
+					request.contains("x-captcha-key: synthetic-solution"),
+					attempt == 1
+				);
+				assert_eq!(
+					request.contains("x-captcha-rqtoken: synthetic-rqtoken"),
+					attempt == 1
+				);
+				assert_eq!(
+					request.contains("x-captcha-session-id: synthetic-session"),
+					attempt == 1
+				);
+				let (status, body) = match attempt {
+					0 => (
+						"400 Bad Request",
+						r#"{"captcha_key":["required"],"captcha_service":"hcaptcha","captcha_sitekey":"synthetic-sitekey","captcha_rqdata":"synthetic-rqdata","captcha_rqtoken":"synthetic-rqtoken","captcha_session_id":"synthetic-session"}"#,
+					),
+					1 => ("200 OK", r#"{"guild":{"id":"2","name":"Synthetic"}}"#),
+					_ => (
+						"400 Bad Request",
+						r#"{"captcha_key":["required"],"captcha_service":"unsupported"}"#,
+					),
+				};
+				stream
+					.write_all(
+						format!(
+							"HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+							body.len()
+						)
+						.as_bytes(),
+					)
+					.await
+					.unwrap();
+			}
+		});
+		let mut state = client_core::State {
+			auth: client_core::auth::AuthState::Authenticated,
+			gateway_connected: true,
+			..Default::default()
+		};
+		state.invites.insert(
+			"synthetic".into(),
+			(
+				std::time::Instant::now(),
+				Some(Ok(model::InvitePreview {
+					guild: model::Id(2),
+					embed: Default::default(),
+				})),
+			),
+		);
+		let event = api
+			.execute(state.join_invite("synthetic".into()).unwrap())
+			.await;
+		assert!(matches!(event, Event::InviteChallenge { .. }));
+		assert!(!api.stopped());
+		state.apply(client_core::Envelope {
+			generation: state.generation,
+			event,
+		});
+		let request = state.invite_challenge().unwrap().0;
+		let command = state
+			.resume_invite_challenge(
+				request,
+				client_core::captcha::Solution::new("synthetic-solution".into()).unwrap(),
+			)
+			.unwrap();
+		assert!(matches!(
+			api.execute(command).await,
+			Event::JoinInvite {
+				result: Ok(model::Id(2)),
+				..
+			}
+		));
+		assert!(!api.stopped());
+		assert!(matches!(
+			api.execute(Command::JoinInvite {
+				code: "synthetic".into(),
+				request: 99,
+				captcha: None
+			})
+			.await,
+			Event::JoinInvite {
+				result: Err(Failure::ProtocolAt(_)),
+				..
+			}
+		));
+		assert!(!api.stopped());
+		server.await.unwrap();
+	}
 	use tokio::{
 		io::{AsyncReadExt, AsyncWriteExt},
 		net::TcpListener,

@@ -61,10 +61,12 @@ mod thumbhash;
 mod timeline;
 mod typing;
 mod user_menu;
+mod verification;
 mod voice;
 use client_core::{Command, MAX_CONTENT, MAX_DRAFT_BYTES, State};
 use egui::{RichText, TextEdit};
 use model::{Freshness, Id};
+pub use verification::VerificationUi;
 pub use voice::StageFocus;
 
 pub struct VoiceGain {
@@ -93,6 +95,7 @@ enum MemberRow {
 
 #[derive(Default)]
 pub struct MessagingUi {
+	pub verification: VerificationUi,
 	pub extensions: ExtensionUi,
 	friends: friends::Friends,
 	account_menu: account_menu::AccountMenu,
@@ -417,6 +420,46 @@ impl MessagingUi {
 	#[cfg(any(test, feature = "demo"))]
 	pub fn preview_join_server(&mut self, generation: u64) {
 		self.join_server.open(generation);
+	}
+	/// Fixture-only: show the native verification flow without contacting a provider.
+	#[cfg(any(test, feature = "demo"))]
+	pub fn preview_verification(&mut self, state: &mut State) {
+		if !state.demo {
+			return;
+		}
+		let code = "synthetic-verification".to_owned();
+		state.invites.insert(
+			code.clone(),
+			(
+				std::time::Instant::now(),
+				Some(Ok(model::InvitePreview {
+					guild: Id(424242),
+					embed: model::Embed {
+						title: Some("Serein community".into()),
+						..Default::default()
+					},
+				})),
+			),
+		);
+		state.invite_join = Default::default();
+		state.invite_join.code = code;
+		state.invite_join.pending = true;
+		state.apply(client_core::Envelope {
+			generation: state.generation,
+			event: client_core::Event::InviteChallenge {
+				request: 0,
+				challenge: Box::new(
+					client_core::captcha::Challenge::new(
+						"synthetic-preview".into(),
+						None,
+						None,
+						None,
+						false,
+					)
+					.expect("valid synthetic challenge"),
+				),
+			},
+		});
 	}
 	/// Fixture-only: open the screen-share picker for the fixture call at startup.
 	#[cfg(any(test, feature = "demo"))]
@@ -2722,10 +2765,13 @@ impl MessagingUi {
 						if let Some(gif) = self.timeline.gif_favorite.take() {
 							state.toggle_gif_favorite(&gif);
 						}
-						if let Some(code) = self.timeline.invite_join.take()
-							&& let Some(command) = state.join_invite(code)
-						{
-							commands.push(command);
+						if let Some(code) = self.timeline.invite_join.take() {
+							if state.invite_join.code == code && state.invite_challenge().is_some()
+							{
+								self.verification.active = false;
+							} else if let Some(command) = state.join_invite(code) {
+								commands.push(command);
+							}
 						}
 						for code in std::mem::take(&mut self.timeline.invite_requests) {
 							if let Some(command) = state.request_invite(code) {
@@ -2788,8 +2834,10 @@ impl MessagingUi {
 		}
 		self.search
 			.overlays(&ctx, state, &mut self.avatars, &mut commands);
-		self.join_server
-			.show(&ctx, state, &mut self.avatars, &mut commands);
+		if state.invite_challenge().is_none() {
+			self.join_server
+				.show(&ctx, state, &mut self.avatars, &mut commands);
+		}
 		if let Some(anchor) = self.pins_anchor {
 			let dm = state
 				.channels
@@ -3003,6 +3051,7 @@ impl MessagingUi {
 				None => {}
 			}
 		}
+		self.verification.show(&ctx, state);
 		self.voice_ptt_active = self.voice_push_to_talk
 			&& state.voice.active.is_some()
 			&& !state.demo
