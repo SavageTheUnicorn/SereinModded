@@ -1,5 +1,9 @@
 name: native-client
-on: [push, pull_request]
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
 concurrency:
   group: native-client-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -7,6 +11,7 @@ permissions:
   contents: read
 jobs:
   native:
+    if: github.event_name == 'push' || github.event.pull_request.draft == false
     strategy:
       fail-fast: false
       matrix:
@@ -44,6 +49,7 @@ jobs:
           name: serein-${{ runner.os }}-unsigned
           path: dist/
   security:
+    if: github.event_name == 'push' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7.0.1
@@ -56,6 +62,7 @@ jobs:
       - run: cargo install cargo-audit --version 0.22.2 --locked --no-default-features
       - run: cargo audit --deny warnings
   licenses:
+    if: github.event_name == 'push' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7.0.1
@@ -73,6 +80,7 @@ jobs:
           bun-version: 1.4.2
       - run: bun tests/license-policy.cjs
   fuzz:
+    if: github.event_name == 'push' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
