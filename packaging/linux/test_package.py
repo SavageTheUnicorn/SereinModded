@@ -70,9 +70,10 @@ class NativePackageTest(unittest.TestCase):
             listing = packaging.output("dpkg-deb", "--contents", str(artifact))
             for excluded in ["debug.log", "stale.log", "stale.deb", "previous.deb", "stale-nested.log"]:
                 self.assertNotIn(excluded, listing)
+            self.assertNotIn("usr/share/doc/serein/docs/", listing)
+            self.assertNotIn("source/hpke-rs/", listing)
             self.assertIn("licenses/dependencies/PROVENANCE.md", listing)
             self.assertIn("licenses/voice/", listing)
-            self.assertIn("source/hpke-rs/Cargo.toml", listing)
             # Preserve valid metadata while making the expected payload disagree.
             wrong_stage = root / "wrong-stage"
             wrong_stage.mkdir()

@@ -67,13 +67,14 @@ Install the native source-build dependencies in `docs/platform-support.md`, plus
 `dpkg-shlibdeps`, `dpkg-deb`, `desktop-file-validate`, and `ldd`. It needs no root
 privileges. It creates a fresh temporary staging tree on the native Linux
 filesystem, normalizes file permissions and desktop-file line endings, and copies
-only current documentation/license/source paths from the staged release output.
-It excludes stale archives, nested voice outputs, logs, and stale license/source
-files. Temporary files are removed when packaging finishes or raises an error.
+only current license paths from the staged release output. Repository documentation
+and source trees are not included. It excludes stale archives, nested voice outputs,
+logs, and stale license files. Temporary files are removed when packaging finishes
+or raises an error.
 
 The archive installs `/usr/bin/serein`, a launcher in
-`/usr/share/applications/org.serein.desktop.desktop`, and documentation, notices, licenses and
-applicable modified component source under `/usr/share/doc/serein`. No maintainer
+`/usr/share/applications/org.serein.desktop.desktop`, and notices and licenses under
+`/usr/share/doc/serein`. No maintainer
 scripts, background updater, automatic launch or user-profile writes are added.
 For a deliberate manual installation, use the local file:
 
@@ -111,9 +112,9 @@ Run the small additional regression check without building the application:
 PYTHONDONTWRITEBYTECODE=1 python3 packaging/linux/test_package.py
 ```
 
-It packages `/bin/true` with synthetic documentation and repository license files,
-checks bundled voice notices/source and rejection of stale nested payloads, then checks
-mismatched payload and invalid ELF detection. The fixture is not a Serein build.
+It deliberately supplies synthetic documentation and source trees, verifies they are
+omitted, then checks mismatched payload and invalid ELF detection. The fixture is not
+a Serein build.
 
 Tool contracts: [dpkg-shlibdeps](https://manpages.debian.org/trixie/dpkg-dev/dpkg-shlibdeps.1.en.html)
 and [dpkg-deb](https://manpages.debian.org/trixie/dpkg/dpkg-deb.1.en.html).
