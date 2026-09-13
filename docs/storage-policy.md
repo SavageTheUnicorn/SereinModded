@@ -33,6 +33,13 @@ and saving run on the existing bounded cache worker; corrupt/oversized records a
 save failures are shown. Shortcuts survive restart and are removed on account
 logout. They do not sync to Discord. Channel edit drafts, authoritative settings,
 pending actions and locally observed mute expiry times remain bounded session RAM.
+Each category/channel settings snapshot retains at most 1000 overwrites (48 KiB),
+a 400-byte name and a 16 KiB topic, under 64 KiB total heap allocation. The UI holds
+one before/after pair; core holds one loaded snapshot and one pending edit, with
+one additional before/after pair in the existing command lane. Settings are read
+and written on demand and never persisted locally. Picker suggestions reuse the
+loaded member window and role mirror; searches are capped at 64 characters and
+explicit member IDs at 20 characters.
 Shortcut restore retains one request when the storage queue is full, then admits it
 when worker completions free space. Only one load can be in flight; account/session
 reset clears its flags. Actual storage failures stop automatic retries and retain
