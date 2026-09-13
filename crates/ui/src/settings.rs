@@ -27,6 +27,7 @@ enum Page {
 	Voice,
 	Keybinds,
 	Storage,
+	Updates,
 	Extensions,
 	Themes,
 }
@@ -42,6 +43,7 @@ impl Page {
 		Self::Voice,
 		Self::Keybinds,
 		Self::Storage,
+		Self::Updates,
 		Self::Extensions,
 		Self::Themes,
 	];
@@ -55,6 +57,7 @@ impl Page {
 		Self::Voice,
 		Self::Keybinds,
 		Self::Storage,
+		Self::Updates,
 		Self::Extensions,
 		Self::Themes,
 	];
@@ -70,6 +73,7 @@ impl Page {
 			Self::Voice => "Voice & Audio",
 			Self::Keybinds => "Keybinds",
 			Self::Storage => "Data & Privacy",
+			Self::Updates => "Updates",
 			Self::Extensions => "Extensions",
 			Self::Themes => "Themes",
 		}
@@ -88,6 +92,7 @@ impl Page {
 			Self::Voice => "Microphone, speakers and voice processing.",
 			Self::Keybinds => "Keyboard shortcuts for Serein.",
 			Self::Storage => "What Serein keeps on this device.",
+			Self::Updates => "Keep Serein up to date on this device.",
 			Self::Extensions => "Manage community plugins.",
 			Self::Themes => "Choose a community theme.",
 		}
@@ -113,6 +118,9 @@ impl Page {
 				"voice audio microphone speakers devices volume gain noise suppression push to talk"
 			}
 			Self::Storage => "data privacy local storage clear cache drafts credentials",
+			Self::Updates => {
+				"updates auto update release channel production stable nightly download restart version check"
+			}
 			Self::Keybinds => {
 				"system keybinds keyboard shortcuts custom default formatting navigation"
 			}
@@ -124,6 +132,12 @@ impl Page {
 }
 
 impl MessagingUi {
+	pub fn open_update_settings(&mut self) {
+		self.settings.open = true;
+		self.settings.page = Page::Updates;
+		self.settings.query.clear();
+	}
+
 	pub(super) fn keybinds_shortcut(&mut self, ctx: &egui::Context) {
 		if !self.server_settings.is_open()
 			&& !self.switcher.is_open()
@@ -300,6 +314,7 @@ impl MessagingUi {
 										false,
 									),
 									Page::Storage => self.storage_page(ui, state),
+									Page::Updates => self.update_settings(ui, state.demo),
 									Page::Keybinds => crate::keybinds::show(ui),
 									Page::Extensions | Page::Themes => {
 										self.extensions

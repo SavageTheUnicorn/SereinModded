@@ -62,6 +62,7 @@ mod switcher;
 mod thumbhash;
 mod timeline;
 mod typing;
+pub mod updates;
 mod user_menu;
 mod verification;
 mod voice;
@@ -246,6 +247,8 @@ pub struct MessagingUi {
 	pub storage_status: &'static str,
 	/// Release channel and version shown in the title bar.
 	pub build: design::Build,
+	pub updates: updates::Updates,
+	pub updates_save_failed: bool,
 	/// Header pin button rect while the pins popout is open.
 	pins_anchor: Option<egui::Rect>,
 	editing: Option<(Id, Id, String)>,
@@ -530,6 +533,8 @@ impl MessagingUi {
 	pub fn clear(&mut self) {
 		// Window preferences belong to the application, not the account being cleared.
 		*self = Self {
+			build: self.build,
+			updates: std::mem::take(&mut self.updates),
 			minimize_to_tray: self.minimize_to_tray,
 			tray_available: self.tray_available,
 			tray_status: self.tray_status,
@@ -652,8 +657,25 @@ impl MessagingUi {
 					|ui| {
 						design::window_controls(ui);
 						ui.spacing_mut().item_spacing.x = 10.0;
-						design::build_badge(ui, self.build);
-						if state.demo {
+						if self.updates.available || self.updates.ready {
+							let label = if self.updates.ready {
+								"Restart to update"
+							} else if self.updates.busy {
+								"Updating…"
+							} else {
+								"Update available"
+							};
+							if ui
+								.small_button(egui::RichText::new(label).color(colors.link))
+								.on_hover_text(&self.updates.status)
+								.clicked()
+							{
+								self.open_update_settings();
+							}
+						} else {
+							design::build_badge(ui, self.build);
+						}
+						if state.demo && !self.updates.available && !self.updates.ready {
 							egui::Frame::new()
 								.stroke(egui::Stroke::new(1.0, colors.border))
 								.corner_radius(10)

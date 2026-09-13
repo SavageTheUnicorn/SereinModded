@@ -84,3 +84,36 @@ recoverable. The Close button still exits, and the tray Quit action retains unsa
 work checks. macOS/Linux autostart remains explicitly unavailable.
 Offline tests cover isolated registry writes/removal, launch flags and settings
 interaction; an actual Windows sign-out/sign-in has not been exercised.
+
+## In-app updates
+
+Settings → Updates provides automatic checking/downloading, Production and Nightly
+release channels, a manual check and an explicit restart action. The title strip
+shows an available or downloaded update on macOS and Windows. Update controls are
+also accessible from the signed-out screen. Automatic checking runs at startup
+once saved preferences are available, then every six hours while running; turning
+it off disables automatic downloads while background checks and title-bar notices
+remain active. Nightly is the default channel and automatic downloads are off by
+default. Switching channels never installs an
+older semantic version. Nightly checks inspect the latest 100 published releases.
+
+Packages come from this repository's existing GitHub releases and must match the
+platform/architecture asset name, published length and `SHA256SUMS.txt`. Downloads
+and installation preparation run outside rendering; installation is handed off
+only after the application's existing close/unsaved-work gates permit shutdown.
+GitHub HTTPS and repository access are the update trust boundary; release checksums
+alone are not an independent publisher signature. Linux uses its package manager.
+
+The local `--features demo -- --demo --demo-check-updates` debug path exercises
+synthetic update states, preference compatibility and settings rendering without
+network access or replacing an installation. It is not evidence of a successful
+live release upgrade or of Windows native installation behavior.
+
+In-app installation requires an extracted Windows release or an installed,
+writable macOS `.app` outside a mounted disk image/App Translocation. macOS checks
+strict code-signature validity, the existing publisher's TeamIdentifier and bundle
+identifier, and Gatekeeper acceptance. Windows currently relies on the repository's
+HTTPS/checksum trust boundary because its published packages are unsigned. Native
+helpers wait for the old process to exit, retain a rollback copy during replacement,
+and relaunch Serein. A failed recovery leaves its backup available with a visible
+recovery path on the next update attempt. Package-manager metadata is not modified.

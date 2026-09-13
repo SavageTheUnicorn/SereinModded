@@ -11,6 +11,15 @@ gaps. Corresponding MPL sources retain their original terms. Supplied reference 
 declarations and source archives do not resolve missing upstream grants.
 
 
+In-app release updates use **zip 4.6.1** (MIT) for bounded ZIP extraction with only
+flate2/zlib-rs decompression enabled, and the already-resolved **semver 1.0.28**
+(MIT OR Apache-2.0) for release ordering. Their upstream license texts are retained
+under `assets/licenses/files/zip-4.6.1-LICENSE` and
+`assets/licenses/files/semver-1.0.28-LICENSE-MIT`; registry archive checksums are
+recorded in `Cargo.lock`. The ZIP crate's fuzz-only arbitrary dependencies are not
+part of the normal desktop build.
+
+
 REST gzip decoding adds **async-compression 0.4.42**, **compression-codecs 0.4.38**
 and **compression-core 0.4.32**. Gateway zlib-stream decoding directly uses the
 already-resolved **flate2 1.1.10**. Rusqlite statement caching adds **hashlink 0.12.2**.

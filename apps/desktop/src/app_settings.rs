@@ -3,6 +3,7 @@ use local_store::AppPreferences;
 #[derive(Default)]
 pub struct Settings {
 	pub current: AppPreferences,
+	pub loaded: bool,
 	pub state: crate::toggle_setting::Settings,
 }
 impl Settings {
@@ -26,6 +27,8 @@ impl Settings {
 	pub fn observe(&mut self, ui: &ui::MessagingUi) {
 		let value = AppPreferences {
 			notifications_enabled: ui.notifications_enabled,
+			auto_update: ui.updates.auto_update,
+			update_nightly: ui.updates.nightly,
 			notification_options: ui.notification_options,
 			show_hidden_channels: ui.show_hidden_channels,
 			primary_color: ui.primary_color,
@@ -49,6 +52,8 @@ impl Settings {
 	pub fn apply(&self, ui: &mut ui::MessagingUi) {
 		let value = &self.current;
 		ui.notifications_enabled = value.notifications_enabled;
+		ui.updates.auto_update = value.auto_update;
+		ui.updates.nightly = value.update_nightly;
 		ui.notification_options = value.notification_options;
 		ui.show_hidden_channels = value.show_hidden_channels;
 		ui.primary_color = value.primary_color;

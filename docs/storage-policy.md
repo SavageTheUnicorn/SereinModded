@@ -655,3 +655,23 @@ counts are limited before admission. Filters replace the current history;
 closing settings, switching guild/session and permission loss release it.
 No audit log, filter or expansion state is saved to SQLite or diagnostic logs.
 The shared bounded avatar cache is reused.
+
+### Application updates
+
+The existing device-wide `app_preferences` JSON stores `auto_update` (default false)
+and `update_nightly` (default true). Missing fields in older settings use those
+defaults; the existing 16 KiB row bound still applies. These preferences survive
+account logout. Update checks wait for preferences to load; demo actions remain
+in memory and never open update transports or create installation files.
+
+The updater uses a separate credential-free HTTPS client for the Serein GitHub
+release repository. It keeps one worker/result slot, at most 2 MiB of release
+metadata, a 64 KiB checksum list and one streamed archive capped at 512 MiB.
+Progress is coalesced into one atomic byte counter; release bodies, URLs and
+package contents never enter application diagnostics or account caches.
+The ZIP central directory is checked before allocation (4 MiB / 8,192 entries);
+ZIP64 packages are rejected. Extracted data is capped at 1 GiB. Paths, duplicate
+names, symlinks and special files are validated before writing to private staging
+beside the installation. Staging records the app/helper owner and is reused or
+cleaned before another download; backups from interrupted replacements are kept
+for recovery and block another installation instead of being deleted.

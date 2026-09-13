@@ -23,6 +23,7 @@ mod screen;
 mod server_settings_demo;
 mod startup;
 mod toggle_setting;
+mod updater;
 mod uploads;
 mod video;
 mod voice;
@@ -49,6 +50,11 @@ fn main() -> eframe::Result {
 	#[cfg(feature = "demo")]
 	if demo && std::env::args().any(|arg| arg == "--demo-check-extensions") {
 		demo_check_extensions();
+		return Ok(());
+	}
+	#[cfg(feature = "demo")]
+	if demo && std::env::args().any(|arg| arg == "--demo-check-updates") {
+		demo_check_updates();
 		return Ok(());
 	}
 	#[cfg(target_os = "windows")]
@@ -95,6 +101,61 @@ fn main() -> eframe::Result {
 			Ok(Box::new(desktop))
 		}),
 	)
+}
+/// Offline updater flow and settings rendering; never opens an account or installs a package.
+#[cfg(feature = "demo")]
+fn demo_check_updates() {
+	updater::debug_check().expect("offline updater validation");
+	let ctx = egui::Context::default();
+	ui::fonts::install(&ctx);
+	ui::design::apply(&ctx);
+	let runtime = tokio::runtime::Builder::new_current_thread()
+		.enable_all()
+		.build()
+		.unwrap();
+	let mut updater = updater::Updater::new(true);
+	let mut messaging = ui::MessagingUi::default();
+	messaging.build.version = env!("CARGO_PKG_VERSION");
+	messaging.updates.auto_update = false;
+	messaging.updates.check_requested = true;
+	assert!(!updater.sync(&ctx, &runtime, &mut messaging.updates, false));
+	assert!(messaging.updates.available && !messaging.updates.ready);
+	messaging.updates.download_requested = true;
+	assert!(!updater.sync(&ctx, &runtime, &mut messaging.updates, false));
+	assert!(messaging.updates.ready);
+	messaging.updates.restart_requested = true;
+	assert!(!updater.sync(&ctx, &runtime, &mut messaging.updates, false));
+	let restored: local_store::AppPreferences = serde_json::from_str("{}").unwrap();
+	assert!(!restored.auto_update && restored.update_nightly);
+	let mut settings = app_settings::Settings::default();
+	messaging.updates.nightly = true;
+	settings.observe(&messaging);
+	let encoded = serde_json::to_string(&settings.current).unwrap();
+	settings.current = serde_json::from_str(&encoded).unwrap();
+	settings.apply(&mut messaging);
+	assert!(!messaging.updates.auto_update && messaging.updates.nightly);
+	messaging.open_update_settings();
+	let mut state = test_support::demo_state();
+	for size in [[1120.0, 760.0], [760.0, 520.0]] {
+		for theme in [egui::ThemePreference::Dark, egui::ThemePreference::Light] {
+			ctx.set_theme(theme);
+			let output = ctx.run_ui(
+				egui::RawInput {
+					screen_rect: Some(egui::Rect::from_min_size(
+						egui::Pos2::ZERO,
+						egui::vec2(size[0], size[1]),
+					)),
+					..Default::default()
+				},
+				|ui| {
+					let _ = messaging.show(ui, &mut state);
+				},
+			);
+			assert!(!output.shapes.is_empty());
+			output.drop_without_applying_deltas();
+		}
+	}
+	println!("Offline update flow, preference compatibility, and settings rendering passed.");
 }
 /// One offline debug path through the shipped Wasm, reducer, and native egui rows.
 #[cfg(feature = "demo")]
@@ -278,6 +339,7 @@ struct Desktop {
 	appearance_changed: bool,
 	reading: reading_settings::ReadingSettings,
 	app_settings: app_settings::Settings,
+	updater: updater::Updater,
 	game_activity: toggle_setting::Settings,
 	tray_setting: toggle_setting::Settings,
 	startup: startup::Startup,
@@ -1115,6 +1177,7 @@ impl Desktop {
 			appearance_changed: false,
 			reading,
 			app_settings,
+			updater: updater::Updater::new(demo),
 			game_activity,
 			tray_setting,
 			startup,
@@ -2793,6 +2856,7 @@ impl Desktop {
 			// Settings are global; account removal/write failures still matter after logout.
 			match &outcome {
 				cache::Outcome::AppPreferences(result) => {
+					self.app_settings.loaded = result.is_ok();
 					if !self.app_settings.state.touched {
 						match result {
 							Ok(value) => self.app_settings.current = value.clone(),
@@ -3312,6 +3376,13 @@ impl eframe::App for Desktop {
 			raw_input.predicted_dt = period.as_secs_f32();
 		}
 	}
+	fn on_exit(&mut self) {
+		if self.updater.finish_restart().is_err() {
+			eprintln!(
+				"Could not hand off the prepared update. The installed app was not replaced."
+			);
+		}
+	}
 	fn logic(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
 		self.frame_metrics.begin(ctx);
 		self.startup.sync(
@@ -3322,6 +3393,16 @@ impl eframe::App for Desktop {
 		);
 		self.messaging.sync_reading_zoom(ctx);
 		self.poll(ctx);
+		if self.updater.sync(
+			ctx,
+			&self.runtime,
+			&mut self.messaging.updates,
+			!self.fixture_only
+				&& !self.state.demo
+				&& (self.app_settings.loaded || self.app_settings.state.touched),
+		) {
+			ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+		}
 		self.state.expire_invite_challenge();
 		if self.state.invite_challenge().is_some() {
 			ctx.request_repaint_after(Duration::from_secs(1));
@@ -3613,6 +3694,28 @@ impl eframe::App for Desktop {
 		{
 			ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
 			self.confirming_close = true;
+		}
+		if self.state.user.is_none() && self.login.is_none() {
+			egui::Panel::top("signed-out-updates")
+				.exact_size(36.0)
+				.show_separator_line(false)
+				.frame(egui::Frame::NONE.fill(ui::design::window_palette(ui).base))
+				.show(ui, |ui| {
+					ui::design::window_drag(ui, ui.max_rect());
+					ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+						let label = if self.messaging.updates.ready {
+							"Restart to update"
+						} else if self.messaging.updates.available {
+							"Update available"
+						} else {
+							"Updates"
+						};
+						if ui.small_button(label).clicked() {
+							self.messaging.open_update_settings();
+						}
+					});
+				});
+			self.messaging.show_signed_out_updates(&ctx);
 		}
 		if self.login.is_some() {
 			let p = ui::design::palette(ui);
@@ -4001,6 +4104,7 @@ impl eframe::App for Desktop {
 		let appearance = ctx.options(|options| options.theme_preference);
 		self.sync_customization(&ctx);
 		self.save_app_preferences();
+		self.messaging.updates_save_failed = self.app_settings.state.failed;
 		self.save_reading_preferences(&ctx);
 		self.sync_own_presence(&ctx);
 		self.sync_game_activity(&ctx);
@@ -4108,6 +4212,7 @@ impl eframe::App for Desktop {
 					}
 				}
 				Some(ui::dialog::Choice::Cancelled) => {
+					self.updater.cancel_restart();
 					self.confirming_close = false;
 					self.confirming_logout = false;
 					self.download_close_pending = false;

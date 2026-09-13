@@ -14,6 +14,8 @@ pub struct LocalStore(Connection);
 #[serde(default)]
 pub struct AppPreferences {
 	pub notifications_enabled: bool,
+	pub auto_update: bool,
+	pub update_nightly: bool,
 	pub notification_options: model::notification_preferences::Device,
 	pub show_hidden_channels: bool,
 	pub primary_color: Option<[u8; 3]>,
@@ -30,6 +32,8 @@ impl Default for AppPreferences {
 	fn default() -> Self {
 		Self {
 			notifications_enabled: false,
+			auto_update: false,
+			update_nightly: true,
 			notification_options: Default::default(),
 			show_hidden_channels: false,
 			primary_color: None,
