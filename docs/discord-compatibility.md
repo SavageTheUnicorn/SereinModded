@@ -917,9 +917,17 @@ READY and relationship dispatches retain at most 4,000 pending profiles / 2 MiB,
 separate from confirmed friends. Missing profile metadata remains explicitly unknown.
 Writes reuse the existing single pending user-action slot and session generation;
 newer Gateway state wins over late HTTP results. No automatic write retries occur.
-Successful sends wait for Gateway identity data rather than inventing an outgoing row.
+Username-based sends wait for Gateway identity data rather than inventing an outgoing row.
 Synthetic reducer, protocol and local HTTP tests cover this path; live requests,
 service challenges and recipient privacy restrictions remain unverified.
+
+Profile cards also expose confirmed friendship, incoming requests and outgoing requests.
+Adding from a card uses its user ID with PUT `/users/@me/relationships/{id}` and type 1;
+removing a confirmed friend uses DELETE only after a named confirmation dialog.
+Acknowledged ID requests retain a bounded outgoing row with unknown profile metadata until
+Gateway data arrives. Failed writes preserve friendship; newer Gateway updates win over
+late acknowledgements. Cancellation and account changes discard pending UI confirmations.
+These paths have offline UI/reducer/HTTP coverage, not live-account verification.
 
 ### Additional system message display (September 12, 2026)
 

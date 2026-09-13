@@ -15,6 +15,9 @@ pub enum Action {
 	Close,
 	Retry,
 	Message(Id),
+	AddFriend(Id),
+	RemoveFriend,
+	AcceptFriend(Id),
 	Profile(User),
 }
 
@@ -22,6 +25,105 @@ const WIDTH: f32 = 300.0;
 const PAD: f32 = 12.0;
 const AVATAR: f32 = 80.0;
 const RADIUS: u8 = 8;
+
+fn friend_target(state: &State, user: &User) -> bool {
+	!user.webhook
+		&& user.kind == model::AccountKind::Human
+		&& state.user.as_ref().is_some_and(|own| own.id != user.id)
+}
+fn friend_button(ui: &mut egui::Ui, state: &State, user: &User) -> Option<Action> {
+	if !friend_target(state, user) {
+		return None;
+	}
+	let friend = state.friends().any(|friend| friend.id == user.id);
+	let request = state
+		.pending_friends()
+		.find(|(person, _, _)| person.id == user.id);
+	let (label, action) = if state.user_blocked(user.id) == Some(true) {
+		("Blocked", None)
+	} else if friend {
+		("Friends \u{2713}", Some(Action::RemoveFriend))
+	} else if let Some((_, _, incoming)) = request {
+		if *incoming {
+			("Accept Request", Some(Action::AcceptFriend(user.id)))
+		} else {
+			("Request Sent", None)
+		}
+	} else if !state.friends_known() || !state.friend_requests_known() {
+		("Loading friendship status...", None)
+	} else {
+		("Add Friend", Some(Action::AddFriend(user.id)))
+	};
+	let enabled = action.is_some()
+		&& state.friends_known()
+		&& state.friend_requests_known()
+		&& state.user_blocked(user.id) == Some(false)
+		&& !state.user_action_pending()
+		&& (state.demo
+			|| (state.gateway_connected
+				&& state.auth == client_core::auth::AuthState::Authenticated));
+	let clicked = ui
+		.add_enabled(
+			enabled,
+			egui::Button::new(label).min_size(vec2(ui.available_width(), 32.0)),
+		)
+		.on_hover_text(if friend {
+			"You are friends. Click to remove this friend."
+		} else {
+			label
+		})
+		.clicked();
+	if let Some(status) = state.user_action_status() {
+		ui.add(egui::Label::new(RichText::new(status).small()).wrap());
+	}
+	if clicked { action } else { None }
+}
+
+impl crate::MessagingUi {
+	pub(super) fn confirm_friend_removal(
+		&mut self,
+		ctx: &egui::Context,
+		state: &mut State,
+		commands: &mut Vec<client_core::Command>,
+	) {
+		let Some((generation, user)) = &self.friend_removal else {
+			return;
+		};
+		if *generation != state.generation || !state.friends().any(|friend| friend.id == user.id) {
+			self.friend_removal = None;
+			return;
+		}
+		let result = crate::dialog::Confirm::new(
+			("remove-profile-friend", user.id),
+			"Remove Friend?",
+			format!(
+				"Are you sure you want to remove {} from your friends?",
+				user.name
+			),
+		)
+		.danger()
+		.confirm_label("Remove Friend")
+		.enabled(
+			!state.user_action_pending()
+				&& state.friends_known()
+				&& state.friend_requests_known()
+				&& (state.demo
+					|| (state.gateway_connected
+						&& state.auth == client_core::auth::AuthState::Authenticated)),
+		)
+		.show(ctx);
+		match result {
+			Some(crate::dialog::Choice::Confirmed) => {
+				if let Some(command) = state.remove_friend(user.id) {
+					commands.push(command);
+				}
+				self.friend_removal = None;
+			}
+			Some(crate::dialog::Choice::Cancelled) => self.friend_removal = None,
+			None => {}
+		}
+	}
+}
 
 pub fn presence_label(status: &str) -> &'static str {
 	match status {
@@ -516,7 +618,16 @@ pub fn show(
 				})
 				.show(ui, |ui| {
 					ui.spacing_mut().item_spacing.y = 8.0;
-					let footer = 32.0 + 8.0;
+					let footer = 40.0
+						+ if friend_target(state, user) {
+							40.0 + if state.user_action_status().is_some() {
+								48.0
+							} else {
+								0.0
+							}
+						} else {
+							0.0
+						};
 					egui::Frame::new()
 						.fill(theme.panel)
 						.corner_radius(RADIUS)
@@ -875,6 +986,9 @@ pub fn show(
 									});
 							}
 						});
+					if let Some(friend_action) = friend_button(ui, state, user) {
+						action = Some(friend_action);
+					}
 					ui.horizontal(|ui| {
 						ui.spacing_mut().item_spacing.x = 8.0;
 						if state.user.as_ref().is_some_and(|own| own.id == user.id) {
@@ -1010,6 +1124,130 @@ pub fn synthetic(user: &User, guild: Option<Id>) -> model::UserProfile {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	#[test]
+	fn profile_friend_button_requires_confirmation_and_tracks_relationships() {
+		use client_core::user_actions::{Action as UserAction, Event};
+		let mut person = test_support::message(1, Id(22)).author;
+		person.id = Id(2);
+		let mut owner = person.clone();
+		owner.id = Id(1);
+		let mut state = State {
+			user: Some(owner),
+			demo: true,
+			..Default::default()
+		};
+		for event in [
+			Event::Friends(Some(vec![(person.clone(), "synthetic".into())])),
+			Event::Requests(Some(vec![])),
+		] {
+			state.apply(client_core::Envelope {
+				generation: state.generation,
+				event: client_core::Event::UserAction(event),
+			});
+		}
+		let ctx = egui::Context::default();
+		let size = vec2(500.0, 600.0);
+		let mut view = crate::MessagingUi::default();
+		let mut commands = Vec::new();
+		let mut chosen = None;
+		let render_button = |events, chosen: &mut Option<Action>| {
+			ctx.run_ui(input(size, events), |ui| {
+				if let Some(action) = friend_button(ui, &state, &person) {
+					*chosen = Some(action);
+				}
+			})
+		};
+		let output = render_button(vec![], &mut chosen);
+		let position = output
+			.shapes
+			.iter()
+			.find_map(|s| match &s.shape {
+				egui::Shape::Text(t) if t.galley.job.text == "Friends \u{2713}" => {
+					Some(t.pos + t.galley.size() * 0.5)
+				}
+				_ => None,
+			})
+			.unwrap();
+		output.drop_without_applying_deltas();
+		let pointer = |position, pressed| {
+			vec![
+				egui::Event::PointerMoved(position),
+				egui::Event::PointerButton {
+					pos: position,
+					button: egui::PointerButton::Primary,
+					pressed,
+					modifiers: egui::Modifiers::NONE,
+				},
+			]
+		};
+		render_button(pointer(position, true), &mut chosen).drop_without_applying_deltas();
+		render_button(pointer(position, false), &mut chosen).drop_without_applying_deltas();
+		assert!(matches!(chosen, Some(Action::RemoveFriend)));
+		assert!(!state.user_action_pending());
+		view.friend_removal = Some((state.generation, person.clone()));
+		for _ in 0..3 {
+			ctx.run_ui(input(size, vec![]), |_| {
+				view.confirm_friend_removal(&ctx, &mut state, &mut commands)
+			})
+			.drop_without_applying_deltas();
+		}
+		let escape = egui::Event::Key {
+			key: egui::Key::Escape,
+			physical_key: None,
+			pressed: true,
+			repeat: false,
+			modifiers: egui::Modifiers::NONE,
+		};
+		ctx.run_ui(input(size, vec![escape]), |_| {
+			view.confirm_friend_removal(&ctx, &mut state, &mut commands)
+		})
+		.drop_without_applying_deltas();
+		assert!(view.friend_removal.is_none());
+		assert!(commands.is_empty());
+		assert_eq!(state.friends().count(), 1);
+		view.friend_removal = Some((state.generation, person.clone()));
+		let mut confirm_position = None;
+		for _ in 0..3 {
+			let output = ctx.run_ui(input(size, vec![]), |_| {
+				view.confirm_friend_removal(&ctx, &mut state, &mut commands)
+			});
+			confirm_position = output
+				.shapes
+				.iter()
+				.find_map(|s| match &s.shape {
+					egui::Shape::Text(t) if t.galley.job.text == "Remove Friend" => {
+						Some(t.pos + t.galley.size() * 0.5)
+					}
+					_ => None,
+				})
+				.or(confirm_position);
+			output.drop_without_applying_deltas();
+		}
+		for pressed in [true, false] {
+			ctx.run_ui(
+				input(size, pointer(confirm_position.unwrap(), pressed)),
+				|_| view.confirm_friend_removal(&ctx, &mut state, &mut commands),
+			)
+			.drop_without_applying_deltas();
+		}
+		assert!(matches!(
+			commands.as_slice(),
+			[client_core::Command::UserAction {
+				action: UserAction::ProfileFriend {
+					user: Id(2),
+					friend: false
+				},
+				..
+			}]
+		));
+		assert!(view.friend_removal.is_none());
+		view.friend_removal = Some((state.generation - 1, person));
+		view.confirm_friend_removal(&ctx, &mut state, &mut commands);
+		assert!(
+			view.friend_removal.is_none(),
+			"stale account confirmation must be discarded"
+		);
+	}
 	fn text(shape: &egui::Shape, output: &mut String) {
 		match shape {
 			egui::Shape::Text(s) => output.push_str(&s.galley.job.text),

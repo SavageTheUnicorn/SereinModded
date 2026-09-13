@@ -17,6 +17,7 @@ pub enum Action {
 	Nickname { user: Id, text: String },
 	AddFriend { username: String },
 	ResolveFriend { user: Id, accept: bool },
+	ProfileFriend { user: Id, friend: bool },
 	CloseDm(Id),
 	Block { user: Id, blocked: bool },
 	Mute { channel: Id, muted: bool },
@@ -178,6 +179,33 @@ impl State {
 			return None;
 		}
 		self.request_user_action(Action::AddFriend { username })
+	}
+	pub fn add_profile_friend(&mut self, user: Id) -> Option<Command> {
+		if !self.profile_friend_action_allowed(user)
+			|| self.user_actions.friends.contains_key(&user)
+			|| self.user_actions.requests.contains_key(&user)
+		{
+			return None;
+		}
+		self.request_user_action(Action::ProfileFriend { user, friend: true })
+	}
+	pub fn remove_friend(&mut self, user: Id) -> Option<Command> {
+		if !self.profile_friend_action_allowed(user)
+			|| !self.user_actions.friends.contains_key(&user)
+		{
+			return None;
+		}
+		self.request_user_action(Action::ProfileFriend {
+			user,
+			friend: false,
+		})
+	}
+	fn profile_friend_action_allowed(&self, user: Id) -> bool {
+		user.0 != 0
+			&& self.user.as_ref().is_some_and(|owner| owner.id != user)
+			&& self.friends_known()
+			&& self.friend_requests_known()
+			&& self.user_blocked(user) == Some(false)
 	}
 	pub fn resolve_friend_request(&mut self, user: Id, accept: bool) -> Option<Command> {
 		let (_, _, incoming) = self.user_actions.requests.get(&user)?;
@@ -407,6 +435,11 @@ impl State {
 				}
 			}
 			Event::Requests(entries) => {
+				if let Some((Action::ProfileFriend { .. }, _, observed)) =
+					&mut self.user_actions.pending
+				{
+					*observed = true;
+				}
 				self.user_actions.requests.clear();
 				self.user_actions.requests_known = false;
 				if let Some(entries) = entries {
@@ -440,8 +473,12 @@ impl State {
 				if user.0 == 0 {
 					return Err("Invalid friend request");
 				}
-				if let Some((Action::ResolveFriend { user: target, .. }, _, observed)) =
-					&mut self.user_actions.pending
+				if let Some((
+					Action::ResolveFriend { user: target, .. }
+					| Action::ProfileFriend { user: target, .. },
+					_,
+					observed,
+				)) = &mut self.user_actions.pending
 					&& *target == user
 				{
 					*observed = true;
@@ -519,6 +556,11 @@ impl State {
 				}
 			}
 			Event::Friends(entries) => {
+				if let Some((Action::ProfileFriend { .. }, _, observed)) =
+					&mut self.user_actions.pending
+				{
+					*observed = true;
+				}
 				self.user_actions.friends.clear();
 				self.user_actions.friends_known = false;
 				if let Some(entries) = entries {
@@ -551,6 +593,12 @@ impl State {
 				friend,
 				profile,
 			} => {
+				if let Some((Action::ProfileFriend { user: target, .. }, _, observed)) =
+					&mut self.user_actions.pending
+					&& *target == user
+				{
+					*observed = true;
+				}
 				let profile = profile.or_else(|| {
 					self.user_actions
 						.requests
@@ -622,8 +670,11 @@ impl State {
 			}
 			Event::Relationship { user, blocked } => {
 				self.store_relationship(user, blocked)?;
-				if let Some((Action::Block { user: target, .. }, _, observed)) =
-					&mut self.user_actions.pending
+				if let Some((
+					Action::Block { user: target, .. } | Action::ProfileFriend { user: target, .. },
+					_,
+					observed,
+				)) = &mut self.user_actions.pending
 					&& *target == user
 				{
 					*observed = true;
@@ -679,6 +730,21 @@ impl State {
 								}
 							}
 						}
+						Action::ProfileFriend { user, friend } => {
+							if friend {
+								self.apply_user_action(Event::Request {
+									user,
+									incoming: Some(false),
+									profile: None,
+								})?;
+							} else {
+								self.apply_user_action(Event::Friend {
+									user,
+									friend: false,
+									profile: None,
+								})?;
+							}
+						}
 						Action::CloseDm(channel) => {
 							self.remove_channels(&std::collections::BTreeSet::from([channel]));
 							if self.selected == Some(channel) {
@@ -701,6 +767,8 @@ impl State {
 						Action::AddFriend { .. } => {
 							"Friend request sent · waiting for service update"
 						}
+						Action::ProfileFriend { friend: true, .. } => "Friend request sent",
+						Action::ProfileFriend { friend: false, .. } => "Friend removed",
 						Action::ResolveFriend { accept: true, .. } => "Friend request accepted",
 						Action::ResolveFriend { accept: false, .. } => "Friend request removed",
 						Action::CloseDm(_) => "DM closed · messages and drafts were not deleted",
@@ -962,6 +1030,98 @@ mod tests {
 		state.logout();
 		assert!(!state.friend_requests_known());
 		assert_eq!(state.pending_friends().count(), 0);
+	}
+	#[test]
+	fn profile_friend_actions_require_known_state_and_reconcile_acknowledgements() {
+		let mut state = state();
+		let user = state.channels[0].recipients[0].clone();
+		assert!(state.add_profile_friend(user.id).is_none());
+		state
+			.apply_user_action(Event::Friends(Some(vec![])))
+			.unwrap();
+		state
+			.apply_user_action(Event::Requests(Some(vec![])))
+			.unwrap();
+		state
+			.apply_user_action(Event::Relationships(Some(vec![])))
+			.unwrap();
+		assert!(state.add_profile_friend(Id(0)).is_none());
+		assert!(state.add_profile_friend(Id(1)).is_none());
+		let add = state.add_profile_friend(user.id).unwrap();
+		assert!(state.add_profile_friend(user.id).is_none());
+		assert_eq!(state.pending_friends().count(), 0);
+		finish(&mut state, add, Err(Failure::Forbidden));
+		assert_eq!(state.pending_friends().count(), 0);
+		let add = state.add_profile_friend(user.id).unwrap();
+		finish(&mut state, add, Ok(()));
+		assert_eq!(
+			state
+				.pending_friends()
+				.next()
+				.map(|(u, _, incoming)| (u.id, *incoming)),
+			Some((user.id, false))
+		);
+		assert!(state.add_profile_friend(user.id).is_none());
+		assert!(state.remove_friend(user.id).is_none());
+		state
+			.apply_user_action(Event::Friend {
+				user: user.id,
+				friend: true,
+				profile: Some((user.clone(), "synthetic".into())),
+			})
+			.unwrap();
+		state
+			.apply_user_action(Event::Request {
+				user: user.id,
+				incoming: None,
+				profile: None,
+			})
+			.unwrap();
+		let remove = state.remove_friend(user.id).unwrap();
+		assert_eq!(state.friends().count(), 1);
+		finish(&mut state, remove, Err(Failure::Forbidden));
+		assert_eq!(state.friends().count(), 1);
+		let remove = state.remove_friend(user.id).unwrap();
+		finish(&mut state, remove, Ok(()));
+		assert_eq!(state.friends().count(), 0);
+		let add = state.add_profile_friend(user.id).unwrap();
+		state
+			.apply_user_action(Event::Friend {
+				user: user.id,
+				friend: true,
+				profile: Some((user.clone(), "synthetic".into())),
+			})
+			.unwrap();
+		finish(&mut state, add, Ok(()));
+		assert_eq!(state.friends().count(), 1);
+		assert_eq!(state.pending_friends().count(), 0);
+		let remove = state.remove_friend(user.id).unwrap();
+		state
+			.apply_user_action(Event::Friend {
+				user: user.id,
+				friend: false,
+				profile: None,
+			})
+			.unwrap();
+		state
+			.apply_user_action(Event::Friend {
+				user: user.id,
+				friend: true,
+				profile: Some((user.clone(), "synthetic".into())),
+			})
+			.unwrap();
+		finish(&mut state, remove, Ok(()));
+		assert_eq!(state.friends().count(), 1, "newer gateway friendship wins");
+		state
+			.apply_user_action(Event::Relationship {
+				user: user.id,
+				blocked: true,
+			})
+			.unwrap();
+		assert!(state.add_profile_friend(user.id).is_none());
+		assert!(state.remove_friend(user.id).is_none());
+		state.gateway_connected = false;
+		assert!(state.add_profile_friend(Id(3)).is_none());
 	}
 	fn state() -> State {
 		let user = |id| model::User {

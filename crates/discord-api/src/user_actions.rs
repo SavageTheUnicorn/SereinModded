@@ -47,7 +47,7 @@ impl DiscordApi {
 			| Action::Note { user: id, .. }
 			| Action::Nickname { user: id, .. } => id,
 			Action::AddFriend { .. } => unreachable!(),
-			Action::ResolveFriend { user, .. } => user,
+			Action::ResolveFriend { user, .. } | Action::ProfileFriend { user, .. } => user,
 			Action::CloseDm(id)
 			| Action::Block { user: id, .. }
 			| Action::Mute { channel: id, .. } => id,
@@ -83,6 +83,14 @@ impl DiscordApi {
 					if *accept { Method::PUT } else { Method::DELETE },
 					&format!("/users/@me/relationships/{user}"),
 					accept.then(|| json!({})),
+				)
+				.await
+				.map(|_| ()),
+			Action::ProfileFriend { user, friend } => self
+				.request(
+					if *friend { Method::PUT } else { Method::DELETE },
+					&format!("/users/@me/relationships/{user}"),
+					friend.then(|| json!({"type": 1})),
 				)
 				.await
 				.map(|_| ()),
@@ -266,6 +274,28 @@ mod tests {
 				Action::ResolveFriend {
 					user: Id(2),
 					accept: false,
+				},
+				"DELETE /users/@me/relationships/2",
+				None,
+				204,
+				"",
+				Ok(()),
+			),
+			(
+				Action::ProfileFriend {
+					user: Id(2),
+					friend: true,
+				},
+				"PUT /users/@me/relationships/2",
+				Some(json!({"type":1})),
+				204,
+				"",
+				Ok(()),
+			),
+			(
+				Action::ProfileFriend {
+					user: Id(2),
+					friend: false,
 				},
 				"DELETE /users/@me/relationships/2",
 				None,

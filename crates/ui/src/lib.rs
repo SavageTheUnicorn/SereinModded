@@ -171,6 +171,7 @@ pub struct MessagingUi {
 	reading_zoom_draft: Option<u16>,
 	/// Where the open profile was requested from; the popout is placed beside it.
 	profile_anchor: Option<(Id, egui::Pos2)>,
+	friend_removal: Option<(u64, model::User)>,
 	members_narrow_open: bool,
 	member_reload_requested: bool,
 	guild: Option<Id>,
@@ -2430,6 +2431,7 @@ impl MessagingUi {
 			ui.disable();
 		}
 		// Foreground confirmation handles Escape before background search/archive shortcuts.
+		self.confirm_friend_removal(&ctx, state, &mut commands);
 		markdown::confirm_external_link(
 			&ctx,
 			&mut self.timeline.opening,
@@ -2963,6 +2965,19 @@ impl MessagingUi {
 				self.reading_preferences.confirm_external_links,
 				anchor,
 			) {
+				Some(profiles::Action::AddFriend(id)) => {
+					if let Some(command) = state.add_profile_friend(id) {
+						commands.push(command);
+					}
+				}
+				Some(profiles::Action::AcceptFriend(id)) => {
+					if let Some(command) = state.resolve_friend_request(id, true) {
+						commands.push(command);
+					}
+				}
+				Some(profiles::Action::RemoveFriend) => {
+					self.friend_removal = Some((state.generation, user.clone()));
+				}
 				Some(profiles::Action::Edit) => {
 					self.profile = None;
 					self.profile_link = None;

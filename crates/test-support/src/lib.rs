@@ -459,6 +459,10 @@ pub fn demo_state() -> State {
 	});
 	state.apply(Envelope {
 		generation: state.generation,
+		event: Event::UserAction(client_core::user_actions::Event::Requests(Some(vec![]))),
+	});
+	state.apply(Envelope {
+		generation: state.generation,
 		event: Event::UserAction(client_core::user_actions::Event::Friends(Some(
 			[
 				"Robin", "Casey", "Morgan", "Alex", "Sam", "Taylor", "Jamie", "Jordan", "Avery",
