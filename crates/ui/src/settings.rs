@@ -309,22 +309,6 @@ impl MessagingUi {
 			.auto_shrink([false, false])
 			.show(ui, |ui| {
 				ui.spacing_mut().item_spacing.y = 2.0;
-				if self.settings.page == Page::Notifications
-					&& let Some(user) = &state.user
-				{
-					ui.horizontal(|ui| {
-						self.avatars.show(ui, user, 48.0, state.demo);
-						ui.vertical(|ui| {
-							ui.add(
-								egui::Label::new(design::semibold(ui, &user.name, 16.0)).truncate(),
-							);
-							if ui.link("Edit Profiles").clicked() {
-								self.settings.page = Page::Profile;
-							}
-						});
-					});
-					ui.add_space(16.0);
-				}
 				self.settings_search(ui);
 				ui.add_space(12.0);
 				let query = self.settings.query.to_lowercase();
