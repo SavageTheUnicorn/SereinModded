@@ -21,8 +21,8 @@
 ---
 
 > [!WARNING]
-> **Experimental, unofficial, and not endorsed by Discord.**
-> Serein communicates directly with Discord's public gateway and REST endpoints for your existing account. It is **not** a completed Discord replacement, and the normal-user live message exchange gate has not passed. Automating normal accounts outside the official OAuth2/bot API violates Discord's Terms of Service and carries risk of account termination. Technical interoperability does not imply platform approval. Review the [compatibility matrix](docs/discord-compatibility.md) and [authentication guide](docs/authentication.md) before use.
+> **Unofficial and not endorsed by Discord.**
+> Serein communicates directly with Discord's public gateway and REST endpoints for your existing account. Automating normal accounts outside the official OAuth2/bot API violates Discord's Terms of Service and carries risk of account termination. Technical interoperability does not imply platform approval. Review the [compatibility matrix](docs/discord-compatibility.md) and [authentication guide](docs/authentication.md) before use.
 
 ---
 
@@ -52,29 +52,51 @@ Pre-compiled release packages are published on the GitHub [Releases](https://git
 
 ## Highlights
 
-- **Pure Native Performance:** Built with pure Rust and `egui`/`wgpu`. Immediate-mode rendering with minimal idle CPU, low memory footprint, and instantaneous launch times—zero Electron, Node.js, or web messaging runtime.
-- **Direct Gateway & REST Transports:** Connects directly to Discord's official endpoints with active rate-limiting cooldowns, heartbeat handling, reconnect/resume loops, and partial payload patching.
+- **Pure Native Performance:** Built with pure Rust, `egui`, and `wgpu`. Immediate-mode rendering with minimal idle CPU, low memory footprint, and instantaneous launch times—zero Electron, Node.js, or web runtime overhead.
+- **Direct Gateway & REST Transports:** Direct connection to Discord's official endpoints with active rate-limiting cooldowns, heartbeat handling, reconnect/resume loops, and partial payload patching.
 - **Secure OS Credential Storage:** Session tokens are stored exclusively in your operating system's secure vault (macOS Keychain, Windows Credential Manager, or Linux Secret Service). Never saved in plaintext.
 - **Ephemeral Authentication Webview:** Sign-in uses Discord's official hosted login page inside a temporary native webview (WKWebView, WebView2, or WebKitGTK) supporting email/password, QR login, and MFA. An origin-checked handoff secures the session credential and immediately terminates the webview.
 - **Bounded Local Persistence:** Recent chat history, drafts, image previews, settings, and diagnostics are stored in an account-isolated, bounded local SQLite database. All local data is strictly cleared upon explicit logout.
-- **Native Voice & Echo Cancellation:** Built-in voice engine supporting Opus audio, Discord Voice WebSocket/UDP, DAVE v1 end-to-end encryption, 1-to-1 DM calls, server voice channels, push-to-talk, Sonora AEC3 acoustic echo cancellation, and RNNoise deep-learning noise suppression.
-- **Native Screen Sharing:** Send window or display streams on macOS 14+ (ScreenCaptureKit) and Windows (Windows Graphics Capture) with source selection and quality presets up to 1080p60.
-- **Rich Media & Video Playback:** Inline video playback for MOV and MP4 attachments; inline voice message player with interactive waveforms; multi-attachment uploads with thumbnail previews and progress tracking; related embed image galleries; and full-resolution image viewer modals.
-- **Local Game IPC & Rich Presence:** Built-in Discord IPC server detecting local games, showing live game activities in member rosters, DM lists, and user profiles, with opt-in system tray integration.
-- **Native Profile Customization:** In-app profile editor for global display names, bios / about me, pronouns, and custom accent colors via secure normal-user routes.
-- **Discord-Fidelity UI & Context Actions:** Phosphor icon atlas, styled system event rows (welcome, boosts, pins, channel edits) with clickable member names, server dropdown with friend invites, group chat management, right-click message context menus, quick edit (`Up`), and quick delete (`Backspace`).
+- **Voice Calls, Video & Screen Sharing:** Complete native voice engine with 1-to-1 DM calls, server voice channels, push-to-talk, Sonora AEC3 acoustic echo cancellation, RNNoise noise suppression, Opus codec, and DAVE v1 end-to-end encryption. Includes native screen capture (macOS ScreenCaptureKit, Windows Graphics Capture) and incoming stream & camera video playback with hardware-accelerated decoding (VideoToolbox, VA-API, DirectX).
+- **Forum Channels & Active Threads:** Browse forum channels, view posts sorted by recent activity, read message threads with unread indicators, and create new forum posts directly in-app.
+- **Server Administration Suite:** Full server management interface including Server Profiles (banners, icons, traits, descriptions), role editor with fine-grained permission matrix, paginated audit logs with action filters, invite manager with revocation, integrations and webhooks, and member moderation.
+- **GIF & Emoji Picker:** Instant KLIPY GIF search with favorites and one-click sending, full Twemoji picker with search and quick-reactions, plus custom guild emojis.
+- **Multi-Attachment Batch Uploads:** Composer staging tray supporting multiple files of any type (PDF, ZIP, 3D STL, videos, audio, images) with file-type badges, thumbnails, size indicators, individual removal, and progress tracking.
+- **Native Profile Customization:** In-app profile editor for global display names, bios / about me, pronouns, and custom accent colors with real-time live preview cards.
+- **Extensions & Theme Shop:** Git-backed plugin engine and community theme shop with preview cards, color preset toggles, permission verification, and a built-in deleted-message retention protector.
+- **Rich Media & Video Player:** Inline video playback for MOV and MP4 attachments, interactive seekable voice message waveforms, right-click media save/copy context menus, and full-resolution image viewer modals.
+- **Keybinds & Shortcuts:** Built-in keybind reference sheet styled with raised keycaps, quick edit (`Up`), quick delete (`Backspace`), and intuitive keyboard navigation.
+- **Local Game IPC & Rich Presence:** Built-in Discord IPC socket server detecting local games, showing live game activities in member rosters, DM lists, and user profiles, with opt-in system tray integration.
 
 ---
 
 ## Feature Showcase
 
-| Chat Timeline & Styled System Events | Voice Call Stage & Pill Controls |
+| Voice Calls & Live Screen Sharing | User Settings & Profile Customizer |
 | :---: | :---: |
-| <img src="docs/pr-evidence/system-message-design/after.png" alt="Chat Timeline & System Events" width="450" /> | <img src="docs/pr-evidence/voice-call-ui/after-call.png" alt="Voice Call UI" width="450" /> |
-| **Multi-Attachment Batch Uploading** | **Native Profile Customization** |
-| <img src="docs/pr-evidence/multi-attachment-sending/after.png" alt="Multi-Attachment Sending" width="450" /> | <img src="docs/pr-evidence/profile-edit/after.png" alt="Profile Editing" width="450" /> |
-| **Native Screen Sharing Picker** | **Rich Presence & Game Activities** |
-| <img src="docs/pr-evidence/screen-sharing/after.png" alt="Screen Sharing" width="450" /> | <img src="docs/pr-evidence/presence-and-tray/after.png" alt="Rich Presence and Tray" width="450" /> |
+| <img src="docs/screenshots/voice-calls-screenshare.png" alt="Voice Calls & Screen Sharing" width="450" /> | <img src="docs/screenshots/user-settings.png" alt="User Settings & Profile Customizer" width="450" /> |
+| **Server Administration & Profiles** | **Threads & Forum Channels** |
+| <img src="docs/screenshots/server-settings.png" alt="Server Administration & Profiles" width="450" /> | <img src="docs/screenshots/threads-forums.png" alt="Threads & Forum Channels" width="450" /> |
+| **Multi-File Attachment Uploads** | **GIFs & Twemoji Picker** |
+| <img src="docs/screenshots/file-uploads.png" alt="Multi-File Attachment Uploads" width="450" /> | <img src="docs/screenshots/gifs-and-emojis.png" alt="GIFs & Twemoji Picker" width="450" /> |
+
+---
+
+## Measured Performance vs. Official Discord
+
+> **Testing Scenario:** Browsing channels while joined in a Voice Channel (VC) and streaming screen at 60 FPS on macOS.
+
+| Metric | Official Discord Client (Electron) | Serein (Native Rust + egui/wgpu) | Advantage |
+|---|:---:|:---:|:---:|
+| **Memory (RAM)** | **1,178.4 MB** *(across 7 helper processes)* | **129.7 MB** *(single unified process)* | **~9× less memory (-89%)** |
+| **CPU Usage** | **22.8%** *(Renderer + Helper processes)* | **8.1%** | **~2.8× lower CPU (-64%)** |
+
+| Official Discord (Electron) | Serein (Native Rust) |
+| :---: | :---: |
+| **RAM: ~1,178.4 MB across 7 processes** | **RAM: 129.7 MB single process** |
+| <img src="docs/screenshots/perf-discord-ram.png" alt="Discord RAM Usage" width="450" /> | <img src="docs/screenshots/perf-serein-ram.png" alt="Serein RAM Usage" width="450" /> |
+| **CPU: 22.8% total** | **CPU: 8.1% total** |
+| <img src="docs/screenshots/perf-discord-cpu.png" alt="Discord CPU Usage" width="450" /> | <img src="docs/screenshots/perf-serein-cpu.png" alt="Serein CPU Usage" width="450" /> |
 
 ---
 
@@ -118,27 +140,29 @@ cargo xtask package
 
 | Capability | Status | Notes |
 |---|---|---|
-| **Navigation & Guilds** | Implemented | Collapsible server categories, cached icons, guild channels, DM lists, People pane, and server dropdown menu |
-| **Message Timeline** | Implemented | Virtualized variable-height rows, inline link confirmations, spoiler text/media reveal, deleted message hiding, and local timezone timestamps |
-| **Markdown & System Messages** | Implemented | Bold, italics, code blocks, blockquotes, clickable links, and styled system events with tinted Phosphor icons and clickable names |
-| **Reactions & Emojis** | Implemented | Twemoji rendering, native reaction counts, eight-emoji quick picker, full emoji picker integration, and add/remove reaction controls |
+| **Navigation & Guilds** | Implemented | Collapsible categories, cached icons, guild channels, forum channels, active threads, DM lists, People pane, and server channel context menus |
+| **Message Timeline** | Implemented | Virtualized variable-height rows, inline link confirmations, spoiler text/media reveal, unread message banners, deleted message protector, and local timezone timestamps |
+| **Markdown & System Messages** | Implemented | Bold, italics, code blocks, blockquotes, clickable links, and styled system events with tinted Phosphor icons and clickable member names |
+| **Reactions & Emojis** | Implemented | Twemoji rendering, native reaction counts, eight-emoji quick picker, full emoji picker integration, custom guild emojis, and add/remove reaction controls |
+| **GIFs & Media Search** | Implemented | KLIPY GIF picker with search, favorites category, and one-click direct sending |
 | **User Mentions & Autocomplete** | Implemented | Clickable user mentions with interactive composer autocompletion and visual highlight styling |
-| **Media Previews & Video Player** | Implemented | Inline MOV and MP4 video playback, inline image cards, embed cards, related embed image galleries, full-resolution image viewer with aspect ratios, and explicit file downloads |
-| **File & Attachment Uploads** | Implemented | Multi-attachment batch sending with composer thumbnail previews, upload progress bar, cancel action, and drag-and-drop / file picker |
-| **Voice Engine & Calls** | Built in | 1-to-1 DM calls & server channels, Opus codec, DAVE v1, Sonora AEC3 echo cancellation, RNNoise suppression, push-to-talk (`V`), device selector |
+| **Media Previews & Video Player** | Implemented | Inline MOV and MP4 video playback, media copy/save context menus, inline image cards, embed cards, related embed image galleries, and full-resolution image viewer modals |
+| **File & Attachment Uploads** | Implemented | Multi-attachment batch staging with file-type badges (PDF, ZIP, STL, images), thumbnail previews, individual file removal, upload progress bar, and drag-and-drop |
+| **Voice Engine & Calls** | Implemented | 1-to-1 DM calls & server channels, Opus codec, DAVE v1 E2EE, Sonora AEC3 acoustic echo cancellation, RNNoise suppression, push-to-talk (`V`), audio device selector |
 | **Voice Messages** | Implemented | Inline voice message playback with interactive waveforms and bounded streaming audio buffering |
-| **Screen Sharing** | Implemented (sender) | macOS 14+ ScreenCaptureKit and Windows Graphics Capture; source & quality selector (720p/1080p, 15/30/60 fps) |
-| **Rich Presence & Game IPC** | Implemented | Discord IPC socket server detecting active games; displays activities in member lists, DMs, and profiles; opt-in system tray |
-| **Profile Cards & Editing** | Implemented | On-demand profile popouts with banners, bios, badges, connections; native in-app editor for display name, bio, pronouns, and accent color |
+| **Screen Sharing & Video** | Implemented | Native screen capture (macOS ScreenCaptureKit, Windows Graphics Capture), quality presets (720p/1080p, up to 60fps), and local camera/screen previews |
+| **Camera Video & Stream Viewing** | Implemented | Hardware-accelerated decoding (macOS VideoToolbox, Linux VA-API, Windows DXVA/D3D11) for incoming screen streams and camera video feeds |
+| **Threads & Forum Channels** | Implemented | Forum post listing, recent activity sorting, active thread browsing, and new forum post / thread creation |
+| **Server Administration** | Implemented | Server profile editor (banners, icons, traits), role management with permissions matrix, audit log viewer, invite tracking and revocation, integrations/webhooks, and member moderation |
+| **Extensions & Theme Shop** | Implemented | Git-backed plugins, community theme catalog with preview cards and color presets, permission prompt modals, and deleted-message protector |
+| **Keybinds & Shortcuts** | Implemented | In-app keybind cheat sheet with raised keycaps, quick edit (`Up`), quick delete (`Backspace`), and keyboard navigation hotkeys |
+| **Rich Presence & Game IPC** | Implemented | Discord IPC socket server detecting active games; displays activities in member rosters, DMs, and user profiles; opt-in system tray |
+| **Profile Cards & Editing** | Implemented | On-demand profile popouts with banners, bios, badges, connections; native in-app editor for display name, bio, pronouns, and custom accent color with live preview |
 | **Server & Group Actions** | Implemented | Server dropdown with friend invites and leave server; group DM actions (edit name/icon preview, mute, leave) |
-| **Context Menus & Shortcuts** | Implemented | Message right-click context menu (reply, edit, delete, pin, copy link, react); quick edit (`Up`) and quick delete (`Backspace`) |
-| **Typing Indicators** | Partial | Displays incoming typing with short expiry; Serein **never** emits outgoing typing signals |
+| **Context Menus & Shortcuts** | Implemented | Right-click context menus for messages, media (save/copy), server channels, and members |
+| **Typing Indicators** | Implemented | Displays incoming typing with short expiry; Serein strictly avoids emitting outgoing typing signals |
 | **Persistence & Drafts** | Implemented | Bounded SQLite cache for history, drafts, settings, and diagnostics; OS credential store for auth tokens; sanitary logout |
 | **Internationalization** | Partial | Bundled Inter font, CJK and Arabic font fallbacks included; full IME and bidirectional editing unverified |
-| **Camera Video / Stream Viewing** | Unimplemented | Planned for future milestones |
-
-> [!NOTE]
-> **Voice Scope Notice:** Voice includes Sonora AEC3 echo cancellation and RNNoise noise suppression. However, live two-way voice audio with an official Discord client remains an owner-operated validation gate, as default automated tests run against synthetic protocols and codecs.
 
 ---
 
@@ -158,7 +182,7 @@ rustcord/
 │   ├── discord-protocol/ # Wire protocol serialization and partial payload patches
 │   ├── discord-api/      # HTTP/2 REST client with rate limiting and backoff
 │   ├── discord-gateway/  # WebSocket gateway client with heartbeat and resume
-│   ├── discord-voice/    # Opus codecs, RTP/UDP transport, DAVE v1, Sonora AEC, RNNoise
+│   ├── discord-voice/    # Opus codecs, RTP/UDP transport, DAVE v1, Sonora AEC, RNNoise, video decoding
 │   ├── local-store/      # Bounded SQLite database for history, drafts, settings
 │   ├── platform/         # OS credential store (Keychain/CredManager/SecretService)
 │   └── test-support/     # Deterministic synthetic fixtures and mocks
@@ -193,6 +217,8 @@ For full details, review the [Storage Policy](docs/storage-policy.md) and [Threa
 - [Notifications & Sound Settings](docs/notifications.md)
 - [Performance & Benchmarks](docs/performance.md)
 - [Design Tokens & UI Styling](docs/design.md)
+- [Extensions & Plugin Architecture](docs/extensions.md)
+- [Theme API Specification](docs/theme-api.md)
 - [Third-Party Licenses & Notices](THIRD_PARTY_NOTICES.md)
 
 ---

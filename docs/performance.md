@@ -1,5 +1,27 @@
 # Initial performance evidence
 
+
+## Active voice, screen sharing and channel browsing vs. Official Discord — September 13, 2026
+
+Live comparative workload on macOS measuring process footprint while actively browsing channels, connected to a Voice Channel (VC), and transmitting a 60 FPS screen capture stream.
+
+| Workload / Client | Total Memory (RAM) | Total CPU Usage | Process Count |
+| --- | ---: | ---: | ---: |
+| **Official Discord Client** (Electron) | **1,178.4 MB** | **22.8%** | 7 processes (Renderer, Helpers, AutoFill, Main) |
+| **Serein** (Native Rust + `egui`/`wgpu`) | **129.7 MB** | **8.1%** | 1 unified process |
+| **Advantage / Reduction** | **~9× less memory (-89%)** | **~2.8× lower CPU (-64%)** | **Single process architecture** |
+
+Evidence breakdown from Activity Monitor:
+- Discord Helper (Renderer): 631.5 MB RAM, 20.7% CPU
+- Discord Helper: 392.8 MB RAM, 1.2% CPU
+- Discord: 97.6 MB RAM, 0.7% CPU
+- Discord Helper: 24.5 MB RAM, 0.2% CPU
+- AutoFill (Discord): 13.4 MB RAM
+- Discord Helper: 10.8 MB RAM
+- Discord Helper: 7.8 MB RAM
+- **Total Discord:** ~1,178.4 MB RAM, 22.8% CPU
+- **Serein:** 129.7 MB RAM, 8.1% CPU
+
 ## Windows camera selection and DirectShow fallback — September 13, 2026
 
 Baseline `67d82443f1653975f8a0f9132c31c8139f4be052` has identical runtime sources
