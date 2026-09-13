@@ -160,7 +160,9 @@ pub(super) fn create_stage() -> Result<Staged, String> {
 		}
 	}
 	let directory = parent.join(format!(".serein-update-{}", std::process::id()));
-	let mut builder = fs::DirBuilder::new();
+	let builder = fs::DirBuilder::new();
+	#[cfg(unix)]
+	let mut builder = builder;
 	#[cfg(unix)]
 	{
 		use std::os::unix::fs::DirBuilderExt;
