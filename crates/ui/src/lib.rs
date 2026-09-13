@@ -114,7 +114,7 @@ pub struct MessagingUi {
 	pub channel_preferences_status: &'static str,
 	join_server: join_server::JoinDialog,
 	folder_ui: guild_folders::FolderUi,
-	member_cache_key: Option<(u64, u64, Option<Id>, bool)>,
+	member_cache_key: Option<(u64, u64, Option<Id>, bool, u64)>,
 	member_cache: Vec<MemberRow>,
 	member_count: usize,
 	composer_layout: composer_text::Layout,
@@ -709,6 +709,7 @@ impl MessagingUi {
 			state.revision,
 			state.selected,
 			state.gateway_connected,
+			list.request,
 		);
 		if self.member_cache_key != Some(cache_key) {
 			let members: Vec<_> = list

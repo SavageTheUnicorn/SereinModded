@@ -1575,7 +1575,9 @@ impl TimelineView {
 				});
 				let measured = response.response.rect.height();
 				if (measured - height).abs() > 1.0 {
-					ui.ctx().request_discard("Pending message height settled");
+					if !dimensions_changed {
+						ui.ctx().request_discard("Pending message height settled");
+					}
 					ui.ctx().request_repaint();
 				}
 				self.pending_heights.insert(pending.nonce.clone(), measured);
@@ -1681,7 +1683,11 @@ impl TimelineView {
 			self.revision = u64::MAX;
 			if self.following {
 				self.jump = true;
-				ui.ctx().request_discard("Timeline message heights settled");
+				// Resizing invalidates heights each frame; settle on the queued repaint
+				// instead of paying for an extra layout pass throughout the drag.
+				if !dimensions_changed {
+					ui.ctx().request_discard("Timeline message heights settled");
+				}
 			}
 			ui.ctx().request_repaint();
 		}
