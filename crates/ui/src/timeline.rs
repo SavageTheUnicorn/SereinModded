@@ -776,6 +776,8 @@ impl TimelineView {
 		let mut selected_reply = state.reply;
 		// ScrollArea consumes wheel input while applying it; retain the viewing gesture.
 		let scroll_delta = ui.input(|input| input.smooth_scroll_delta().y);
+		let allow_hover =
+			!ui.input(|input| input.is_scrolling()) && ui.ctx().dragged_id().is_none();
 		let output = scroll.show_viewport(ui, |ui, viewport| {
 			ui.spacing_mut().item_spacing.y = 0.0;
 			let (first, _, top) = visible_range(
@@ -1315,7 +1317,8 @@ impl TimelineView {
 							*active != *id && ui.rect_contains_pointer(*toolbar)
 						})
 						.is_some();
-					let hovered = (ui.rect_contains_pointer(rect) || toolbar_hover)
+					let hovered = allow_hover
+						&& (ui.rect_contains_pointer(rect) || toolbar_hover)
 						&& !other_toolbar_hover
 						&& !egui::Popup::is_any_open(ui.ctx())
 						&& retained_toolbar.is_none_or(|(active, _)| active == *id);
