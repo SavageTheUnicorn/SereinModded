@@ -558,6 +558,7 @@ impl State {
 			&& self.can_view(channel)
 			&& self.timeline.get(message).is_some_and(|message| {
 				message.channel == channel
+					&& !message.forwarded
 					&& self
 						.user
 						.as_ref()

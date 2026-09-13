@@ -390,6 +390,7 @@ mod tests {
 			reply_to: None,
 			kind: 0,
 			reply_deleted: false,
+			forwarded: false,
 			unsupported: false,
 			extra_content: Default::default(),
 			embeds: vec![],

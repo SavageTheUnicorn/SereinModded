@@ -1,5 +1,17 @@
 # Discord compatibility — checked 2026-09-10
 
+## Received forwards — September 13, 2026
+
+Received forward references display their single attached
+[message snapshot](https://docs.discord.com/developers/resources/message#message-snapshot-object)
+with a Forwarded label, inset rail, and the existing text, embed, image, video and
+audio renderers. The outer message retains its sender, identity and notification
+metadata; no original-channel lookup is required. Snapshot content is immutable
+and cached with its forwarded marker. Missing or unsupported snapshots retain an
+unavailable fallback. This adds received-forward display, not a forwarding action.
+Synthetic checks cover decoding, cache persistence and rendering; live acceptance
+has not been tested by the agent.
+
 ## Channel context menu — September 12, 2026
 
 Guild channel rows support right-click and Shift+F10 actions. Mark As Read uses

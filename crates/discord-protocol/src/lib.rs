@@ -538,6 +538,8 @@ pub struct MessageDto {
 	#[serde(default)]
 	pub message_reference: Option<Reference>,
 	#[serde(default)]
+	pub message_snapshots: Snapshots,
+	#[serde(default)]
 	pub referenced_message: model::Patch<extra_content::Object>,
 	#[serde(default)]
 	pub attachments: AttachmentList,
@@ -561,10 +563,81 @@ pub struct Reference {
 	#[serde(rename = "type", default)]
 	pub kind: u64,
 }
+#[derive(Default)]
+pub struct Snapshots(Option<Snapshot>);
+impl<'de> Deserialize<'de> for Snapshots {
+	fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+		struct Visitor;
+		impl<'de> serde::de::Visitor<'de> for Visitor {
+			type Value = Snapshots;
+			fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+				f.write_str("a bounded message snapshot array")
+			}
+			fn visit_seq<A: serde::de::SeqAccess<'de>>(
+				self,
+				mut seq: A,
+			) -> Result<Snapshots, A::Error> {
+				let first = seq.next_element::<Snapshot>()?;
+				let mut extra = false;
+				for _ in 0..100 {
+					if seq.next_element::<serde::de::IgnoredAny>()?.is_none() {
+						return Ok(Snapshots(if extra { None } else { first }));
+					}
+					extra = true;
+				}
+				Err(serde::de::Error::custom("Too many message snapshots"))
+			}
+		}
+		d.deserialize_seq(Visitor)
+	}
+}
+#[derive(Deserialize)]
+struct Snapshot {
+	message: SnapshotBody,
+}
+#[derive(Deserialize)]
+struct SnapshotBody {
+	#[serde(rename = "type")]
+	kind: u8,
+	#[serde(default)]
+	content: String,
+	#[serde(default)]
+	attachments: AttachmentList,
+	#[serde(default)]
+	embeds: EmbedList,
+	#[serde(default)]
+	flags: u64,
+	#[serde(default)]
+	poll: Option<extra_content::Object>,
+	#[serde(default)]
+	sticker_items: Option<extra_content::Array>,
+	#[serde(default)]
+	stickers: Option<extra_content::Array>,
+	#[serde(default)]
+	components: Option<extra_content::Array>,
+}
 impl MessageDto {
-	pub fn into_model(self) -> Message {
-		// Reply navigation is confined to this conversation. Crossposts, forwards and
-		// incomplete/unknown references retain the ordinary unsupported-content fallback.
+	pub fn into_model(mut self) -> Message {
+		let snapshot = self.message_snapshots.0.take().filter(|snapshot| {
+			self.kind == 0
+				&& self.message_reference.as_ref().is_some_and(|r| r.kind == 1)
+				&& matches!(snapshot.message.kind, 0 | 19 | 20)
+				&& snapshot.message.content.len() <= 64 * 1024
+		});
+		let forwarded = snapshot.is_some();
+		let mut snapshot_flags = None;
+		if let Some(Snapshot { message }) = snapshot {
+			self.content = message.content;
+			self.attachments = message.attachments;
+			self.embeds = message.embeds;
+			self.poll = message.poll;
+			self.sticker_items = message.sticker_items;
+			self.stickers = message.stickers;
+			self.components = message.components;
+			snapshot_flags = Some(message.flags);
+		}
+		// Reply navigation is confined to this conversation. Crossposts and
+		// incomplete/unknown references without a supported snapshot retain the ordinary unsupported-content fallback.
 		let reply_to = self
 			.message_reference
 			.as_ref()
@@ -576,7 +649,8 @@ impl MessageDto {
 			})
 			.and_then(|reference| reference.message_id)
 			.filter(|id| id.0 > 0 && id.0 < self.id.0);
-		let unsupported_reference = self.message_reference.is_some() && reply_to.is_none();
+		let unsupported_reference =
+			self.message_reference.is_some() && reply_to.is_none() && !forwarded;
 		let reply_deleted =
 			reply_to.is_some() && matches!(self.referenced_message, model::Patch::Null);
 		let mut author = self.author.into_model();
@@ -592,7 +666,7 @@ impl MessageDto {
 				sticker_items: self.sticker_items.is_some_and(|a| a.0),
 				stickers: self.stickers.is_some_and(|a| a.0),
 				components: self.components.is_some_and(|a| a.0),
-				components_v2: self.flags & (1 << 15) != 0,
+				components_v2: snapshot_flags.unwrap_or(self.flags) & (1 << 15) != 0,
 			},
 			reactions: Some(self.reactions.0),
 			id: self.id,
@@ -618,10 +692,11 @@ impl MessageDto {
 			kind: self.kind,
 			reply_to,
 			reply_deleted,
+			forwarded,
 			unsupported: !matches!(self.kind, 0 | 19 | 20 | 23) || unsupported_reference,
 			attachments: self.attachments.0,
 			embeds: embeds::bounded(self.embeds.0),
-			embeds_suppressed: self.flags & 4 != 0,
+			embeds_suppressed: snapshot_flags.unwrap_or(self.flags) & 4 != 0,
 		}
 	}
 }
@@ -838,6 +913,39 @@ mod tests {
 		value["mention_roles"] = serde_json::json!([]);
 		value["mention_everyone"] = serde_json::json!("true");
 		assert!(read(&value).is_err());
+	}
+	#[test]
+	fn forwarded_snapshot_uses_bounded_audio_body_and_outer_identity() {
+		let mut wire = serde_json::json!({
+			"id":"100", "channel_id":"2", "author":{"id":"3","username":"Forwarder"},
+			"type":0, "content":"", "message_reference":{"type":1,"channel_id":"99","message_id":"50"},
+			"message_snapshots":[{"message":{"type":0,"content":"Frozen text", "mention_everyone":true,
+				"attachments":[{"id":"60","filename":"Samsung.mp3","size":3850000,"content_type":"audio/mpeg", "url":"https://cdn.discordapp.com/attachments/99/60/Samsung.mp3"}],
+				"embeds":[{"type":"rich","title":"Snapshot embed"}]}}]
+		});
+		let read = |wire: &serde_json::Value| {
+			decode::<MessageDto>(&serde_json::to_vec(wire).unwrap())
+				.unwrap()
+				.into_model()
+		};
+		let message = read(&wire);
+		assert!(message.forwarded && !message.unsupported);
+		assert_eq!(message.content, "Frozen text");
+		assert_eq!(message.author.id, Id(3));
+		assert_eq!(message.channel, Id(2));
+		assert_eq!(message.id, Id(100));
+		assert!(message.reply_to.is_none() && !message.mention_everyone);
+		assert!(message.attachments[0].is_audio());
+		assert_eq!(message.embeds[0].title.as_deref(), Some("Snapshot embed"));
+		let snapshot = wire["message_snapshots"][0].clone();
+		for snapshots in [
+			serde_json::json!([]),
+			serde_json::json!([snapshot.clone(), snapshot]),
+		] {
+			wire["message_snapshots"] = snapshots;
+			let message = read(&wire);
+			assert!(!message.forwarded && message.unsupported && message.attachments.is_empty());
+		}
 	}
 	#[test]
 	fn reply_references_require_same_channel_and_distinguish_deleted_from_unknown() {

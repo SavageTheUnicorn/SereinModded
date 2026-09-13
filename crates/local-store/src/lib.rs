@@ -123,7 +123,7 @@ impl LocalStore {
 	fn initialize(mut connection: Connection) -> Result<Self> {
 		connection.busy_timeout(std::time::Duration::from_secs(2))?;
 		let version: u32 = connection.pragma_query_value(None, "user_version", |r| r.get(0))?;
-		if version > 15 {
+		if version > 16 {
 			return Err(StoreError::Incompatible);
 		}
 		connection.execute_batch("PRAGMA page_size=4096; PRAGMA max_page_count=16384; PRAGMA cache_size=-2048; PRAGMA temp_store=MEMORY; PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA wal_autocheckpoint=256; PRAGMA journal_size_limit=8388608; PRAGMA secure_delete=ON; PRAGMA auto_vacuum=INCREMENTAL;
@@ -192,12 +192,20 @@ impl LocalStore {
 			[],
 			|row| row.get(0),
 		)?;
+		let has_forwarded: bool = connection.query_row(
+			"SELECT EXISTS(SELECT 1 FROM pragma_table_info('messages') WHERE name='forwarded')",
+			[],
+			|row| row.get(0),
+		)?;
 		let has_webhook: bool = connection.query_row(
 			"SELECT EXISTS(SELECT 1 FROM pragma_table_info('messages') WHERE name='webhook')",
 			[],
 			|row| row.get(0),
 		)?;
 		let transaction = connection.transaction()?;
+		if !has_forwarded {
+			transaction.execute_batch("ALTER TABLE messages ADD COLUMN forwarded INTEGER NOT NULL DEFAULT 0 CHECK(typeof(forwarded)='integer' AND forwarded IN (0,1));")?;
+		}
 		if !has_account_kind {
 			transaction.execute_batch("ALTER TABLE messages ADD COLUMN account_kind INTEGER NOT NULL DEFAULT 0 CHECK(typeof(account_kind)='integer' AND account_kind BETWEEN 0 AND 2);")?;
 		}
@@ -233,7 +241,7 @@ impl LocalStore {
             CREATE TABLE IF NOT EXISTS channel_preferences(
                 account TEXT PRIMARY KEY NOT NULL,
                 value TEXT NOT NULL CHECK(typeof(value)='text' AND length(CAST(value AS BLOB))<=8192)
-            ); PRAGMA user_version=15;")?;
+            ); PRAGMA user_version=16;")?;
 		let has_animate_gifs: bool = transaction.query_row(
 			"SELECT EXISTS(SELECT 1 FROM pragma_table_info('reading_preferences') WHERE name='animate_gifs')",
 			[],
@@ -543,7 +551,7 @@ impl LocalStore {
 				return Err(StoreError::Capacity);
 			}
 			transaction.prepare_cached(
-                "INSERT OR REPLACE INTO messages(account,channel,id,author,name,content,edited,reply,unsupported,avatar,discriminator,embeds,embeds_suppressed,attachments,mentions,extra_content,message_kind,reply_deleted,webhook,account_kind) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)")?.execute(
+                "INSERT OR REPLACE INTO messages(account,channel,id,author,name,content,edited,reply,unsupported,avatar,discriminator,embeds,embeds_suppressed,attachments,mentions,extra_content,message_kind,reply_deleted,webhook,account_kind,forwarded) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21)")?.execute(
                 params![
                     account,
                     channel,
@@ -564,7 +572,8 @@ impl LocalStore {
                     message.kind,
                     message.reply_deleted,
                     message.author.webhook,
-                    message.author.kind as u8
+                    message.author.kind as u8,
+                    message.forwarded
                 ],
             )?;
 		}
@@ -594,7 +603,7 @@ impl LocalStore {
 		Ok(())
 	}
 	pub fn load_channel(&self, account: Id, channel: Id) -> Result<Vec<Message>> {
-		let mut query = self.0.prepare("SELECT id,author,name,content,edited,reply,unsupported,avatar,discriminator,embeds,embeds_suppressed,attachments,mentions,extra_content,message_kind,reply_deleted,webhook,account_kind FROM messages WHERE account=?1 AND channel=?2 ORDER BY length(id),id LIMIT 500")?;
+		let mut query = self.0.prepare("SELECT id,author,name,content,edited,reply,unsupported,avatar,discriminator,embeds,embeds_suppressed,attachments,mentions,extra_content,message_kind,reply_deleted,webhook,account_kind,forwarded FROM messages WHERE account=?1 AND channel=?2 ORDER BY length(id),id LIMIT 500")?;
 		let mut rows = query.query(params![account.to_string(), channel.to_string()])?;
 		let mut messages = Vec::new();
 		let mut bytes = 0;
@@ -700,6 +709,7 @@ impl LocalStore {
 				extra_content,
 				kind: row.get(14)?,
 				reply_deleted,
+				forwarded: row.get(18)?,
 				nonce: None,
 				revision: 0,
 				embeds,
@@ -886,6 +896,37 @@ impl LocalStore {
 #[cfg(test)]
 mod tests {
 	#[test]
+	fn forwarded_snapshot_survives_cache_reopen_and_upgrade() {
+		let path =
+			std::env::temp_dir().join(format!("serein-forwarded-{}.sqlite", std::process::id()));
+		let _ = std::fs::remove_file(&path);
+		let store = LocalStore::open(&path).unwrap();
+		store.0.execute("INSERT INTO messages(account,channel,id,author,name,content,edited,unsupported) VALUES('1','2','100','4','Synthetic','snapshot text',0,0)", []).unwrap();
+		store
+			.0
+			.execute_batch("ALTER TABLE messages DROP COLUMN forwarded; PRAGMA user_version=15;")
+			.unwrap();
+		drop(store);
+		let mut store = LocalStore::open(&path).unwrap();
+		let mut messages = store.load_channel(Id(1), Id(2)).unwrap();
+		assert!(!messages[0].forwarded);
+		messages[0].forwarded = true;
+		store.save_channel(Id(1), Id(2), &messages).unwrap();
+		drop(store);
+		let store = LocalStore::open(&path).unwrap();
+		let restored = store.load_channel(Id(1), Id(2)).unwrap();
+		assert!(restored[0].forwarded);
+		assert_eq!(restored[0].content, "snapshot text");
+		assert!(
+			store
+				.0
+				.execute("UPDATE messages SET forwarded=2", [])
+				.is_err()
+		);
+		drop(store);
+		std::fs::remove_file(path).unwrap();
+	}
+	#[test]
 	fn webhook_author_survives_cache_and_legacy_migration() {
 		let mut store = LocalStore::initialize(Connection::open_in_memory().unwrap()).unwrap();
 		store.0.execute("INSERT INTO messages(account,channel,id,author,name,content,edited,unsupported) VALUES('1','2','100','3','Synthetic webhook','body',0,0)", []).unwrap();
@@ -1033,7 +1074,7 @@ mod tests {
 			.0
 			.pragma_query_value(None, "user_version", |row| row.get(0))
 			.unwrap();
-		assert_eq!(version, 15);
+		assert_eq!(version, 16);
 		for invalid in ["-1", "2", "1.5", "'bad'"] {
 			assert!(
 				store
@@ -1116,7 +1157,7 @@ mod tests {
 				.0
 				.pragma_query_value(None, "user_version", |row| row.get(0))
 				.unwrap();
-			assert_eq!(version, 15);
+			assert_eq!(version, 16);
 			let mut messages = store.load_channel(Id(1), Id(2)).unwrap();
 			assert_eq!(messages[0].kind, expected_kind);
 			assert_eq!(messages[0].extra_content.bits(), expected_markers);
@@ -1389,7 +1430,7 @@ mod tests {
 			.0
 			.pragma_query_value(None, "user_version", |row| row.get(0))
 			.unwrap();
-		assert_eq!(version, 15);
+		assert_eq!(version, 16);
 		assert_eq!(
 			store.reading_preferences().unwrap(),
 			ReadingPreferences::default()
@@ -1706,7 +1747,7 @@ mod tests {
 			.0
 			.pragma_query_value(None, "user_version", |row| row.get(0))
 			.unwrap();
-		assert_eq!(version, 15);
+		assert_eq!(version, 16);
 		let messages: Vec<_> = (0..32_u8)
 			.map(|bits| {
 				let mut message = legacy[0].clone();
@@ -1898,7 +1939,7 @@ mod tests {
 			.0
 			.pragma_query_value(None, "user_version", |r| r.get(0))
 			.unwrap();
-		assert_eq!(version, 15);
+		assert_eq!(version, 16);
 		for (json, error) in [
 			("broken JSON".to_owned(), StoreError::Incompatible),
 			(
@@ -2001,6 +2042,7 @@ mod tests {
 				extra_content: model::ExtraContent::default(),
 				kind: 0,
 				reply_deleted: false,
+				forwarded: false,
 				embeds: vec![model::Embed {
 					title: Some("Cached synthetic embed".into()),
 					..Default::default()

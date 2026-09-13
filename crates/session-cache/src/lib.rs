@@ -439,6 +439,11 @@ fn apply_patch(message: &mut Message, patch: &MessagePatch) {
 		Patch::Null => message.reactions = Some(vec![]),
 		Patch::Value(r) => message.reactions = Some(r.clone()),
 	}
+	// Gateway updates describe the outer message, never edits to its frozen snapshot.
+	if message.forwarded {
+		message.revision += 1;
+		return;
+	}
 	match &patch.content {
 		Patch::Value(s) => message.content.clone_from(s),
 		Patch::Null => message.content.clear(),
@@ -477,6 +482,36 @@ fn apply_patch(message: &mut Message, patch: &MessagePatch) {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	#[test]
+	fn forwarded_snapshot_survives_outer_body_updates() {
+		let mut original = message(1);
+		original.forwarded = true;
+		original.embeds = vec![model::Embed {
+			title: Some("Frozen embed".into()),
+			..Default::default()
+		}];
+		let mut timeline = Timeline::default();
+		timeline.insert(original.clone(), false, false).unwrap();
+		timeline
+			.patch(MessagePatch {
+				id: Id(1),
+				channel: Id(1),
+				content: Patch::Value(String::new()),
+				mentions: Patch::Absent,
+				reactions: Patch::Value(vec![]),
+				edited: Patch::Absent,
+				embeds: Patch::Null,
+				attachments: Patch::Null,
+				embeds_suppressed: Patch::Null,
+				extra_content: Default::default(),
+			})
+			.unwrap();
+		let updated = timeline.get(Id(1)).unwrap();
+		assert!(updated.forwarded);
+		assert_eq!(updated.content, original.content);
+		assert_eq!(updated.embeds, original.embeds);
+		assert!(updated.revision > original.revision);
+	}
 	#[test]
 	fn deleted_reference_inference_preserves_kind_and_rejects_invalid_legacy_markers() {
 		let mut timeline = Timeline::default();
@@ -897,6 +932,7 @@ mod tests {
 			reply_to: None,
 			kind: 0,
 			reply_deleted: false,
+			forwarded: false,
 			unsupported: false,
 			extra_content: Default::default(),
 			attachments: Vec::new(),

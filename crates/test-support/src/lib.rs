@@ -124,6 +124,7 @@ pub fn message(id: u64, channel: Id) -> Message {
 		reply_to: None,
 		kind: 0,
 		reply_deleted: false,
+		forwarded: false,
 		unsupported: false,
 		extra_content: Default::default(),
 		embeds: demo_embeds(id),
@@ -726,6 +727,17 @@ pub fn chat_demo_state() -> State {
 	state
 }
 /// Local audio card scenario. Playback generates a quiet tone; never fetches this URL.
+pub fn forwarded_demo_state() -> State {
+	let mut state = audio_demo_state();
+	let messages: Vec<_> = state.timeline.iter().cloned().collect();
+	state.timeline.clear();
+	for mut message in messages {
+		message.forwarded = true;
+		message.content.clear();
+		state.timeline.insert(message, false, false).unwrap();
+	}
+	state
+}
 pub fn audio_demo_state() -> State {
 	let mut state = chat_demo_state();
 	state.timeline.clear();

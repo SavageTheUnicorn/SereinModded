@@ -146,6 +146,7 @@ mod tests {
 			nonce: None,
 			reply_to: None,
 			reply_deleted: false,
+			forwarded: false,
 			kind: 0,
 			unsupported: false,
 			extra_content: Default::default(),

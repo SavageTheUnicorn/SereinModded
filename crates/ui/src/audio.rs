@@ -80,7 +80,7 @@ impl AudioUi {
 			.corner_radius(if voice { 12 } else { 8 })
 			.inner_margin(12)
 			.show(ui, |ui| {
-				ui.set_width((width - 24.0).max(1.0));
+				ui.set_width((width - 26.0).max(1.0)); // Padding plus the one-point border.
 				ui.spacing_mut().item_spacing = egui::vec2(10.0, 6.0);
 				ui.spacing_mut().slider_rail_height = 3.0;
 				// Chat buttons use the card fill; give media sliders their own visible track.

@@ -180,6 +180,7 @@ fn layout_key(message: &Message) -> u64 {
 	message.author.webhook.hash(&mut key);
 	message.edited.hash(&mut key);
 	message.reply_to.hash(&mut key);
+	message.forwarded.hash(&mut key);
 	message.reply_deleted.hash(&mut key);
 	message.unsupported.hash(&mut key);
 	message.extra_content.hash(&mut key);
@@ -1109,150 +1110,186 @@ impl TimelineView {
 											&mut self.user_action,
 										);
 									}
-									let formatted = self.formatted.get(*id, &message.content);
-									let reveal = self
-										.revealed
-										.get(id)
-										.filter(|reveal| reveal.matches(message));
-									let before = reveal
-										.map_or((0, false), |reveal| (reveal.text, reveal.media));
-									let mut text = if formatted.spoilers { before.0 } else { 0 };
-									let mut media = before.1;
-									let content_shown =
-										system.as_ref().is_some_and(|s| s.content_shown);
-									if !content_shown
-										&& !(self.hide_media_links
-											&& crate::embeds::standalone_media_links(message))
-									{
-										formatted.show_references(
-											ui,
-											&mut self.opening,
-											&message.mentions,
-											profile,
-											(&state.channels, &mut self.channel_reference),
-											(avatars, state.demo, &mut text),
-										);
-									}
-									if formatted.limited {
-										ui.label(
-											RichText::new(
-												"Display limited · Copy message for the full text",
-											)
-											.small()
-											.color(colors.muted),
-										);
-									}
-									if crate::embeds::has_media_spoilers(message) && !media {
-										if ui.button("Reveal spoiler media").clicked() {
-											media = true;
-										}
-									} else {
-										crate::invites::show(
-											ui,
-											message,
-											state,
-											avatars,
-											&mut self.invite_requests,
-											&mut self.invite_join,
-										);
-										if let Some(gif) = crate::embeds::show(
-											ui,
-											message,
-											&mut self.formatted,
-											avatars,
-											&mut self.opening,
-											&mut self.download,
-											profile,
-											state,
-										) {
-											self.gif_favorite = Some(gif);
-										}
-										crate::attachments::show(
-											ui,
-											message,
-											avatars,
-											&mut self.viewing,
-											&mut self.opening,
-											&mut self.download,
-											&mut self.audio,
-											&mut self.video,
-											state.demo,
-										);
-									}
-									if (text != 0 || media)
-										&& ui.small_button("Hide spoilers").clicked()
-									{
-										text = 0;
-										media = false;
-									}
-									if before != (text, media) {
-										if text == 0 && !media {
-											self.revealed.remove(id);
-										} else {
-											self.revealed
-												.insert(*id, Revealed::new(message, text, media));
-										}
-										self.heights.remove(id);
-										ui.ctx().request_repaint();
-									}
-									if message.edited {
-										ui.label(
-											RichText::new("(edited)").small().color(colors.muted),
-										);
-									}
-									let unknown_system =
-										message.unsupported && message.system_summary().is_none();
-									if unknown_system || message.extra_content.any() {
-										if unknown_system {
-											ui.label(
-												RichText::new(format!(
-													"Unsupported message type {} · Preview unavailable",
-													message.kind
-												))
-												.small()
-												.color(colors.muted),
-											);
-										}
-										for (present, label) in [
-											(
-												message.extra_content.poll,
-												"Poll · Preview unavailable",
-											),
-											(
-												message.extra_content.sticker_items
-													|| message.extra_content.stickers,
-												"Sticker · Preview unavailable",
-											),
-											(
-												message.extra_content.components
-													|| message.extra_content.components_v2,
-												"Components · Preview unavailable",
-											),
-										] {
-											if present {
+									let body = egui::Frame::NONE
+										.inner_margin(egui::Margin {
+											left: if message.forwarded { 16 } else { 0 },
+											..Default::default()
+										})
+										.show(ui, |ui| {
+											if message.forwarded {
 												ui.label(
-													RichText::new(label)
+													RichText::new("\u{21aa} Forwarded")
+														.size(13.0)
+														.italics()
+														.color(colors.muted),
+												);
+												ui.add_space(4.0);
+											}
+											let formatted =
+												self.formatted.get(*id, &message.content);
+											let reveal = self
+												.revealed
+												.get(id)
+												.filter(|reveal| reveal.matches(message));
+											let before = reveal.map_or((0, false), |reveal| {
+												(reveal.text, reveal.media)
+											});
+											let mut text =
+												if formatted.spoilers { before.0 } else { 0 };
+											let mut media = before.1;
+											let content_shown =
+												system.as_ref().is_some_and(|s| s.content_shown);
+											if !content_shown
+												&& !(self.hide_media_links
+													&& crate::embeds::standalone_media_links(
+														message,
+													)) {
+												formatted.show_references(
+													ui,
+													&mut self.opening,
+													&message.mentions,
+													profile,
+													(&state.channels, &mut self.channel_reference),
+													(avatars, state.demo, &mut text),
+												);
+											}
+											if formatted.limited {
+												ui.label(
+													RichText::new(
+														"Display limited · Copy message for the full text",
+													)
+													.small()
+													.color(colors.muted),
+												);
+											}
+											if crate::embeds::has_media_spoilers(message) && !media
+											{
+												if ui.button("Reveal spoiler media").clicked() {
+													media = true;
+												}
+											} else {
+												crate::invites::show(
+													ui,
+													message,
+													state,
+													avatars,
+													&mut self.invite_requests,
+													&mut self.invite_join,
+												);
+												if let Some(gif) = crate::embeds::show(
+													ui,
+													message,
+													&mut self.formatted,
+													avatars,
+													&mut self.opening,
+													&mut self.download,
+													profile,
+													state,
+												) {
+													self.gif_favorite = Some(gif);
+												}
+												crate::attachments::show(
+													ui,
+													message,
+													avatars,
+													&mut self.viewing,
+													&mut self.opening,
+													&mut self.download,
+													&mut self.audio,
+													&mut self.video,
+													state.demo,
+												);
+											}
+											if (text != 0 || media)
+												&& ui.small_button("Hide spoilers").clicked()
+											{
+												text = 0;
+												media = false;
+											}
+											if before != (text, media) {
+												if text == 0 && !media {
+													self.revealed.remove(id);
+												} else {
+													self.revealed.insert(
+														*id,
+														Revealed::new(message, text, media),
+													);
+												}
+												self.heights.remove(id);
+												ui.ctx().request_repaint();
+											}
+											if message.edited {
+												ui.label(
+													RichText::new("(edited)")
 														.small()
 														.color(colors.muted),
 												);
 											}
-										}
-										let target = state
-											.channels
-											.iter()
-											.find(|c| {
-												c.id == message.channel && state.can_view(c.id)
-											})
-											.and_then(|c| discord_url(c, Some(message.id)));
-										if ui
-											.add_enabled(
-												target.is_some(),
-												egui::Button::new("Open in Discord"),
-											)
-											.clicked()
-										{
-											self.opening = target;
-										}
+											let unknown_system = message.unsupported
+												&& message.system_summary().is_none();
+											if unknown_system || message.extra_content.any() {
+												if unknown_system {
+													ui.label(
+														RichText::new(format!(
+															"Unsupported message type {} · Preview unavailable",
+															message.kind
+														))
+														.small()
+														.color(colors.muted),
+													);
+												}
+												for (present, label) in [
+													(
+														message.extra_content.poll,
+														"Poll · Preview unavailable",
+													),
+													(
+														message.extra_content.sticker_items
+															|| message.extra_content.stickers,
+														"Sticker · Preview unavailable",
+													),
+													(
+														message.extra_content.components
+															|| message.extra_content.components_v2,
+														"Components · Preview unavailable",
+													),
+												] {
+													if present {
+														ui.label(
+															RichText::new(label)
+																.small()
+																.color(colors.muted),
+														);
+													}
+												}
+												let target = state
+													.channels
+													.iter()
+													.find(|c| {
+														c.id == message.channel
+															&& state.can_view(c.id)
+													})
+													.and_then(|c| discord_url(c, Some(message.id)));
+												if ui
+													.add_enabled(
+														target.is_some(),
+														egui::Button::new("Open in Discord"),
+													)
+													.clicked()
+												{
+													self.opening = target;
+												}
+											}
+										});
+									if message.forwarded {
+										let rail = egui::Rect::from_min_max(
+											body.response.rect.min,
+											egui::pos2(
+												body.response.rect.left() + 3.0,
+												body.response.rect.bottom(),
+											),
+										);
+										ui.painter().rect_filled(rail, 2.0, colors.selected);
 									}
 									if let Some(action) = crate::reactions::show(
 										ui,
@@ -2201,6 +2238,7 @@ mod tests {
 			reply_to: None,
 			kind: 0,
 			reply_deleted: false,
+			forwarded: false,
 			unsupported: false,
 			extra_content: Default::default(),
 			embeds: vec![],
@@ -2211,6 +2249,98 @@ mod tests {
 			mentions: vec![],
 			reactions: Some(vec![]),
 			embeds_suppressed: false,
+		}
+	}
+	#[test]
+	fn forwarded_audio_keeps_sender_label_and_player_in_narrow_and_wide_rows() {
+		fn text(shape: &egui::Shape, out: &mut Vec<String>) {
+			match shape {
+				egui::Shape::Text(t) => out.push(t.galley.job.text.clone()),
+				egui::Shape::Vec(shapes) => {
+					for shape in shapes {
+						text(shape, out);
+					}
+				}
+				_ => {}
+			}
+		}
+		for width in [320.0, 960.0] {
+			let ctx = egui::Context::default();
+			let mut state = State {
+				selected: Some(Id(20)),
+				demo: true,
+				..Default::default()
+			};
+			let mut message = text_message(1);
+			let key = layout_key(&message);
+			message.forwarded = true;
+			assert_ne!(key, layout_key(&message));
+			message.content = "Forwarded caption".into();
+			message.attachments = vec![model::Attachment {
+				id: Id(3),
+				filename: "Synthetic.mp3".into(),
+				size: 4_000_000,
+				description: None,
+				content_type: Some("audio/mpeg".into()),
+				spoiler: false,
+				duration_ms: Some(168_000),
+				waveform: vec![],
+				media: model::EmbedMedia {
+					url: Some("https://cdn.discordapp.com/attachments/20/3/synthetic.mp3".into()),
+					..Default::default()
+				},
+			}];
+			state.timeline.insert(message, false, false).unwrap();
+			let mut view = TimelineView::default();
+			let mut avatars = crate::avatars::Avatars::default();
+			let mut painted = vec![];
+			for _ in 0..4 {
+				painted.clear();
+				let output = ctx.run_ui(
+					egui::RawInput {
+						screen_rect: Some(egui::Rect::from_min_size(
+							egui::Pos2::ZERO,
+							egui::vec2(width, 700.0),
+						)),
+						..Default::default()
+					},
+					|ui| {
+						view.show(
+							ui,
+							&mut state,
+							&mut None,
+							&mut None,
+							(&mut avatars, &mut None),
+							None,
+						);
+						assert!(
+							ui.min_rect().width() <= width,
+							"row width {} exceeds {width}",
+							ui.min_rect().width()
+						);
+					},
+				);
+				for shape in &output.shapes {
+					text(&shape.shape, &mut painted);
+				}
+				output.drop_without_applying_deltas();
+			}
+			for label in [
+				"Robin",
+				"\u{21aa} Forwarded",
+				"Forwarded caption",
+				"Synthetic.mp3",
+			] {
+				assert!(
+					painted.iter().any(|text| text == label),
+					"missing {label}: {painted:?}"
+				);
+			}
+			assert!(
+				!painted
+					.iter()
+					.any(|text| text.contains("Unsupported message"))
+			);
 		}
 	}
 	#[test]
@@ -4210,6 +4340,7 @@ mod tests {
 			reply_to: None,
 			kind: 0,
 			reply_deleted: false,
+			forwarded: false,
 			unsupported: false,
 			extra_content: Default::default(),
 			embeds: vec![],
@@ -4354,6 +4485,7 @@ mod tests {
 			reply_to: None,
 			kind: 0,
 			reply_deleted: false,
+			forwarded: false,
 			unsupported: false,
 			extra_content: Default::default(),
 			embeds: vec![],
@@ -4441,6 +4573,7 @@ mod tests {
 			reply_to: None,
 			kind: 0,
 			reply_deleted: false,
+			forwarded: false,
 			unsupported: false,
 			extra_content: Default::default(),
 			attachments: vec![],

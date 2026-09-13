@@ -582,7 +582,9 @@ impl Desktop {
 		#[cfg(feature = "demo")]
 		if demo {
 			state = {
-				if std::env::args()
+				if std::env::args().any(|arg| arg == "--demo-forwarded") {
+					test_support::forwarded_demo_state()
+				} else if std::env::args()
 					.any(|arg| arg == "--demo-audio" || arg == "--demo-voice-messages")
 				{
 					test_support::audio_demo_state()

@@ -232,6 +232,8 @@ pub struct Message {
 	pub kind: u8,
 	/// The service explicitly returned a null referenced message, not an unresolved preview.
 	pub reply_deleted: bool,
+	/// Body is the immutable snapshot attached to a forwarded message.
+	pub forwarded: bool,
 	pub unsupported: bool,
 	pub extra_content: ExtraContent,
 	pub embeds: Vec<Embed>,

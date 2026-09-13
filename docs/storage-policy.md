@@ -9,6 +9,12 @@ work and cleanup run outside rendering. Forced termination or filesystem failure
 can leave a temporary file; cleanup errors are visible. Clipboard contents belong
 to the OS and may also be retained by clipboard managers. No cache schema changes.
 
+Forwarded messages (schema 16): one checked, default-false `forwarded` column marks
+the immutable snapshot body. Text, embeds and attachments reuse existing bounded
+message storage; source channels/messages are never fetched. Existing rows retain
+their content and default to ordinary messages until refreshed. Schema-15 binaries
+cannot reopen this upgraded cache.
+
 Channel shortcuts (September 12, schema 15): favorites and pins are device-local,
 account-isolated SQLite preferences. Both lists together contain at most 256 IDs,
 with at most 4 KiB retained vector storage and an 8 KiB serialized record. Loading

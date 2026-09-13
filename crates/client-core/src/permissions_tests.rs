@@ -53,6 +53,7 @@ fn message(id: u64, channel: Id) -> Message {
 		nonce: None,
 		reply_to: None,
 		reply_deleted: false,
+		forwarded: false,
 		unsupported: false,
 		extra_content: Default::default(),
 		embeds: vec![],
