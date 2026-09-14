@@ -709,7 +709,7 @@ impl RolesUi {
 				let sample = match choice {
 					1 => Colors {
 						primary: if draft.colors.primary == 0 {
-							0x5865f2
+							design::DEFAULT_PRIMARY_RGB
 						} else {
 							draft.colors.primary
 						},
@@ -792,7 +792,7 @@ impl RolesUi {
 						},
 						1 => Colors {
 							primary: if draft.colors.primary == 0 {
-								0x5865f2
+								design::DEFAULT_PRIMARY_RGB
 							} else {
 								draft.colors.primary
 							},

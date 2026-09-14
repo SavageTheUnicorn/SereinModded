@@ -839,7 +839,7 @@ pub fn show(
 												if let Some(date) = creation_date(user.id) {
 													icons::inline(
 														ui,
-														Icon::Discord,
+														Icon::Calendar,
 														16.0,
 														theme.muted,
 													);

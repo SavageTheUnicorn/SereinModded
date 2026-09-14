@@ -32,8 +32,8 @@ pub(super) fn badge(ui: &egui::Ui, center: egui::Pos2, count: u32, ring: Color32
 		Color32::WHITE,
 	);
 }
-/// Discord's rail pill on the window edge: short for unread, taller on hover, full when selected.
-pub(super) fn rail_pill(
+/// Rail pill on the window edge: short for unread, taller on hover, full when selected.
+pub(super) fn rail_indicator(
 	ui: &egui::Ui,
 	rect: egui::Rect,
 	selected: bool,
@@ -72,7 +72,7 @@ fn call_badge(ui: &egui::Ui, rect: egui::Rect) {
 	);
 }
 fn indicator(ui: &egui::Ui, rect: egui::Rect, unread: bool, count: u32) {
-	rail_pill(ui, rect, false, false, unread);
+	rail_indicator(ui, rect, false, false, unread);
 	if count > 0 {
 		badge(
 			ui,
@@ -128,20 +128,18 @@ impl MessagingUi {
 				} else {
 					colors.raised
 				};
-				let radius = if home || hovered { 16 } else { 24 };
-				ui.painter().rect_filled(rect, radius, fill);
-				ui.painter().text(
-					rect.center(),
-					Align2::CENTER_CENTER,
-					"S",
-					FontId::new(22.0, crate::design::semibold_family(ui.ctx())),
+				ui.painter().rect_filled(rect, 14, fill);
+				crate::icons::paint(
+					ui.painter(),
+					crate::icons::Icon::Serein,
+					rect.shrink(11.0),
 					if home || hovered {
 						colors.accent_text
 					} else {
 						colors.text
 					},
 				);
-				rail_pill(ui, rect, home, hovered, false);
+				rail_indicator(ui, rect, home, hovered, false);
 				response.widget_info(|| {
 					egui::WidgetInfo::selected(
 						egui::WidgetType::SelectableLabel,

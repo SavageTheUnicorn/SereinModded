@@ -588,14 +588,16 @@ impl Avatars {
 		let (rect, response) =
 			ui.allocate_exact_size(egui::Vec2::splat(size), egui::Sense::click_and_drag());
 		let rounded = selected || response.hovered() || response.has_focus();
-		let radius: u8 = if rounded { 16 } else { 24 };
+		// Server tiles keep one rounded-square silhouette; selection is shown by the rail
+		// underline and ring rather than by morphing a circle into a squircle.
+		let radius: u8 = (size * 0.29) as u8;
 		let mut painted = false;
 		if ui.is_rect_visible(rect)
 			&& let Some(key) = guild.icon_key()
 		{
 			#[cfg(any(test, feature = "demo"))]
 			if demo && !self.textures.contains_key(&key) {
-				let mut image = ColorImage::filled([32, 32], egui::Color32::from_rgb(88, 101, 242));
+				let mut image = ColorImage::filled([32, 32], egui::Color32::from_rgb(20, 161, 168));
 				for row in [8, 14, 20] {
 					for y in row..row + 3 {
 						for x in 7..25 {

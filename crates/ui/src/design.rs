@@ -1,8 +1,8 @@
-//! Discord-style theme tokens, presets and typography shared by every native view.
+//! Serein theme tokens, presets and typography shared by every native view.
 //!
 //! The palette is resolved from egui's light/dark mode plus a process-wide [`Variant`]
-//! (standard, deep black, ash grey, or a gradient recolour). Gradient variants paint a
-//! backdrop under translucent surfaces; see [`paint_backdrop`].
+//! (the cool Serein neutrals, deep black, blue-grey, or a gradient recolour). Gradient
+//! variants paint a backdrop under translucent surfaces; see [`paint_backdrop`].
 use egui::{Color32, FontFamily, FontId, RichText, Stroke};
 use std::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 
@@ -27,59 +27,73 @@ impl LazyHover for egui::Response {
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 #[repr(u8)]
 pub enum Variant {
-	/// Discord's refreshed dark or light surfaces, following the light/dark preference.
+	/// The house palette: cool blue-grey surfaces, following the light/dark preference.
 	#[default]
 	Standard = 0,
 	/// Deep black surfaces for OLED displays.
-	Onyx = 1,
-	/// Classic grey surfaces.
-	Ash = 2,
-	MidnightBlurple = 3,
-	CrimsonMoon = 4,
-	Forest = 5,
-	Sunset = 6,
+	Eclipse = 1,
+	/// Lighter blue-grey surfaces.
+	Slate = 2,
+	Nightfall = 3,
+	Ember = 4,
+	Verdant = 5,
+	Afterglow = 6,
 }
 impl Variant {
 	pub const ALL: [Variant; 7] = [
 		Variant::Standard,
-		Variant::Onyx,
-		Variant::Ash,
-		Variant::MidnightBlurple,
-		Variant::CrimsonMoon,
-		Variant::Forest,
-		Variant::Sunset,
+		Variant::Eclipse,
+		Variant::Slate,
+		Variant::Nightfall,
+		Variant::Ember,
+		Variant::Verdant,
+		Variant::Afterglow,
 	];
 	pub fn label(self) -> &'static str {
 		match self {
-			Variant::Standard => "Default",
-			Variant::Onyx => "Onyx",
-			Variant::Ash => "Ash",
-			Variant::MidnightBlurple => "Midnight Blurple",
-			Variant::CrimsonMoon => "Crimson Moon",
-			Variant::Forest => "Forest",
-			Variant::Sunset => "Sunset",
+			Variant::Standard => "Serein",
+			Variant::Eclipse => "Eclipse",
+			Variant::Slate => "Slate",
+			Variant::Nightfall => "Nightfall",
+			Variant::Ember => "Ember",
+			Variant::Verdant => "Verdant",
+			Variant::Afterglow => "Afterglow",
 		}
 	}
 	/// Stable identifier for persistence.
 	pub fn key(self) -> &'static str {
 		match self {
 			Variant::Standard => "standard",
-			Variant::Onyx => "onyx",
-			Variant::Ash => "ash",
-			Variant::MidnightBlurple => "midnight-blurple",
-			Variant::CrimsonMoon => "crimson-moon",
-			Variant::Forest => "forest",
-			Variant::Sunset => "sunset",
+			Variant::Eclipse => "eclipse",
+			Variant::Slate => "slate",
+			Variant::Nightfall => "nightfall",
+			Variant::Ember => "ember",
+			Variant::Verdant => "verdant",
+			Variant::Afterglow => "afterglow",
+		}
+	}
+	/// Keys written by builds that shipped the previous theme names.
+	fn legacy_key(self) -> &'static str {
+		match self {
+			Variant::Standard => "standard",
+			Variant::Eclipse => "onyx",
+			Variant::Slate => "ash",
+			Variant::Nightfall => "midnight-blurple",
+			Variant::Ember => "crimson-moon",
+			Variant::Verdant => "forest",
+			Variant::Afterglow => "sunset",
 		}
 	}
 	pub fn from_key(key: &str) -> Option<Variant> {
-		Variant::ALL.into_iter().find(|v| v.key() == key)
+		Variant::ALL
+			.into_iter()
+			.find(|v| v.key() == key || v.legacy_key() == key)
 	}
 	/// Gradient variants ignore the light/dark preference and always use dark text.
 	pub fn is_gradient(self) -> bool {
 		matches!(
 			self,
-			Variant::MidnightBlurple | Variant::CrimsonMoon | Variant::Forest | Variant::Sunset
+			Variant::Nightfall | Variant::Ember | Variant::Verdant | Variant::Afterglow
 		)
 	}
 	fn from_u8(value: u8) -> Variant {
@@ -182,13 +196,19 @@ const fn rgba(value: u32, alpha: u8) -> Color32 {
 		alpha,
 	)
 }
-pub const DEFAULT_PRIMARY_COLOR: [u8; 3] = [88, 101, 242];
+/// Serein azure: the house accent, packed for call sites that speak in integer colours.
+pub const DEFAULT_PRIMARY_RGB: u32 = 0x1a72e8;
+pub const DEFAULT_PRIMARY_COLOR: [u8; 3] = [
+	(DEFAULT_PRIMARY_RGB >> 16) as u8,
+	(DEFAULT_PRIMARY_RGB >> 8) as u8,
+	DEFAULT_PRIMARY_RGB as u8,
+];
 const PRIMARY: Color32 = Color32::from_rgb(
 	DEFAULT_PRIMARY_COLOR[0],
 	DEFAULT_PRIMARY_COLOR[1],
 	DEFAULT_PRIMARY_COLOR[2],
 );
-const MENTION_BG: Color32 = rgba(0x5865f2, 76);
+const MENTION_BG: Color32 = rgba(DEFAULT_PRIMARY_RGB, 76);
 fn dark_common(
 	base: Color32,
 	sidebar: Color32,
@@ -206,17 +226,17 @@ fn dark_common(
 		hover,
 		selected,
 		border,
-		text_strong: rgb(0xf2f3f5),
-		text: rgb(0xdbdee1),
-		muted: rgb(0x9a9ba1),
-		link: rgb(0x00a8fc),
+		text_strong: rgb(0xeef1f6),
+		text: rgb(0xc9cfdb),
+		muted: rgb(0x8b93a5),
+		link: rgb(0x54abff),
 		accent: PRIMARY,
 		accent_text: Color32::WHITE,
-		positive: rgb(0x23a55a),
-		warning: rgb(0xf0b232),
-		danger: rgb(0xf23f43),
+		positive: rgb(0x2fb87a),
+		warning: rgb(0xe8a33d),
+		danger: rgb(0xef5561),
 		mention_bg: MENTION_BG,
-		mention_text: rgb(0xc9cdfb),
+		mention_text: rgb(0xbcd9ff),
 		backdrop: None,
 		canvas: chat,
 		surface: sidebar,
@@ -232,46 +252,46 @@ fn gradient(stops: [u32; 2]) -> Palette {
 		Color32::from_white_alpha(34),
 		Color32::from_white_alpha(28),
 	);
-	p.text = rgb(0xe8e9ec);
-	p.muted = rgb(0xb2b4bb);
+	p.text = rgb(0xe6eaf2);
+	p.muted = rgb(0xafb6c4);
 	p.backdrop = Some([rgb(stops[0]), rgb(stops[1])]);
 	p
 }
 pub fn builtin_colors(dark: bool, variant: Variant) -> Palette {
 	let palette = match variant {
 		Variant::Standard if dark => dark_common(
-			rgb(0x121214),
-			rgb(0x1a1a1e),
-			rgb(0x1a1a1e),
-			rgb(0x222327),
-			rgb(0x26272c),
-			rgb(0x2f3036),
-			rgb(0x29292e),
+			rgb(0x0d1016),
+			rgb(0x12161f),
+			rgb(0x161b25),
+			rgb(0x1d2431),
+			rgb(0x222a39),
+			rgb(0x2b3547),
+			rgb(0x212836),
 		),
 		Variant::Standard => Palette {
-			base: rgb(0xe3e5e8),
-			sidebar: rgb(0xf2f3f5),
+			base: rgb(0xdde3ec),
+			sidebar: rgb(0xeef1f7),
 			chat: Color32::WHITE,
-			raised: rgb(0xebedef),
-			hover: rgb(0xe9eaed),
-			selected: rgb(0xd7d9dc),
-			border: rgb(0xdfe1e5),
-			text_strong: rgb(0x060607),
-			text: rgb(0x313338),
-			muted: rgb(0x5c5e66),
-			link: rgb(0x006ce7),
+			raised: rgb(0xe6ebf3),
+			hover: rgb(0xe3e9f2),
+			selected: rgb(0xd1d9e6),
+			border: rgb(0xd9e0ea),
+			text_strong: rgb(0x0b0f16),
+			text: rgb(0x2c3340),
+			muted: rgb(0x5b6473),
+			link: rgb(0x0b63d6),
 			accent: PRIMARY,
 			accent_text: Color32::WHITE,
-			positive: rgb(0x23a55a),
-			warning: rgb(0xf0b232),
-			danger: rgb(0xda373c),
+			positive: rgb(0x1c9c63),
+			warning: rgb(0xc8860f),
+			danger: rgb(0xd23742),
 			mention_bg: MENTION_BG,
-			mention_text: rgb(0x3c45a5),
+			mention_text: rgb(0x14508f),
 			backdrop: None,
 			canvas: Color32::WHITE,
-			surface: rgb(0xf2f3f5),
+			surface: rgb(0xeef1f7),
 		},
-		Variant::Onyx => dark_common(
+		Variant::Eclipse => dark_common(
 			Color32::BLACK,
 			rgb(0x070708),
 			rgb(0x070708),
@@ -280,19 +300,19 @@ pub fn builtin_colors(dark: bool, variant: Variant) -> Palette {
 			rgb(0x222226),
 			rgb(0x1c1c20),
 		),
-		Variant::Ash => dark_common(
-			rgb(0x1e1f22),
-			rgb(0x2b2d31),
-			rgb(0x313338),
-			rgb(0x383a40),
-			rgb(0x35373c),
-			rgb(0x404249),
-			rgb(0x3f4147),
+		Variant::Slate => dark_common(
+			rgb(0x1b1f2a),
+			rgb(0x262b38),
+			rgb(0x2c3140),
+			rgb(0x343a4b),
+			rgb(0x313747),
+			rgb(0x3d4456),
+			rgb(0x3a4152),
 		),
-		Variant::MidnightBlurple => gradient([0x3c3f9e, 0x0f1030]),
-		Variant::CrimsonMoon => gradient([0x8a1d3d, 0x130508]),
-		Variant::Forest => gradient([0x2f5f3d, 0x0b1a11]),
-		Variant::Sunset => gradient([0xd3653e, 0x3b1d63]),
+		Variant::Nightfall => gradient([0x35519f, 0x1b1440]),
+		Variant::Ember => gradient([0x8c2340, 0x140609]),
+		Variant::Verdant => gradient([0x2b6350, 0x081a15]),
+		Variant::Afterglow => gradient([0xd9663c, 0x35205e]),
 	};
 	customize(palette, primary_color())
 }
@@ -594,8 +614,8 @@ pub fn apply(ctx: &egui::Context) {
 		style.visuals.panel_fill = p.chat;
 		style.visuals.interact_cursor = Some(egui::CursorIcon::PointingHand);
 		style.visuals.window_fill = p.raised.to_opaque();
-		style.visuals.window_corner_radius = metrics.window_radius.unwrap_or(8).into();
-		style.visuals.menu_corner_radius = metrics.menu_radius.unwrap_or(8).into();
+		style.visuals.window_corner_radius = metrics.window_radius.unwrap_or(12).into();
+		style.visuals.menu_corner_radius = metrics.menu_radius.unwrap_or(12).into();
 		style.visuals.window_stroke = Stroke::new(1.0, p.border);
 		style.visuals.window_shadow = egui::epaint::Shadow {
 			offset: [0, 8],
@@ -627,7 +647,7 @@ pub fn apply(ctx: &egui::Context) {
 			&mut style.visuals.widgets.active,
 			&mut style.visuals.widgets.open,
 		] {
-			widget.corner_radius = metrics.widget_radius.unwrap_or(4).into();
+			widget.corner_radius = metrics.widget_radius.unwrap_or(8).into();
 			widget.fg_stroke = Stroke::new(1.0, p.text);
 			widget.bg_stroke = Stroke::NONE;
 			widget.expansion = 0.0;
@@ -858,9 +878,9 @@ fn wide_button(
 	}
 	response
 }
-/// Discord's deterministic fallback avatar colours, keyed by the display name.
+/// Deterministic fallback avatar colours drawn from the Serein palette, keyed by the display name.
 fn fallback_avatar_color(name: &str) -> Color32 {
-	const COLORS: [u32; 5] = [0x5865f2, 0x757e8a, 0x3ba55c, 0xfaa61a, 0xed4245];
+	const COLORS: [u32; 5] = [DEFAULT_PRIMARY_RGB, 0x6b7a94, 0x2fb87a, 0xe8a33d, 0xef5561];
 	let hash = name
 		.bytes()
 		.fold(0u32, |h, b| h.wrapping_mul(31).wrapping_add(b as u32));
@@ -1025,7 +1045,7 @@ mod tests {
 				assert_eq!((p.text, p.raised), (base.text, base.raised));
 			}
 			assert_eq!(customize(base, None), base);
-			assert_eq!(base.accent, Color32::from_rgb(88, 101, 242));
+			assert_eq!(base.accent, rgb(DEFAULT_PRIMARY_RGB));
 		}
 	}
 	#[test]
@@ -1111,12 +1131,12 @@ pub fn build_badge(ui: &mut egui::Ui, build: Build) -> Option<egui::Response> {
 		Channel::Nightly => (
 			"NIGHTLY",
 			"Nightly build from the latest main. Unofficial client; live compatibility is unverified.",
-			[rgb(0x5865f2), rgb(0xa06cff)],
+			[rgb(DEFAULT_PRIMARY_RGB), rgb(0x7bd0ff)],
 		),
 		Channel::Dev => (
 			"DEV",
 			"Local development build. Unofficial client; live compatibility is unverified.",
-			[rgb(0xf0b232), rgb(0xe8590c)],
+			[rgb(0xe8a33d), rgb(0xe8590c)],
 		),
 	};
 	let font = FontId::new(10.0, semibold_family(ui.ctx()));

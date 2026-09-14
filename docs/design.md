@@ -1,14 +1,17 @@
 # Serein interface direction
 
-Serein mirrors the real Discord desktop client's layout and density (the 2025 refresh) while
-remaining a native egui application. The palette, typography and spacing live in
-`crates/ui/src/design.rs`; every view resolves colours through `design::palette(ui)`.
+Serein follows the familiar three-column messaging layout and density of a modern desktop chat
+client, but it is not a visual clone: it uses its own cool blue-grey neutrals, the Serein azure
+accent, softer corner radii and its own server-rail selection language. The palette, typography
+and spacing live in `crates/ui/src/design.rs`; every view resolves colours through
+`design::palette(ui)`.
 
 ## Theme tokens and presets
 
-The `Palette` carries Discord-style roles: `base` (title strip and server rail), `sidebar`
+The `Palette` carries surface roles: `base` (title strip and server rail), `sidebar`
 (channel and member lists), `chat`, `raised` (composer, cards, search field, popovers), `hover`,
-`selected`, `border`, `text_strong`/`text`/`muted`, `link`, `accent` (blurple), presence
+`selected`, `border`, `text_strong`/`text`/`muted`, `link`, `accent` (Serein azure `#1a72e8`),
+presence
 colours, mention colours and an optional two-stop `backdrop` gradient. `canvas` and `surface`
 remain as aliases of `chat` and `sidebar` for older call sites.
 
@@ -16,16 +19,31 @@ A process-wide `Variant` recolours the whole application on top of egui's light/
 
 | Preset | Surfaces |
 |---|---|
-| Default | Discord refresh dark (`#121214` / `#1a1a1e` / `#222327`) or light (`#e3e5e8` / `#f2f3f5` / white), following System/Light/Dark |
-| Onyx | Deep black surfaces for OLED displays |
-| Ash | Classic grey Discord surfaces (`#1e1f22` / `#2b2d31` / `#313338`) |
-| Midnight Blurple, Crimson Moon, Forest, Sunset | Gradient backdrop painted under translucent dark surfaces |
+| Serein | House neutrals: dark (`#0d1016` / `#12161f` / `#161b25` / `#1d2431`) or light (`#dde3ec` / `#eef1f7` / white), following System/Light/Dark |
+| Eclipse | Deep black surfaces for OLED displays |
+| Slate | Lighter blue-grey surfaces (`#1b1f2a` / `#262b38` / `#2c3140`) |
+| Nightfall, Ember, Verdant, Afterglow | Gradient backdrop painted under translucent dark surfaces |
 
 Gradient presets paint a full-window mesh in the background layer each frame and use
 translucent panel fills; they always use dark text. Presets are chosen from the account card's
 settings menu (swatch row) and persist in the application-wide SQLite `theme_variant` row next
-to the light/dark appearance; unknown keys fall back to Default. `--demo --demo-theme=<key>` and
+to the light/dark appearance; unknown keys fall back to Serein. The keys written by earlier
+builds (`onyx`, `ash`, `midnight-blurple`, `crimson-moon`, `forest`, `sunset`) still resolve to
+their renamed presets, so a stored preference survives the rename. `--demo --demo-theme=<key>` and
 `--demo-light` open fixtures in a preset for screenshots.
+
+## Brand mark and server rail
+
+The application mark is the Serein chat-wave (`assets/brand/`), not a third-party logo. Its
+silhouette is rasterized into the shared icon atlas as `serein-mark` and painted wherever the
+client identifies itself: the loading screen, the sign-in card and its button, the login header
+and the Direct Messages tile at the top of the server rail.
+
+Server tiles keep one constant rounded-square silhouette instead of morphing between a circle and
+a squircle. Selection and unread state are shown by `notifications::rail_indicator`: a 3px accent
+underline below the tile (wide when selected, narrower on hover), a short neutral tick for unread,
+and a 2px accent ring around the selected tile. Controls use an 8px widget radius and 12px
+window/menu radius, softer than the 4px/8px pair the layout started from.
 
 ## Typography
 
@@ -79,7 +97,7 @@ activities and soundboard are shown disabled: Serein has no such features.
 
 ## Verification notes
 
-Native macOS captures at 1120×760 in Default dark, Onyx, Ash, Midnight Blurple and light were
+Native macOS captures at 1120×760 in Serein dark, Eclipse, Slate, Nightfall and light were
 inspected on September 10, 2026 with the offline fixtures (`--demo`, `--demo-chat`,
 `--demo-notifications`, `--demo-voice`). Keyboard reachability of channel rows, the forum row,
 toolbar actions and members is covered by headless egui tests. Screen-reader/IME behaviour and

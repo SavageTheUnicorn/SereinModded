@@ -2,7 +2,7 @@ use crate::design::LazyHover;
 use crate::{
 	MessagingUi, design,
 	icons::{self, Icon},
-	notifications::{badge, rail_pill},
+	notifications::{badge, rail_indicator},
 };
 use client_core::{Command, State};
 use egui::{Color32, Sense};
@@ -127,7 +127,7 @@ fn edit(settings: &mut Settings, edit: Edit) {
 						let folder = &mut settings.folders[target_index];
 						if folder.id.is_none() {
 							folder.id = Some(next_id);
-							folder.color = Some(0x5865f2);
+							folder.color = Some(design::DEFAULT_PRIMARY_RGB);
 						}
 						folder.guild_ids.push(id);
 					}
@@ -215,7 +215,7 @@ impl MessagingUi {
 						self.folder_ui
 							.expanded
 							.contains(&id)
-							.then_some((id, folder.color.unwrap_or(0x5865f2))),
+							.then_some((id, folder.color.unwrap_or(design::DEFAULT_PRIMARY_RGB))),
 					));
 				}
 				for &id in &folder.guild_ids {
@@ -227,9 +227,12 @@ impl MessagingUi {
 					{
 						rows.push((
 							Item::Server(id),
-							folder
-								.id
-								.map(|folder_id| (folder_id, folder.color.unwrap_or(0x5865f2))),
+							folder.id.map(|folder_id| {
+								(
+									folder_id,
+									folder.color.unwrap_or(design::DEFAULT_PRIMARY_RGB),
+								)
+							}),
 						));
 					}
 				}
@@ -285,7 +288,7 @@ impl MessagingUi {
 								state.demo,
 							);
 							let (unread, count) = badges.get(&id).copied().unwrap_or_default();
-							rail_pill(
+							rail_indicator(
 								ui,
 								response.rect,
 								self.guild == Some(id),
@@ -314,7 +317,7 @@ impl MessagingUi {
 								.iter()
 								.find(|f| f.id == Some(id))
 								.unwrap();
-							let rgb = folder.color.unwrap_or(0x5865f2);
+							let rgb = folder.color.unwrap_or(design::DEFAULT_PRIMARY_RGB);
 							let tint =
 								Color32::from_rgb((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8);
 							let (rect, response) = ui.allocate_exact_size(
@@ -342,7 +345,7 @@ impl MessagingUi {
 								.filter_map(|g| badges.get(g))
 								.fold(0u32, |sum, b| sum.saturating_add(b.1));
 							if !open {
-								rail_pill(
+								rail_indicator(
 									ui,
 									rect,
 									false,
@@ -425,7 +428,7 @@ impl MessagingUi {
 											.iter()
 											.find(|f| f.id == Some(id))
 											.unwrap();
-										let color = f.color.unwrap_or(0x5865f2);
+										let color = f.color.unwrap_or(design::DEFAULT_PRIMARY_RGB);
 										self.folder_ui.editor = Some((
 											id,
 											f.name.clone().unwrap_or_default(),
@@ -560,7 +563,7 @@ impl MessagingUi {
 								.as_ref()
 								.and_then(|s| s.folders.iter().find(|f| f.id == Some(id)))
 							{
-								let rgb = folder.color.unwrap_or(0x5865f2);
+								let rgb = folder.color.unwrap_or(design::DEFAULT_PRIMARY_RGB);
 								let (rect, _) =
 									ui.allocate_exact_size(egui::Vec2::splat(48.0), Sense::hover());
 								ui.painter().rect_filled(rect, 12, colors.raised);

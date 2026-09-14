@@ -6,7 +6,7 @@
 fetched through the jsDelivr npm mirror on September 10, 2026. The unmodified license is
 `LICENSE` and is staged in both packages as `licenses/Phosphor-Icons-MIT.txt`.
 
-Eighty-nine unmodified Phosphor `assets/fill/*.svg` and `assets/bold/*.svg` files are scaled
+Eighty-eight unmodified Phosphor `assets/fill/*.svg` and `assets/bold/*.svg` files are scaled
 to 56×56 pixels, filled white, and rasterized by `resvg` 0.45.1 into one transparent PNG atlas
 with 64×64 cells (8 columns, 13 rows). `headphones-slash` is derived from `headphones-fill.svg`
 by masking a diagonal knockout and adding a 16-unit round-capped stroke, matching the style of
@@ -23,13 +23,10 @@ to match Phosphor's visual weight. Brand marks remain trademarks of their owners
 legal disclaimer applies. The license file is staged in both packages as
 `licenses/Simple-Icons-CC0.txt`.
 
-- `atlas.png`: 512×832 RGBA, 109,619 bytes; decoded 1,703,936 bytes.
-  SHA-256 `47f15e4f2dad3ae01cdf2626f43a2caa8d7f68d7576f5a2be7d2c4f3f8b44d23`.
+- `atlas.png`: 512×832 RGBA, 49,946 bytes; decoded 1,703,936 bytes.
+  SHA-256 `9c40842f3271f05e1028caa0445abe99afb6ed16a966a91a04d0ee5fc0786051`.
 - `index.tsv`: icon name, tab, zero-based cell; SHA-256
-  `bdd9a154e9b04b52d0505369f412ba8c840c36373407355f0e8a6a5446959d2f`.
-- `LICENSE`: SHA-256 `ddbe6082ec3cf979db47e5af549d2849c5d6182b3e005ef91ce1dbb9eb122f11`.
-- `LICENSE-SIMPLE-ICONS`: SHA-256
-  `9046848b63a5c92bff14e4accca80bd987e0623b74adf9226ce5198d312b79d5`.
+  `5010f4dc511884226fadf6c2c48013ecfa7d9c576a6ba6a23250f8f6b8d0b820`.
 
 Every upstream SVG's SHA-256 is pinned in `tools/generate-icons.py`, which refuses to build
 from mismatching files. Regenerate from the repository root:
@@ -48,3 +45,10 @@ The folder and open-folder glyphs are unmodified Phosphor `folder-fill.svg` and
 
 The media-viewer caret and download glyphs are unmodified Phosphor `caret-left-bold.svg` and
 `download-simple-bold.svg`, fetched from the same pinned 2.1.1 package on September 11, 2026.
+
+The `serein-mark` cell is our own artwork, not an upstream icon: it is the solid silhouette of
+the Serein chat-wave from `assets/brand/serein-mark.svg`, trimmed to its bounding box so it
+matches Phosphor's glyph weight in the cell. It replaced the Discord brand mark that previously
+occupied cell 58; no third-party application logo is bundled any more. `tools/generate-icons.py`
+pins its SHA-256 like every upstream source and rasterizes it from the repository rather than a
+package mirror.

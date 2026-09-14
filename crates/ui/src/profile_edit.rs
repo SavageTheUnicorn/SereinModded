@@ -273,7 +273,7 @@ fn form(ui: &mut egui::Ui, draft: &mut Draft) {
 	ui.label(design::eyebrow(ui, "Profile color", colors.muted));
 	let mut enabled = draft.color.is_some();
 	if design::switch(ui, "Custom color", None, &mut enabled).changed() {
-		draft.color = enabled.then_some(0x5865f2);
+		draft.color = enabled.then_some(design::DEFAULT_PRIMARY_RGB);
 	}
 	if let Some(color) = &mut draft.color {
 		ui.horizontal(|ui| {

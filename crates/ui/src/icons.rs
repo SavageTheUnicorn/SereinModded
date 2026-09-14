@@ -1,5 +1,5 @@
-//! Phosphor Icons (MIT) plus Simple Icons brand marks (CC0) rasterized once into one bundled
-//! atlas and tinted at draw time.
+//! Phosphor Icons (MIT), Simple Icons brand marks (CC0) and the Serein mark rasterized once
+//! into one bundled atlas and tinted at draw time.
 //!
 //! `assets/icons/atlas.png` holds white glyphs on transparency in fixed 64px cells;
 //! `index.tsv` maps upstream icon names to cells. See `assets/icons/README.md` for provenance.
@@ -75,7 +75,7 @@ pub enum Icon {
 	Copy,
 	Verified,
 	Calendar,
-	Discord,
+	Serein,
 	File,
 	FileImage,
 	FilePdf,
@@ -178,7 +178,7 @@ impl Icon {
 		Icon::Copy,
 		Icon::Verified,
 		Icon::Calendar,
-		Icon::Discord,
+		Icon::Serein,
 		Icon::File,
 		Icon::FileImage,
 		Icon::FilePdf,
@@ -283,7 +283,7 @@ impl Icon {
 			Icon::Copy => "copy",
 			Icon::Verified => "seal-check",
 			Icon::Calendar => "calendar-blank",
-			Icon::Discord => "discord-logo",
+			Icon::Serein => "serein-mark",
 			Icon::File => "file",
 			Icon::FileImage => "file-image",
 			Icon::FilePdf => "file-pdf",
