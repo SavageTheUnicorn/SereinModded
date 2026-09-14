@@ -1277,4 +1277,3 @@ mod keybind_tests {
 		}
 	}
 }
-
