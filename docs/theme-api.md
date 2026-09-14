@@ -5,6 +5,16 @@ A `.serein-extension` theme package contains a version 1 manifest with
 Wasm module. Import the package from Settings > Themes to try it locally.
 The existing packages in [`extensions`](../extensions) are complete examples.
 
+The bundled Themes page also includes these MIT-licensed presets by **a1.lol**:
+Golden Theme, BlackTheme (the supplied Katana package), Obsidian Theme and Teal Theme.
+Their supplied palettes and control metrics are preserved. Package IDs are normalized
+to lowercase, and source links point to this repository, which contains the packages.
+BlackTheme supplies dark colors only; light mode inherits the built-in palette while
+keeping its shared control metrics. The other three supply both light and dark colors.
+Themes remain opt-in and use the existing preview, install, selection and reset flow.
+The existing limit of eight installed themes is unchanged; remove an installed theme
+before adding another if that limit is reached.
+
 The `light` and `dark` objects each accept `colors` and an optional `backdrop`.
 Color values are `#RRGGBB` or `#RRGGBBAA`. Supported color names are:
 
