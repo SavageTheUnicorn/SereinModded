@@ -5,6 +5,11 @@ A `.serein-extension` theme package contains a version 1 manifest with
 Wasm module. Import the package from Settings > Themes to try it locally.
 The existing packages in [`extensions`](../extensions) are complete examples.
 
+Theme package IDs are normalized to ASCII lowercase when parsed, so an imported
+`Golden-Theme` uses the same identity as `golden-theme`. Other ID restrictions
+(including path separators, non-ASCII characters and reserved device names) still
+apply. Plugin IDs and reviewed catalog manifests remain strictly lowercase.
+
 The bundled Themes page also includes these MIT-licensed presets by **a1.lol**:
 Golden Theme, BlackTheme (the supplied Katana package), Obsidian Theme and Teal Theme.
 Their supplied palettes and control metrics are preserved. Package IDs are normalized
