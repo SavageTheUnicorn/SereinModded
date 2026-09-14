@@ -70,7 +70,7 @@ impl MessagingUi {
 
 		#[cfg(target_os = "linux")]
 		let package_type = if self.updates.flatpak {
-			"\n- **Packaging:** Flatpak"
+			"\n- **Packaging:** Flatpak".to_owned()
 		} else if let Some(cmd) = &self.updates.linux_update_cmd {
 			let mgr = if cmd.contains("dnf") {
 				"DNF (RPM)"
@@ -85,7 +85,7 @@ impl MessagingUi {
 			};
 			format!("\n- **Packaging:** {mgr}")
 		} else {
-			"\n- **Packaging:** Native / AppImage"
+			"\n- **Packaging:** Native / AppImage".to_owned()
 		};
 		#[cfg(not(target_os = "linux"))]
 		let package_type = "";
