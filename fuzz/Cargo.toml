@@ -28,7 +28,7 @@ doc = false
 bench = false
 
 [[bin]]
-name = "state_transitions"
+name = "state-transitions"
 path = "fuzz_targets/state_transitions.rs"
 test = false
 doc = false

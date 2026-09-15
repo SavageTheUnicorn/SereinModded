@@ -131,7 +131,7 @@ fn fuzz() -> Result<(), String> {
 	let corpus = root.join(format!("corpus-{}-{nonce}", std::process::id()));
 	std::fs::create_dir(&corpus).map_err(|e| e.to_string())?;
 	let result = (|| {
-		for (target, max_len) in [("decode", "4194306"), ("state_transitions", "16384")] {
+		for (target, max_len) in [("decode", "4194306"), ("state-transitions", "16384")] {
 			let seeds = corpus.join(target);
 			copy_directory(&PathBuf::from("fuzz/seeds").join(target), &seeds)?;
 			let artifact = root.join(format!("{target}.crash"));

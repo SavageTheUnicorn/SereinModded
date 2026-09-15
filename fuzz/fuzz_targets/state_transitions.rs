@@ -81,6 +81,8 @@ fn message(id: Id, channel: Id, content: String) -> Message {
 		id,
 		channel,
 		author: user(),
+		author_nick: None,
+		author_roles: vec![],
 		content,
 		kind: 0,
 		reactions: Some(vec![]),

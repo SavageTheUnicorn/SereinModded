@@ -52,7 +52,7 @@ presence normalization and channel/full-patch conversion. Selector 255 derives a
 message padded to the 4 MiB boundary, then verifies rejection one byte above it, so large seeds
 are unnecessary. Parse success does not imply admission into the separate timeline policy.
 
-`state_transitions` consumes at most 16 KiB and 256 eight-byte operations. It starts with three
+`state-transitions` consumes at most 16 KiB and 256 eight-byte operations. It starts with three
 small synthetic guild channels. Operations select/history/load/patch/delete, replay stale
 requests or generations, revoke/restore permissions, reconnect, logout/re-READY and clear caches.
 Flags generate null/absent patches, reply-deletion markers and page/bulk-delete pressure. Payload
