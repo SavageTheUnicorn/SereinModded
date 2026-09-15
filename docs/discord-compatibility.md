@@ -37,7 +37,9 @@ client safety ceilings, not Discord quotas or a whole-process memory guarantee.
 READY read state, notification settings, session/friend presence and individual guild emoji
 catalogs decode independently. Rejected optional sections remain unavailable and produce a
 bounded feature warning; they do not abort otherwise valid login. Unknown read state is not
-treated as read, and unknown notification settings or DND suppress desktop alerts. Identity,
+treated as read. Unknown guild notification settings or DND suppress desktop alerts; DMs use
+default delivery when global DM settings are absent unless a known mute, block, spam/request,
+or DND state suppresses them. Identity,
 session/resume address, relationships, navigation, permissions and voice data remain strict.
 Supplemental optional metadata follows the same policy. No raw payload or parser error is logged.
 

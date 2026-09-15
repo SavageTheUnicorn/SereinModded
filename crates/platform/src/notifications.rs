@@ -1,4 +1,4 @@
-//! Session-opt-in OS alerts. No account identifiers or message content cross this boundary.
+//! Device-preference-controlled OS alerts. Message previews are bounded before reaching this worker.
 use std::sync::{
 	Arc,
 	atomic::{AtomicU64, Ordering},
@@ -12,8 +12,11 @@ type NotificationHandle = ();
 #[cfg(not(target_os = "windows"))]
 use notify_rust::NotificationHandle;
 
-// Eight fixed-size commands (128 bytes at most); overflow drops an alert, never message state.
+// Eight bounded commands; overflow drops an alert, never message state.
 const QUEUE_ITEMS: usize = 8;
+const TITLE_BYTES: usize = 256;
+const BODY_BYTES: usize = 512;
+const IMAGE_PATH_BYTES: usize = 512;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -29,9 +32,11 @@ pub enum Status {
 impl Status {
 	pub fn label(self) -> &'static str {
 		match self {
-			Self::Disabled => "System notifications are off for this session.",
+			Self::Disabled => "System notifications are off in Serein settings.",
 			Self::Enabling => "Checking system notification permission…",
-			Self::Ready => "System notifications enabled; message content stays hidden.",
+			Self::Ready => {
+				"Serein can send system notifications; message alerts show sender and preview."
+			}
 			Self::Denied => "System notifications are disabled in your OS settings.",
 			Self::QueueFull => {
 				"Notification queue full; an alert was skipped. Unread indicators are retained."
@@ -75,13 +80,18 @@ impl Kind {
 		}
 	}
 }
-#[derive(Clone, Copy)]
-struct Command {
-	generation: u64,
-	alert: Option<Kind>,
+struct Alert {
+	title: Box<str>,
+	body: Box<str>,
+	image_path: Option<Box<str>>,
 }
 
-/// Created without OS calls or a thread. The worker starts only after explicit opt-in.
+struct Command {
+	generation: u64,
+	alert: Option<Alert>,
+}
+
+/// Created without OS calls or a thread. The worker starts only when the device setting is enabled.
 pub struct Notifications {
 	send: Option<SyncSender<Command>>,
 	generation: Arc<AtomicU64>,
@@ -169,6 +179,28 @@ impl Notifications {
 		self.notify_kind(Kind::Message)
 	}
 	pub fn notify_kind(&self, kind: Kind) -> bool {
+		self.enqueue(Alert {
+			title: "Serein".into(),
+			body: kind.body().into(),
+			image_path: None,
+		})
+	}
+	pub fn notify_message(&self, title: String, body: String, image_path: Option<String>) -> bool {
+		if title.len() > TITLE_BYTES
+			|| body.len() > BODY_BYTES
+			|| image_path
+				.as_ref()
+				.is_some_and(|path| path.len() > IMAGE_PATH_BYTES)
+		{
+			return false;
+		}
+		self.enqueue(Alert {
+			title: title.into_boxed_str(),
+			body: body.into_boxed_str(),
+			image_path: image_path.map(String::into_boxed_str),
+		})
+	}
+	fn enqueue(&self, alert: Alert) -> bool {
 		if !matches!(self.status(), Status::Ready | Status::QueueFull) {
 			return false;
 		}
@@ -176,7 +208,7 @@ impl Notifications {
 		let Some(send) = &self.send else { return false };
 		match send.try_send(Command {
 			generation,
-			alert: Some(kind),
+			alert: Some(alert),
 		}) {
 			Ok(()) => true,
 			Err(error) => {
@@ -257,9 +289,9 @@ fn worker(
 		{
 			continue;
 		}
-		// Keep at most one generic notification/response handle, including in OS history where supported.
+		// Keep at most one notification/response handle, including in OS history where supported.
 		close(&mut outstanding);
-		outcome = match show(command.alert.expect("checked above")) {
+		outcome = match show(command.alert.as_ref().expect("checked above")) {
 			Ok(handle) => {
 				outstanding = Some(handle);
 				Status::Ready
@@ -293,17 +325,12 @@ fn authorize() -> Status {
 	}
 	#[cfg(target_os = "windows")]
 	{
-		use windows::{
-			UI::Notifications::{NotificationSetting, ToastNotificationManager},
-			core::HSTRING,
-		};
-		match ToastNotificationManager::CreateToastNotifierWithId(&HSTRING::from(
+		use windows::{UI::Notifications::ToastNotificationManager, core::HSTRING};
+		let notifier = ToastNotificationManager::CreateToastNotifierWithId(&HSTRING::from(
 			"cz.viceverse.serein",
-		))
-		.and_then(|notifier| notifier.Setting())
-		{
-			Ok(NotificationSetting::Enabled) => Status::Ready,
-			Ok(_) => Status::Denied,
+		));
+		match notifier {
+			Ok(notifier) => windows_setting_status(notifier.Setting(), windows_shortcut_exists()),
 			Err(_) => Status::Unavailable,
 		}
 	}
@@ -313,35 +340,80 @@ fn authorize() -> Status {
 	}
 }
 
-fn show(kind: Kind) -> Result<NotificationHandle, ()> {
+#[cfg(target_os = "windows")]
+fn windows_setting_status(
+	setting: windows::core::Result<windows::UI::Notifications::NotificationSetting>,
+	has_shortcut: bool,
+) -> Status {
+	use windows::{UI::Notifications::NotificationSetting, core::HRESULT};
+	match setting {
+		Ok(NotificationSetting::Enabled) => Status::Ready,
+		Ok(_) => Status::Denied,
+		// Windows may not have a settings entry for an unpackaged desktop app yet.
+		// Its notifier can still submit a toast; show() reports delivery errors.
+		Err(error) if has_shortcut && error.code() == HRESULT(0x80070490_u32 as i32) => {
+			Status::Ready
+		}
+		Err(_) => Status::Unavailable,
+	}
+}
+
+#[cfg(target_os = "windows")]
+fn windows_shortcut_exists() -> bool {
+	std::env::var_os("APPDATA").is_some_and(|root| {
+		std::path::PathBuf::from(root)
+			.join("Microsoft/Windows/Start Menu/Programs/Serein.lnk")
+			.is_file()
+	})
+}
+
+fn show(alert: &Alert) -> Result<NotificationHandle, ()> {
 	#[cfg(target_os = "macos")]
 	{
 		// The blocking wrapper mistakes a busy AppKit run loop for a stopped one.
 		// Await the OS completion on this worker; never block the native UI thread.
-		futures_lite::future::block_on(notification(kind).show_async()).map_err(|_| ())
+		futures_lite::future::block_on(notification(alert).show_async()).map_err(|_| ())
 	}
 	#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 	{
-		notification(kind).show().map_err(|_| ())
+		notification(alert).show().map_err(|_| ())
 	}
 	#[cfg(target_os = "windows")]
 	{
-		notification(kind).show().map(|_| ()).map_err(|_| ())
+		use tauri_winrt_notification::{IconCrop, Toast};
+		let mut toast = Toast::new("cz.viceverse.serein")
+			.title(&alert.title)
+			.text1(&alert.body)
+			.sound(None);
+		if let Some(path) = &alert.image_path
+			&& std::path::Path::new(path.as_ref()).is_file()
+		{
+			toast = toast.icon(
+				std::path::Path::new(path.as_ref()),
+				IconCrop::Circular,
+				&alert.title,
+			);
+		}
+		toast.show().map_err(|_| ())
 	}
 }
 
-fn notification(kind: Kind) -> notify_rust::Notification {
+#[cfg(any(not(target_os = "windows"), test))]
+fn notification(alert: &Alert) -> notify_rust::Notification {
 	let mut notification = notify_rust::Notification::new();
 	notification
 		.appname("Serein")
-		.summary("Serein")
-		.body(kind.body())
+		.summary(&alert.title)
+		.body(&alert.body)
 		.timeout(5_000);
+	if let Some(path) = &alert.image_path
+		&& std::path::Path::new(path.as_ref()).is_file()
+	{
+		notification.image_path(path);
+	}
 	// Sound is played independently by the bounded local audio worker.
 	#[cfg(target_os = "linux")]
 	notification.hint(notify_rust::Hint::SuppressSound(true));
-	#[cfg(target_os = "windows")]
-	notification.app_id("cz.viceverse.serein");
 	notification
 }
 
@@ -361,10 +433,47 @@ fn close(outstanding: &mut Option<NotificationHandle>) {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	#[cfg(target_os = "windows")]
+	#[test]
+	fn missing_windows_settings_entry_allows_delivery_but_denials_do_not() {
+		use windows::{
+			UI::Notifications::NotificationSetting,
+			core::{Error, HRESULT},
+		};
+		assert_eq!(
+			windows_setting_status(
+				Err(Error::from_hresult(HRESULT(0x80070490_u32 as i32))),
+				true
+			),
+			Status::Ready
+		);
+		assert_eq!(
+			windows_setting_status(
+				Err(Error::from_hresult(HRESULT(0x80070490_u32 as i32))),
+				false
+			),
+			Status::Unavailable
+		);
+		assert_eq!(
+			windows_setting_status(Ok(NotificationSetting::DisabledForUser), true),
+			Status::Denied
+		);
+		assert_eq!(
+			windows_setting_status(
+				Err(Error::from_hresult(HRESULT(0x80004005_u32 as i32))),
+				true
+			),
+			Status::Unavailable
+		);
+	}
 
 	#[test]
 	fn disabled_is_lazy_and_fixed_queue_is_bounded_and_invalidated() {
-		let alert = notification(Kind::Message);
+		let alert = notification(&Alert {
+			title: "Serein".into(),
+			body: Kind::Message.body().into(),
+			image_path: None,
+		});
 		assert_eq!(alert.summary, "Serein");
 		assert_eq!(alert.body, "You have a new message.");
 		let mut notifications = Notifications::new(|| {});
@@ -401,10 +510,29 @@ mod tests {
 				notifications.generation.load(Ordering::Acquire)
 			);
 		}
-		assert!(std::mem::size_of::<Command>() * QUEUE_ITEMS <= 128);
+		assert!(
+			(std::mem::size_of::<Command>() + TITLE_BYTES + BODY_BYTES + IMAGE_PATH_BYTES)
+				* QUEUE_ITEMS
+				<= 16 * 1024
+		);
 		let active_status = notifications.status.load(Ordering::Acquire);
 		publish(&notifications.status, 1, Status::Unavailable);
 		assert_eq!(notifications.status.load(Ordering::Acquire), active_status);
 		assert_eq!(notifications.status(), Status::Disabled);
+	}
+	#[test]
+	fn message_alert_payload_is_bounded_and_retains_preview() {
+		let mut notifications = Notifications::new(|| {});
+		let (send, receive) = mpsc::sync_channel(QUEUE_ITEMS);
+		notifications.send = Some(send);
+		notifications.generation.store(1, Ordering::Release);
+		notifications
+			.status
+			.store(encoded(1, Status::Ready), Ordering::Release);
+		assert!(notifications.notify_message("A sender".into(), "Hello there".into(), None));
+		let alert = receive.try_recv().unwrap().alert.unwrap();
+		assert_eq!((&*alert.title, &*alert.body), ("A sender", "Hello there"));
+		assert!(!notifications.notify_message("x".repeat(TITLE_BYTES + 1), "Message".into(), None));
+		assert!(receive.try_recv().is_err());
 	}
 }

@@ -12,14 +12,37 @@ const MAX_SETTINGS_BYTES: usize = 32 * 1024 * 1024;
 pub struct Notification {
 	pub channel: Id,
 	pub message: Id,
+	pub sender: String,
+	pub preview: String,
+	pub avatar_key: String,
 	direct: bool,
 	everyone: bool,
 	roles: Vec<Id>,
 }
 impl Notification {
 	fn bytes(&self) -> usize {
-		size_of::<Self>() + self.roles.capacity() * size_of::<Id>()
+		size_of::<Self>()
+			+ self.roles.capacity() * size_of::<Id>()
+			+ self.sender.capacity()
+			+ self.preview.capacity()
+			+ self.avatar_key.capacity()
 	}
+}
+
+fn alert_text(text: &str, chars: usize, bytes: usize) -> String {
+	let mut output = String::new();
+	for character in text.chars().take(chars) {
+		let character = if character.is_control() || character.is_whitespace() {
+			' '
+		} else {
+			character
+		};
+		if output.len() + character.len_utf8() > bytes {
+			break;
+		}
+		output.push(character);
+	}
+	output.trim().to_owned()
 }
 #[derive(Default)]
 pub(crate) struct Activity {
@@ -407,7 +430,7 @@ impl State {
 	fn notification_allowed_for(&self, channel: Id, mention: bool) -> bool {
 		if !self.gateway_connected
 			|| !self.can_view(channel)
-			|| self.notification_preferences.dnd != Some(false)
+			|| self.notification_preferences.dnd == Some(true)
 		{
 			return false;
 		}
@@ -418,23 +441,31 @@ impl State {
 		else {
 			return false;
 		};
-		let Some(setting) = self.notification_preferences.settings.get(&channel.guild) else {
+		if channel.guild.is_some() && self.notification_preferences.dnd.is_none() {
 			return false;
-		};
+		}
 		if channel.guild.is_none()
-			&& channel
+			&& (channel
 				.recipients
 				.iter()
 				.any(|user| self.user_blocked(user.id) == Some(true))
+				|| self.message_request_pending(channel.id)
+				|| self.spam_direct(channel.id)
+				|| self.pending_dm_muted(channel.id) == Some(true))
 		{
 			return false;
 		}
-		if setting.muted != Some(false)
-			|| (channel.guild.is_none() && self.pending_dm_muted(channel.id) == Some(true))
+		let Some(setting) = self.notification_preferences.settings.get(&channel.guild) else {
+			// A missing global DM entry means default delivery, unless a known mute above applies.
+			return channel.guild.is_none();
+		};
+		if setting.muted == Some(true) || (channel.guild.is_some() && setting.muted != Some(false))
 		{
 			return false;
 		}
-		let mut level = setting.level;
+		let mut level = setting
+			.level
+			.or_else(|| channel.guild.is_none().then_some(0));
 		for id in [channel.parent_id, Some(channel.id)].into_iter().flatten() {
 			if let Some((_, muted, override_level)) =
 				setting.channels.iter().find(|(c, ..)| *c == id)
@@ -450,7 +481,7 @@ impl State {
 				} else {
 					*muted
 				};
-				if muted != Some(false) {
+				if muted == Some(true) || (channel.guild.is_some() && muted != Some(false)) {
 					return false;
 				}
 				if override_level.is_some_and(|l| l != 3) {
@@ -607,37 +638,66 @@ impl State {
 		let allowed = !message.suppress_notifications
 			&& self.user_blocked(message.author.id) != Some(true)
 			&& self.notification_allowed_for(message.channel, mention);
-		let activity = &mut self.read_state.activity;
-		// ponytail: retain 4096 observed messages; counts become a lower bound after eviction.
-		while activity.observed.len() >= MAX_OBSERVED
-			|| (activity.observed.len() + 1) * size_of::<(Id, Id, bool)>() > MAX_OBSERVED_BYTES
 		{
-			if let Some((channel, _, mention)) = activity.observed.pop_front()
-				&& let Some(counts) = activity.observed_counts.get_mut(&channel)
+			let activity = &mut self.read_state.activity;
+			// ponytail: retain 4096 observed messages; counts become a lower bound after eviction.
+			while activity.observed.len() >= MAX_OBSERVED
+				|| (activity.observed.len() + 1) * size_of::<(Id, Id, bool)>() > MAX_OBSERVED_BYTES
 			{
-				counts.0 -= 1;
-				counts.1 -= u32::from(mention);
-				if counts.0 == 0 {
-					activity.observed_counts.remove(&channel);
+				if let Some((channel, _, mention)) = activity.observed.pop_front()
+					&& let Some(counts) = activity.observed_counts.get_mut(&channel)
+				{
+					counts.0 -= 1;
+					counts.1 -= u32::from(mention);
+					if counts.0 == 0 {
+						activity.observed_counts.remove(&channel);
+					}
 				}
 			}
+			activity
+				.observed
+				.push_back((message.channel, message.id, mention));
+			let counts = activity.observed_counts.entry(message.channel).or_default();
+			counts.0 += 1;
+			counts.1 += u32::from(mention);
 		}
-		activity
-			.observed
-			.push_back((message.channel, message.id, mention));
-		let counts = activity.observed_counts.entry(message.channel).or_default();
-		counts.0 += 1;
-		counts.1 += u32::from(mention);
 		if !allowed {
 			return;
 		}
+		let sender = alert_text(self.message_author_name(message), 80, 256);
+		let sender = if sender.is_empty() {
+			"Unknown sender".to_owned()
+		} else {
+			sender
+		};
+		let display = message.display_text();
+		let preview = if display.trim().is_empty() {
+			if !message.attachments.is_empty() {
+				"Sent an attachment".to_owned()
+			} else if !message.embeds.is_empty() {
+				"Sent an embed".to_owned()
+			} else {
+				"Sent a message".to_owned()
+			}
+		} else {
+			let text = alert_text(&display, 160, 512);
+			if text.is_empty() {
+				"Sent a message".to_owned()
+			} else {
+				text
+			}
+		};
 		let notification = Notification {
 			channel: message.channel,
 			message: message.id,
+			sender,
+			preview,
+			avatar_key: message.author.avatar_key(),
 			direct,
 			everyone: message.mention_everyone,
 			roles: message.mention_roles.clone(),
 		};
+		let activity = &mut self.read_state.activity;
 		while activity.notifications.len() >= MAX_NOTIFICATIONS
 			|| activity
                 .notifications
@@ -876,6 +936,21 @@ mod tests {
 			embeds_suppressed: false,
 			attachments: vec![],
 		}
+	}
+	#[test]
+	fn incoming_alert_keeps_bounded_sender_preview_and_avatar_key() {
+		let mut state = notification_state();
+		let mut incoming = message(100, 20);
+		incoming.author.name = "A sender\nname".into();
+		incoming.author.avatar = Some("0123456789abcdef0123456789abcdef".into());
+		incoming.content = "Hello\nfrom the call 🌍".repeat(100);
+		state.observe_notification(&incoming);
+		let alert = state.take_notification().expect("admitted incoming alert");
+		assert_eq!(alert.sender, "A sender name");
+		assert!(alert.preview.starts_with("Hello from the call 🌍"));
+		assert!(alert.preview.len() <= 512);
+		assert_eq!(alert.avatar_key, incoming.author.avatar_key());
+		assert!(alert.bytes() <= MAX_NOTIFICATION_BYTES);
 	}
 	#[test]
 	fn view_revocation_clears_alerts_and_badges_without_replaying_hidden_activity() {

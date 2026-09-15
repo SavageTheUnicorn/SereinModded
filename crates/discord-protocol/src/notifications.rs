@@ -1,4 +1,4 @@
-//! Unofficial normal-user settings/session payloads; unknown preferences disable OS alerts.
+//! Unofficial normal-user settings/session payloads; unknown guild preferences disable OS alerts.
 use model::Id;
 use serde::Deserialize;
 

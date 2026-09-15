@@ -423,8 +423,10 @@ No schema change or external runtime dependency is added; UI tests reuse the exi
 workspace test-support crate through a dev-dependency.
 
 Notification/read activity and remote notification preferences remain bounded session RAM only;
-the local notification opt-in is saved in `app_preferences`. The OS receives generic
-fixed text only after explicit opt-in and may keep its own notification/permission history.
+the local notification choice is saved in `app_preferences` and defaults to on for new installs.
+When enabled, message alerts send a
+bounded sender name and message preview to the OS; an already-cached local avatar PNG may also
+be used. Other alert kinds remain generic. The OS may keep its own notification/permission history.
 Logout invalidates queued work and requests dismissal; this does not erase OS records.
 See notification limits and platform behavior. Composer artwork uses
 the existing Twemoji atlas and custom-image cache; saved drafts keep their original wire

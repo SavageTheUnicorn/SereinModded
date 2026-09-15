@@ -373,6 +373,21 @@ fn disk_key(key: &str) -> Option<String> {
 	}
 }
 
+/// Cached PNG only; OS alerts never start an image download or block on disk from rendering.
+pub(crate) fn notification_image_path(account: Id, key: &str) -> Option<String> {
+	let name = disk_key(key)?;
+	if name.len() > 160 {
+		return None;
+	}
+	let root = dirs::data_local_dir()?;
+	root.join("serein")
+		.join("avatars")
+		.join(account.to_string())
+		.join(format!("{name}.png"))
+		.to_str()
+		.map(str::to_owned)
+}
+
 async fn run(
 	root: Option<&Path>,
 	mut requests: async_mpsc::Receiver<String>,

@@ -1051,6 +1051,8 @@ impl Desktop {
 			.last()
 			.map_or(10_000, |m| m.id.0.max(10_000));
 		let mut messaging = ui::MessagingUi::default();
+		messaging.notifications_enabled =
+			local_store::AppPreferences::default().notifications_enabled;
 		#[cfg(feature = "demo")]
 		if demo {
 			// Robin stays pinned on home. #getting-started is the guild Favorites row.
@@ -3799,14 +3801,30 @@ impl eframe::App for Desktop {
 		if self.state.auth != AuthState::Authenticated && !self.state.demo {
 			self.notifications.clear();
 		}
-		if let Some(kind) = self.notification_runtime.poll(
+		if let Some(alert) = self.notification_runtime.poll(
 			&mut self.state,
 			&mut self.messaging,
 			&self.window,
 			ctx,
 			self.fixture_only,
 		) {
-			self.notifications.notify_kind(kind);
+			match alert {
+				notification_runtime::Alert::Generic(kind) => {
+					self.notifications.notify_kind(kind);
+				}
+				notification_runtime::Alert::Message {
+					title,
+					body,
+					avatar_key,
+					image_path,
+				} => {
+					if self.notifications.notify_message(title, body, image_path)
+						&& let Some(worker) = &self.avatars
+					{
+						worker.request(avatar_key);
+					}
+				}
+			}
 		}
 		self.messaging.voice_ptt_active = focused && ptt_down && !ctx.egui_wants_keyboard_input();
 	}

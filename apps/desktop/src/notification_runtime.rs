@@ -5,13 +5,23 @@ use model::{
 	notification_preferences::{Device, Sound},
 };
 use std::time::{Duration, Instant};
+
+pub enum Alert {
+	Generic(platform::notifications::Kind),
+	Message {
+		title: String,
+		body: String,
+		avatar_key: String,
+		image_path: Option<String>,
+	},
+}
 #[derive(Default)]
 pub struct Runtime {
 	sounds: crate::notification_sounds::Sounds,
 	options: Device,
 	was_audible: bool,
 	ring: Option<(Id, Instant)>,
-	badge: Option<bool>,
+	badge: Option<u32>,
 	badge_check: Option<Instant>,
 	badge_status: &'static str,
 }
@@ -19,8 +29,8 @@ impl Runtime {
 	pub fn clear(&mut self, window: &winit::window::Window) {
 		self.sounds.stop();
 		self.ring = None;
-		if self.badge == Some(true) {
-			let _ = platform::badge::set(window, false);
+		if self.badge.is_some_and(|count| count > 0) {
+			let _ = platform::badge::set(window, 0);
 		}
 		self.badge = None;
 	}
@@ -32,7 +42,7 @@ impl Runtime {
 		window: &winit::window::Window,
 		ctx: &eframe::egui::Context,
 		fixture: bool,
-	) -> Option<platform::notifications::Kind> {
+	) -> Option<Alert> {
 		let live = !fixture && !state.demo && state.auth == AuthState::Authenticated;
 		let audible = live && ui.own_presence.status != PresenceStatus::DoNotDisturb;
 		let options = ui.notification_options;
@@ -58,7 +68,15 @@ impl Runtime {
 			};
 			if audible {
 				if ui.notifications_enabled && !current {
-					alert = Some(platform::notifications::Kind::Message);
+					let image_path = state.user.as_ref().and_then(|user| {
+						crate::avatars::notification_image_path(user.id, &notification.avatar_key)
+					});
+					alert = Some(Alert::Message {
+						title: notification.sender,
+						body: notification.preview,
+						avatar_key: notification.avatar_key,
+						image_path,
+					});
 				}
 				if options.allows(cue) {
 					sound = Some(cue);
@@ -68,7 +86,7 @@ impl Runtime {
 		while let Some(notification) = state.take_social_notification() {
 			if audible {
 				if ui.notifications_enabled {
-					alert = Some(match notification.kind {
+					alert = Some(Alert::Generic(match notification.kind {
 						model::notification_settings::SocialKind::Streaming => {
 							platform::notifications::Kind::Streaming
 						}
@@ -84,7 +102,7 @@ impl Runtime {
 						model::notification_settings::SocialKind::ProfileUpdates => {
 							platform::notifications::Kind::ProfileUpdates
 						}
-					});
+					}));
 				}
 				if options.allows(Sound::Message) {
 					sound = Some(Sound::Message);
@@ -125,14 +143,27 @@ impl Runtime {
 			|| !live
 		{
 			self.badge_check = Some(Instant::now());
-			let unread = live
-				&& badges && state
-				.channels
-				.iter()
-				.any(|channel| state.channel_unread(channel) == Some(true));
-			if platform::badge::supported() && self.badge != Some(unread) {
-				self.badge_status = platform::badge::set(window, unread).err().unwrap_or("");
-				self.badge = Some(unread);
+			let pings = if live && badges {
+				state
+					.channels
+					.iter()
+					.try_fold(0u32, |total, channel| {
+						if total >= 100 {
+							return None;
+						}
+						Some(
+							total
+								.saturating_add(state.mention_count(channel.id))
+								.min(100),
+						)
+					})
+					.unwrap_or(100)
+			} else {
+				0
+			};
+			if platform::badge::supported() && self.badge != Some(pings) {
+				self.badge_status = platform::badge::set(window, pings).err().unwrap_or("");
+				self.badge = Some(pings);
 			}
 		}
 		if live && badges {

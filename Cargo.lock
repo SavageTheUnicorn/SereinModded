@@ -4933,6 +4933,7 @@ dependencies = [
  "rfd",
  "serde_json",
  "symphonia",
+ "tauri-winrt-notification",
  "tokio",
  "url",
  "webkit6",

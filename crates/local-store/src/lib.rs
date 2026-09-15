@@ -34,7 +34,7 @@ pub struct AppPreferences {
 impl Default for AppPreferences {
 	fn default() -> Self {
 		Self {
-			notifications_enabled: false,
+			notifications_enabled: true,
 			auto_update: false,
 			update_nightly: true,
 			notification_options: Default::default(),

@@ -124,6 +124,7 @@ Extract `serein-<version>-Windows-X64.zip` anywhere and launch `serein.exe`. To 
 ```powershell
 powershell -File .\install-notifications.ps1
 ```
+Run the script from the extracted folder beside `serein.exe`. If PowerShell's `RemoteSigned` policy blocks the downloaded script, review it and run `Unblock-File -LiteralPath .\install-notifications.ps1` in that folder before retrying. The Windows installer registers the shortcut automatically, so installed builds do not need this script.
 
 </details>
 
