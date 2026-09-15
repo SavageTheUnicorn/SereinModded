@@ -3900,6 +3900,7 @@ mod tests {
 			extra_content: Default::default(),
 			embeds: vec![],
 			attachments: vec![],
+			author_nick: None,
 			author_roles: vec![],
 			mention_roles: vec![],
 			mention_everyone: false,

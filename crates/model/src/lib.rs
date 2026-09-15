@@ -231,6 +231,8 @@ pub struct Message {
 	pub author: User,
 	/// Session-only role membership supplied with this message; refreshed by live member rows.
 	pub author_roles: Vec<Id>,
+	/// Session-only guild nickname; current member rows take precedence.
+	pub author_nick: Option<String>,
 	pub content: String,
 	pub mentions: Vec<User>,
 	/// Session-only service notification metadata; never inferred from message text.
@@ -286,6 +288,7 @@ impl Message {
 				reaction_bytes(r) + r.capacity().saturating_sub(r.len()) * size_of::<Reaction>()
 			}) + self.content.capacity()
 			+ self.author.heap_bytes()
+			+ self.author_nick.as_ref().map_or(0, String::capacity)
 			+ self.author_roles.capacity() * size_of::<Id>()
 			+ mention_bytes(&self.mentions)
 			+ self.mention_roles.capacity() * size_of::<Id>()

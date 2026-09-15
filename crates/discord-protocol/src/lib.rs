@@ -653,6 +653,8 @@ pub struct MessageDto {
 }
 #[derive(Deserialize)]
 pub struct MessageMemberDto {
+	#[serde(default)]
+	pub nick: Option<String>,
 	#[serde(default, deserialize_with = "permissions::member_roles")]
 	pub roles: Vec<Id>,
 }
@@ -779,6 +781,12 @@ impl MessageDto {
 			channel: self.channel_id,
 			author,
 			content: self.content,
+			author_nick: self.member.as_ref().and_then(|member| {
+				member
+					.nick
+					.as_ref()
+					.map(|nick| nick.chars().take(128).collect())
+			}),
 			author_roles: self.member.map_or_else(Vec::new, |member| member.roles),
 			mention_roles: self.mention_roles,
 			mention_everyone: self.mention_everyone,
@@ -971,6 +979,29 @@ mod tests {
 		let user: UserDto =
 			decode(br#"{"id":"3","username":"Synthetic member","bot":true}"#).unwrap();
 		assert_eq!(user.into_model().account_label(), Some("BOT"));
+	}
+	#[test]
+	fn message_nickname_is_bounded_and_keeps_global_identity() {
+		let message = decode::<MessageDto>(
+			&serde_json::to_vec(&serde_json::json!({
+				"id":"100", "channel_id":"20", "author":{"id":"3","username":"Global"},
+				"member":{"nick":"界".repeat(200)}
+			}))
+			.unwrap(),
+		)
+		.unwrap()
+		.into_model();
+		assert_eq!(message.author.name, "Global");
+		assert_eq!(
+			message.author_nick.as_deref(),
+			Some("界".repeat(128).as_str())
+		);
+		let mut plain = message.clone();
+		plain.author_nick = None;
+		assert_eq!(
+			message.bytes() - plain.bytes(),
+			message.author_nick.unwrap().capacity()
+		);
 	}
 	#[test]
 	fn message_author_roles_are_bounded_and_session_only() {

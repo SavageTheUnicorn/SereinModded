@@ -798,3 +798,13 @@ Chat author role IDs are session-only message metadata (at most 512 IDs per mess
 counted in the existing timeline byte budget and omitted from SQLite. Names use
 the current guild role catalog, preferring loaded member rows over message role IDs;
 missing membership uses the normal text color until service data arrives.
+
+Chat author guild nicknames are session-only message metadata, capped at 128 Unicode
+characters and counted in timeline byte limits. Current guild member rows take
+precedence. SQLite omits this field; cached history falls back to the usual name
+until message or member data refreshes.
+
+Custom emoji artwork shares the existing account-isolated image disk cache
+(4,096 files / 1 GiB, 90-day inactivity retention). Its GPU working set is separate
+from avatars and media, bounded to 1,024 textures / 16 MiB with least-recently-used
+eviction. Evicted textures reload from disk when available.

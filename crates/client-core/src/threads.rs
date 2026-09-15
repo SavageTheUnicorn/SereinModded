@@ -265,6 +265,7 @@ mod tests {
 				discriminator: 0,
 			},
 			content: "Synthetic thread history".into(),
+			author_nick: None,
 			author_roles: vec![],
 			mention_roles: vec![],
 			mention_everyone: false,

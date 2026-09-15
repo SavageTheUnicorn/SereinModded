@@ -188,6 +188,7 @@ pub fn message(id: u64, channel: Id) -> Message {
 		} else {
 			vec![]
 		},
+		author_nick: None,
 		author_roles: vec![],
 		mention_roles: vec![],
 		mention_everyone: false,
