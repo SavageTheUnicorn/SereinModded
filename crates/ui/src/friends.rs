@@ -565,6 +565,7 @@ impl MessagingUi {
 										user,
 										&mut self.profile,
 										&mut self.user_action,
+										None,
 									)
 								});
 							});
