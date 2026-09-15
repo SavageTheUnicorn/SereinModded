@@ -779,3 +779,14 @@ four permits and a 512-KiB wire cap; results use the existing bounded event queu
 Replacing or closing the member view drops that read. Session/request/channel and
 view-permission checks fence late results. No member snapshots, cursors or payloads
 are persisted, and no background pagination or new queue is introduced.
+
+### Opt-in macOS startup
+
+The existing startup worker writes only
+`~/Library/LaunchAgents/cz.viceverse.serein.startup.plist`, at most 16 KiB,
+with an absolute executable path and fixed autostart/minimized flags. Reads are
+bounded to 16 KiB; unknown or moved entries report an error. Enabling atomically
+replaces this file using a private sibling temporary file; disabling removes it.
+No account data, credentials or separate preference is stored. The entry runs once
+at the next graphical login; it has no KeepAlive or immediate launch. Demo mode
+keeps startup changes in memory. OS login-item restrictions remain authoritative.
