@@ -3292,14 +3292,28 @@ mod tests {
 		state.select(Id(20));
 		state.channels.retain(|c| c.id != Id(10));
 		state.invalidate_navigation();
-		assert!(state.select_guild(Id(1)).is_none());
+		assert!(matches!(
+			state.select_guild(Id(1)),
+			Some(Command::History {
+				channel: Id(12),
+				..
+			})
+		));
+		assert!(state.voice.active.is_none());
 		assert_eq!(
 			state.selected,
 			Some(Id(12)),
 			"voice is only viewed, never joined"
 		);
 		state.select(Id(20));
-		assert!(state.select_guild(Id(1)).is_none());
+		assert!(matches!(
+			state.select_guild(Id(1)),
+			Some(Command::History {
+				channel: Id(12),
+				..
+			})
+		));
+		assert!(state.voice.active.is_none());
 		assert_eq!(
 			state.selected,
 			Some(Id(12)),
@@ -3873,6 +3887,7 @@ mod tests {
 			extra_content: Default::default(),
 			embeds: vec![],
 			attachments: vec![],
+			author_roles: vec![],
 			mention_roles: vec![],
 			mention_everyone: false,
 			suppress_notifications: false,

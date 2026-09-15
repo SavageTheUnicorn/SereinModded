@@ -790,3 +790,8 @@ replaces this file using a private sibling temporary file; disabling removes it.
 No account data, credentials or separate preference is stored. The entry runs once
 at the next graphical login; it has no KeepAlive or immediate launch. Demo mode
 keeps startup changes in memory. OS login-item restrictions remain authoritative.
+
+Chat author role IDs are session-only message metadata (at most 512 IDs per message),
+counted in the existing timeline byte budget and omitted from SQLite. Names use
+the current guild role catalog, preferring loaded member rows over message role IDs;
+missing membership uses the normal text color until service data arrives.
