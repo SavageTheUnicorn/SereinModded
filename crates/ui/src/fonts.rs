@@ -39,21 +39,13 @@ pub fn install(ctx: &Context) {
 }
 
 /// The bundled Inter faces are the "hinted for Windows" TrueType builds, so the
-/// TrueType interpreter — not the auto-hinter — grid-fits their stems. Symmetric
-/// rendering keeps a glyph identical across sub-pixel positions, but it lets those
-/// instructions widen stems, which reads as blur under egui's analytic rasterizer.
-/// Sub-pixel binning is off (see `design::apply`), so every glyph is rasterized at a
-/// single position anyway and turning this off costs no atlas space or cache churn.
-fn hinted(data: &'static [u8]) -> FontData {
-	let mut font = FontData::from_static(data);
-	font.tweak.hinting_target =
-		egui::epaint::text::HintingTarget::Smooth(egui::epaint::text::SmoothHinting {
-			symmetric_rendering: false,
-			..Default::default()
-		});
-	font
-}
-
+/// TrueType interpreter — not the auto-hinter — grid-fits their stems. They keep
+/// egui's default rasterizer settings: symmetric rendering, which restricts those
+/// instructions to the vertical direction, and sub-pixel binning (see
+/// `design::apply`), which positions glyphs horizontally at fractional offsets.
+/// That split is what DirectWrite does — baselines and x-heights land on whole
+/// pixels while spacing stays even. Letting the hints grid-fit horizontally instead
+/// snaps stems per glyph and reads as uneven, "wobbly" text at 1x.
 fn definitions() -> FontDefinitions {
 	let mut definitions = FontDefinitions::default();
 	// Inter leads proportional text; two heavier faces provide Discord-style emphasis
@@ -75,7 +67,7 @@ fn definitions() -> FontDefinitions {
 	for (family, name, data) in weights {
 		definitions
 			.font_data
-			.insert(name.into(), hinted(data).into());
+			.insert(name.into(), FontData::from_static(data).into());
 		let list = definitions.families.entry(family).or_default();
 		list.retain(|existing| !defaults.contains(existing));
 		list.insert(0, name.into());
@@ -159,8 +151,10 @@ mod tests {
 	}
 
 	/// Issue #200: text read as blurry at 1x on Windows. Sharpness needs the hinted
-	/// TrueType Inter builds (CFF outlines are effectively unhinted by skrifa), glyphs
-	/// positioned on whole pixels, and hints that are free to grid-fit stems.
+	/// TrueType Inter builds — CFF outlines are effectively unhinted by skrifa — and
+	/// hinting enabled. The hints must stay vertical-only (symmetric rendering) and
+	/// glyphs must keep sub-pixel horizontal positions, as DirectWrite does; grid-fitting
+	/// stems horizontally instead made spacing uneven.
 	#[test]
 	fn latin_faces_are_rasterized_for_sharp_text_at_low_scale() {
 		for data in [INTER, INTER_MEDIUM, INTER_SEMIBOLD] {
@@ -179,7 +173,7 @@ mod tests {
 		install(&ctx);
 		crate::design::apply(&ctx);
 		for theme in [egui::Theme::Dark, egui::Theme::Light] {
-			assert!(!ctx.style_of(theme).visuals.text_options.subpixel_binning);
+			assert!(ctx.style_of(theme).visuals.text_options.subpixel_binning);
 			assert!(ctx.style_of(theme).visuals.text_options.font_hinting);
 		}
 		let symmetric = definitions()
@@ -188,9 +182,9 @@ mod tests {
 			.filter(|(name, _)| name.starts_with("Inter"))
 			.map(|(_, data)| match data.tweak.hinting_target {
 				egui::epaint::text::HintingTarget::Smooth(smooth) => smooth.symmetric_rendering,
-				egui::epaint::text::HintingTarget::Mono => true,
+				egui::epaint::text::HintingTarget::Mono => false,
 			})
 			.collect::<Vec<_>>();
-		assert_eq!(symmetric, vec![false; 3]);
+		assert_eq!(symmetric, vec![true; 3]);
 	}
 }

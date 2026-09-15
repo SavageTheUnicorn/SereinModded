@@ -56,9 +56,12 @@ reference an unknown family.
 
 Text is rasterized by egui on the CPU, not by DirectWrite or Core Text, so sharpness at 1x
 scale depends on the font carrying its own hints. The bundled Inter faces are therefore
-upstream's hinted TrueType builds rather than the CFF originals, sub-pixel binning is off, and
-the faces opt out of symmetric rendering. Together these put glyph stems on whole pixels; the
-CFF builds with binning on looked soft on 1x Windows and Linux displays. See
+upstream's hinted TrueType builds rather than the CFF originals, which rendered effectively
+unhinted and looked soft on 1x Windows and Linux displays. Everything else is left at egui's
+defaults — hinting on, symmetric rendering, sub-pixel binning — which is DirectWrite's split:
+the hints sharpen baselines and x-heights vertically while horizontal positions stay
+fractional, so spacing stays even. Letting the hints grid-fit horizontally as well (binning
+off, symmetric rendering off) snapped stems per glyph and read as wobbly. See
 [#200](https://github.com/ViceVerse-cz/Serein/issues/200) and `assets/README.md`.
 
 ## Layout
