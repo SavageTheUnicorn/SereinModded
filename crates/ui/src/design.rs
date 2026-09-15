@@ -612,6 +612,11 @@ pub fn apply(ctx: &egui::Context) {
 		style.spacing.interact_size.y = f32::from(metrics.control_height.unwrap_or(32));
 		style.spacing.menu_margin = egui::Margin::same(8);
 		style.visuals.panel_fill = p.chat;
+		// Sub-pixel binning rasterizes each glyph at up to four fractional x offsets, so
+		// stems land between physical pixels and read as blurry at 1x — where most Windows
+		// and Linux desktops run. Whole-pixel positioning lets the bundled Inter faces'
+		// TrueType hints grid-fit stems instead, which is what Discord gets from DirectWrite.
+		style.visuals.text_options.subpixel_binning = false;
 		style.visuals.interact_cursor = Some(egui::CursorIcon::PointingHand);
 		style.visuals.window_fill = p.raised.to_opaque();
 		style.visuals.window_corner_radius = metrics.window_radius.unwrap_or(12).into();
