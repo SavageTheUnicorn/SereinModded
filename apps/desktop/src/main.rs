@@ -4495,6 +4495,7 @@ impl eframe::App for Desktop {
 				None => {}
 			}
 		}
+		ui::design::window_resize(&ctx);
 		self.frame_metrics.reflows = self.messaging.timeline_reflows();
 		self.frame_metrics.finish();
 	}
