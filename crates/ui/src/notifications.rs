@@ -1,4 +1,3 @@
-use crate::design::LazyHover;
 use crate::{MessagingUi, design};
 use client_core::{Command, State};
 use egui::{Align2, Color32, FontId};
@@ -220,7 +219,8 @@ impl MessagingUi {
 						label.clone(),
 					)
 				});
-				if response.on_hover_text(label).clicked() {
+				design::rail_name(&response, &label);
+				if response.clicked() {
 					self.guild = None;
 				}
 				self.scroll
@@ -242,11 +242,16 @@ impl MessagingUi {
 							};
 							let in_call = Some(channel.id) == call;
 							let response = if channel.kind == 3 {
-								self.avatars.show_group(ui, channel, 48.0, state.demo)
+								self.avatars.show_group_rail(ui, channel, 48.0, state.demo)
 							} else if let Some(user) = channel.recipients.first() {
-								self.avatars.show(ui, user, 48.0, state.demo)
+								self.avatars.show_rail(ui, user, 48.0, state.demo)
 							} else {
-								design::avatar(ui, &channel.name, 48.0)
+								let (rect, response) = ui.allocate_exact_size(
+									egui::Vec2::splat(48.0),
+									egui::Sense::click(),
+								);
+								design::paint_avatar(ui, &channel.name, 48.0, rect);
+								response
 							};
 							if channel.kind == 1
 								&& let Some(user) = channel.recipients.first()
@@ -283,22 +288,8 @@ impl MessagingUi {
 									),
 								)
 							});
-							if response
-								.on_hover_text_with(|| {
-									format!(
-										"{} · {}",
-										channel.name,
-										if in_call {
-											"You are in this call"
-										} else if state.channel_unread(channel).is_some() {
-											"Unread activity; count may be a lower bound"
-										} else {
-											"Session activity · read sync unavailable"
-										}
-									)
-								})
-								.clicked()
-							{
+							design::rail_name(&response, &channel.name);
+							if response.clicked() {
 								self.guild = None;
 								selected = Some(channel.id);
 							}
@@ -340,7 +331,8 @@ impl MessagingUi {
 								"Join a Server",
 							)
 						});
-						if response.on_hover_text("Join a Server").clicked() {
+						design::rail_name(&response, "Join a Server");
+						if response.clicked() {
 							self.join_server.open(state.generation);
 						}
 					});
