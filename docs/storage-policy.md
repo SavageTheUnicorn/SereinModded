@@ -1,5 +1,31 @@
 # Local storage policy and audit
 
+## Theme maker and embedded backgrounds (September 15, 2026)
+
+Editor saves reuse the device-wide themes directory and active selection record;
+no SQLite schema change is needed. Stored records add a default-false `local_theme`
+marker so a save can replace an editor-created theme without overwriting an imported
+or reviewed package. The eight-installed-theme and 16 MiB package limits remain.
+Each theme embeds at most one 2 MiB background PNG/JPEG and one separate 2 MiB
+card cover PNG/JPEG; no source image path is persisted.
+Removing a theme deletes only Serein's copy, preserving originals and exports.
+Exports use a unique temporary sibling and replace the selected destination only
+after a complete write. Failed saves/exports leave the editor draft available.
+
+The worker decodes the selected theme background, an explicit editor draft, and
+installed card covers, bounded to 4,096 pixels per edge, 4,000,000 pixels and
+32 MiB decoder allocation per source. Covers shrink to at most 640 x 360 before
+entering UI state. Installed metadata and catalog cards contain no compressed
+image copies. The active background and one draft background can each retain
+16,000,000 RGBA bytes; at most eight cover thumbnails and eight visible-card
+textures can each retain 7,372,800 RGBA bytes before GPU allocations. Image
+resources are released when replaced, removed or reset.
+The existing four-job extension queue bounds pending editor packages to at most
+16 MiB of image bytes in addition to their bounded metadata; one worker and one
+result slot remain. These are allocation ceilings, not measured process RSS.
+Local image picking and export are explicit host actions; plugins gain no file or
+network access. There is no image cache directory, telemetry, or automatic upload.
+
 ## Last-viewed server channels (September 14, 2026)
 
 Server navigation remembers at most 1,024 guild/channel ID pairs in session RAM
