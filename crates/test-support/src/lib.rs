@@ -674,6 +674,7 @@ pub fn voice_demo_state() -> State {
 		error: None,
 	});
 	state.select(Id(25));
+	load_page(&mut state, None);
 	state.status = "Offline voice fixture · no microphone or network access";
 	state
 }

@@ -208,7 +208,7 @@ impl Channel {
 			+ self.recipients.iter().map(User::heap_bytes).sum::<usize>()
 	}
 	pub fn supports_text(&self) -> bool {
-		matches!(self.kind, 0 | 1 | 3 | 5 | 10..=12)
+		matches!(self.kind, 0..=3 | 5 | 10..=12)
 	}
 }
 #[derive(Clone)]

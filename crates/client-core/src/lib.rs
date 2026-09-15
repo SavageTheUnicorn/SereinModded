@@ -4296,11 +4296,14 @@ mod tests {
 		);
 		assert!(state.can_call(Id(1)));
 		assert!(
-			state.select(Id(1)).is_none(),
-			"Voice navigation does not request text history"
+			matches!(
+				state.select(Id(1)),
+				Some(Command::History { channel: Id(1), .. })
+			),
+			"Voice navigation requests its channel chat history"
 		);
 		assert_eq!(state.selected, Some(Id(1)));
-		assert!(!state.history_pending);
+		assert!(state.history_pending);
 		assert!(state.start_call(Id(1), false).is_some());
 	}
 
