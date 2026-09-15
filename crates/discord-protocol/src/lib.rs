@@ -982,7 +982,7 @@ mod tests {
 	}
 	#[test]
 	fn message_nickname_is_bounded_and_keeps_global_identity() {
-		let message = decode::<MessageDto>(
+		let mut message = decode::<MessageDto>(
 			&serde_json::to_vec(&serde_json::json!({
 				"id":"100", "channel_id":"20", "author":{"id":"3","username":"Global"},
 				"member":{"nick":"界".repeat(200)}
@@ -996,12 +996,9 @@ mod tests {
 			message.author_nick.as_deref(),
 			Some("界".repeat(128).as_str())
 		);
-		let mut plain = message.clone();
-		plain.author_nick = None;
-		assert_eq!(
-			message.bytes() - plain.bytes(),
-			message.author_nick.unwrap().capacity()
-		);
+		let bytes = message.bytes();
+		let nick = message.author_nick.take().unwrap();
+		assert_eq!(bytes - message.bytes(), nick.capacity());
 	}
 	#[test]
 	fn message_author_roles_are_bounded_and_session_only() {
@@ -1011,12 +1008,11 @@ mod tests {
 		});
 		let read =
 			|value: &serde_json::Value| decode::<MessageDto>(&serde_json::to_vec(value).unwrap());
-		let message = read(&wire).unwrap().into_model();
+		let mut message = read(&wire).unwrap().into_model();
 		assert_eq!(message.author_roles, vec![Id(11), Id(12)]);
-		let mut plain = message.clone();
-		plain.author_roles.clear();
-		plain.author_roles.shrink_to_fit();
-		assert_eq!(message.bytes() - plain.bytes(), 2 * size_of::<Id>());
+		let bytes = message.bytes();
+		let roles = std::mem::take(&mut message.author_roles);
+		assert_eq!(bytes - message.bytes(), roles.capacity() * size_of::<Id>());
 		for roles in [
 			serde_json::json!(["0"]),
 			serde_json::json!(["11", "11"]),
