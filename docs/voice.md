@@ -62,7 +62,7 @@ For the owner-controlled live gate, leave the peer connected in a private DM cal
 DM in Serein, wait for the banner, then explicitly Join. Verify no new ring, actual two-way
 audio, leaving/rejoining while the peer stays, and disappearance after the peer ends the call.
 
-Mute/deafen, session-local input/output selection and focused V push-to-talk are implemented. Push-to-talk releases when focus is lost and is disabled while text entry has focus. It is not a global hotkey. Devices are initialized only following an explicit call and encrypted readiness; no microphone test runs at startup. Acoustic echo cancellation is enabled automatically; see below for its limits. When opening call audio, an unavailable selected input or output falls back independently to its system default. The saved selection is retained for future opens. If no default is available or opening it fails, the call still reports an audio-device failure.
+Mute/deafen, session-local input/output selection and focused V push-to-talk are implemented. Push-to-talk releases when focus is lost and is disabled while text entry has focus. It is not a global hotkey. Devices are initialized only following an explicit call and encrypted readiness; no microphone test runs at startup. Acoustic echo cancellation is enabled automatically; see below for its limits. A microphone that fails to open or start, reports a callback error, or delivers no audio callbacks for three seconds is disabled with a visible warning. The call and speaker playback remain connected, and selecting another input retries microphone setup. Ordinary silence does not trigger the warning. Selected speaker failures can fall back to the default output; an unusable output can still fail the call.
 
 One-to-one DM calls accept only their expected peer. Group DM and server calls support up to 64 total participants, with independent bounded decoder/jitter state and mixed mono playback. Only DAVE version 1 is accepted; encryption downgrades and group identities outside the authenticated participant roster fail closed. Stage channels and recording are unsupported. Outgoing screen sharing and macOS camera support is described below. Voice WebSocket resumption has a finite retry budget; failed resumption or main Gateway disconnect requires an explicit new call. Voice credentials, ephemeral DAVE identities and audio stay in bounded session memory. The displayed privacy code applies to the current group epoch; identities are not remembered across calls. Comparing codes does not establish long-term identity verification or text-message encryption.
 
@@ -139,9 +139,10 @@ closes, including 4014, still require an explicit new call. Bounded proposals ar
 DAVE has a local group are ignored as required by its initial-group procedure; established
 groups retain strict proposal validation and no early proposal enables audio.
 
-Device readiness belongs to the current device/security configuration. A rapid encryption
-pause and restart invalidates old readiness even when both events reach one UI frame;
-late readiness from an earlier configuration cannot mark the call connected.
+Device readiness belongs to the current device configuration. A rapid encryption pause while
+devices are opening invalidates old readiness even when both events reach one UI frame;
+late readiness cannot mark the call connected. Once opened, devices stay open across a brief
+rekey while callbacks are silenced and old PCM is discarded.
 
 Received short Opus packets are combined into the normal 20 ms playback frame. The encoded
 reorder queue remains bounded to eight packets per speaker; a full queue starts playout early

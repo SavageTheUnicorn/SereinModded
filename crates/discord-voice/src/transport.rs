@@ -563,8 +563,7 @@ async fn run_inner(
 							},
 							29|30=>{
 								video.clear();
-								deadline=Some(Instant::now()+Duration::from_secs(30));ready_announced=false;waiting_announced=false;capture_reset=true;mixer.clear();
-								emit(Status::Securing).map_err(|_|"Call interface closed")?;
+								ready_announced=false;waiting_announced=false;capture_reset=true;mixer.clear();
 								match dave.group_changed(opcode,data){
 									Ok(id)=>{if id!=0 {json_send(&mut ws,json!({"op":23,"d":{"transition_id":id}})).await?;}},
 									Err(_)=>{
@@ -573,6 +572,12 @@ async fn run_inner(
 										json_send(&mut ws,json!({"op":31,"d":{"transition_id":id}})).await?;
 										dave.reset()?;send(&mut ws,Message::Binary(dave.key_package()?.into())).await?;
 									}
+								}
+								if dave.ready {
+									deadline=None;
+								} else {
+									deadline=Some(Instant::now()+Duration::from_secs(30));
+									emit(Status::Securing).map_err(|_|"Call interface closed")?;
 								}
 							},
 							_=>return Err("Unsupported DAVE opcode; call stopped"),

@@ -248,6 +248,7 @@ pub struct MessagingUi {
 	voice_user_volumes: Option<Box<[(u64, u16); 64]>>,
 	pub voice_refresh_devices: bool,
 	pub voice_device_status: &'static str,
+	pub voice_microphone_unavailable: bool,
 	pub voice_push_to_talk: bool,
 	pub voice_noise_suppression: bool,
 	/// Server folders the owner left open; restored from device preferences at startup.

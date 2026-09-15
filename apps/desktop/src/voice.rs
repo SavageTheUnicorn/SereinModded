@@ -295,6 +295,7 @@ impl Voice {
 	) -> Option<Command> {
 		self.reap();
 		ui.voice_speaking.clear();
+		ui.voice_microphone_unavailable = false;
 		self.poll_camera_devices(state.demo, ui, ctx);
 		if ui.voice_refresh_devices {
 			ui.voice_refresh_devices = false;
@@ -482,6 +483,7 @@ impl Voice {
 			}
 			failure = live.failure.get().copied();
 			let devices_ready = live.audio.is_ready();
+			ui.voice_microphone_unavailable = live.audio.microphone_unavailable();
 			if failure.is_none() {
 				let pending = live
 					.audio

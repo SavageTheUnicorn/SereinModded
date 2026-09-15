@@ -29,9 +29,14 @@ the callback buffers. Synthetic helper tests exercise the same processing used b
 constructing a host/device/stream. Physical audio quality and real-time timing remain unverified.
 
 
-Device configurations and encrypted-readiness pauses invalidate a monotonic audio revision.
-Only streams acknowledged for the current revision enable callbacks or the connected UI state;
-late readiness/errors from replaced streams cannot acknowledge a newer configuration.
+Device changes and encrypted-readiness pauses during an in-flight open invalidate a monotonic
+audio revision. An established stream stays open across a brief security pause, while callbacks
+are gated and old PCM is flushed. Only streams acknowledged for the current revision enable
+callbacks or the connected UI state; late readiness/errors from replaced streams cannot
+acknowledge a newer configuration.
+Microphone open/start/callback failures and three seconds without callbacks disable capture only, with a recoverable UI warning. Silence is not a device failure. Speaker open failures try the default output.
+An output callback failure prefers the default speaker on the next attempt instead of reopening the same failing
+virtual device indefinitely; a later manual selection restarts the bounded recovery budget.
 Listen-only guild calls with denied SPEAK open only an output stream. Permission changes update
 input availability independently of mute and focused push-to-talk, which never reopen streams.
 Incoming 2.5/5/10 ms Opus packets fill one 20 ms playback tick with at most eight decodes per

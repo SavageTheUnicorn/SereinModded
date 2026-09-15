@@ -1129,6 +1129,15 @@ impl MessagingUi {
 				);
 			}
 		});
+		if self.voice_microphone_unavailable {
+			ui.label(
+				RichText::new(
+					"Microphone unavailable · choose another input. You are still connected.",
+				)
+				.size(12.0)
+				.color(colors.warning),
+			);
+		}
 		if !self.voice_device_status.is_empty() {
 			ui.label(
 				RichText::new(self.voice_device_status)
@@ -1353,6 +1362,15 @@ impl MessagingUi {
 				self.voice_gain = crate::VoiceGain::default();
 			}
 		});
+		if self.voice_microphone_unavailable {
+			ui.label(
+				RichText::new(
+					"Microphone unavailable · choose another input. You are still connected.",
+				)
+				.size(12.0)
+				.color(colors.warning),
+			);
+		}
 		if !self.voice_device_status.is_empty() {
 			ui.label(
 				RichText::new(self.voice_device_status)
@@ -1971,6 +1989,15 @@ impl MessagingUi {
 			.show(ui, |ui| {
 				ui.set_width(ui.available_width());
 				ui.spacing_mut().item_spacing.y = 8.0;
+				if self.voice_microphone_unavailable {
+					ui.label(
+						RichText::new(
+							"Microphone unavailable · still connected. Choose another input in Audio settings.",
+						)
+						.size(12.0)
+						.color(colors.warning),
+					);
+				}
 				ui.horizontal(|ui| {
 					ui.spacing_mut().item_spacing.x = 10.0;
 					// Square status tile like Discord's, tinted with the connection colour.
