@@ -1,6 +1,6 @@
 # Linux packages
 
-Release builds provide native packages for Ubuntu 26.04 (`apt`), Fedora 44 (`dnf`),
+Release builds target native packages for Ubuntu 26.04 (`apt`), Fedora 43/44 (`dnf`),
 openSUSE Tumbleweed (`zypper`) and Arch (`pacman`), plus a
 [Flatpak bundle](../flatpak/README.md) for distributions with a compatible Flatpak runtime.
 The [AppImage](../appimage/README.md) supports in-app updates on Linux x86_64 with
@@ -10,6 +10,7 @@ Download the file labelled for your distribution from
 
 ```sh
 sudo apt install ./serein-*.deb                     # Ubuntu 26.04
+sudo dnf install ./serein-*.fc43.*.rpm              # Fedora 43
 sudo dnf install ./serein-*.fc44.*.rpm              # Fedora 44
 sudo zypper install ./serein-*.suse.*.rpm           # openSUSE Tumbleweed
 sudo pacman -U ./serein-*.pkg.tar.zst               # Arch

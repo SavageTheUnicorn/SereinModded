@@ -25,6 +25,9 @@ jobs:
           - distribution: ubuntu-26.04
             image: ubuntu:26.04
             format: deb
+          - distribution: fedora-43
+            image: fedora:43
+            format: rpm
           - distribution: fedora-44
             image: fedora:44
             format: rpm

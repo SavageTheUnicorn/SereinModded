@@ -36,6 +36,15 @@ flatpak install --user packaging/flatpak/serein.flatpakref
 Once installed via `.flatpakref`, your desktop environment (GNOME Software, KDE Discover)
 and `flatpak update` will automatically discover and install new releases.
 
+If installation reports `No such ref 'app/org.serein.desktop/x86_64/master'`,
+check that the hosted `flatpak/repo/summary` exists. Publishing the `.flatpakref`
+alone is insufficient. The package-repository workflow imports the release's
+checksum-verified Flatpak bundle and requires the app ref before uploading the
+site; missing bundles or refs fail publishing. To repair an incomplete site,
+run the corrected workflow with deployment enabled for a release tag containing
+all native build-matrix assets (including Fedora 43) and the Flatpak bundle.
+Until it is republished, use the standalone release bundle below.
+
 The in-app **Settings -> Updates** screen automatically detects when Serein is running
 inside Flatpak, checks GitHub releases, and prompts you to update through `flatpak update`
 or your desktop software manager when a new release is available.
