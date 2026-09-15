@@ -1,6 +1,6 @@
 # DM and server voice
 
-The standard build implements native audio calls in existing one-to-one Discord DMs and guild voice channels. It uses the owner's existing account, Discord signaling/voice servers, Opus and DAVE version 1. There is no bot, project relay, separate account, recording service or webview call UI. **Live Discord interoperability and physical microphone/speaker behavior have not been tested; milestone 4 has not passed.**
+The standard build implements native audio calls in existing one-to-one and group Discord DMs and guild voice channels. It uses the owner's existing account, Discord signaling/voice servers, Opus and DAVE version 1. There is no bot, project relay, separate account, recording service or webview call UI. **Live Discord interoperability and physical microphone/speaker behavior have not been tested; milestone 4 has not passed.**
 
 ```sh
 cargo run --locked
@@ -35,7 +35,7 @@ Reset levels, mute/deafen/PTT precedence and changing devices while custom level
 
 Start calls the selected existing DM; incoming calls require Answer or Decline. One active call is retained while navigating text conversations. Start rings once after Discord voice transport allocation is confirmed; Answer never rings. Required DAVE group readiness and native device readiness precede the connected-audio state. An allocation with no endpoint waits within the deadline; incompatible states fail visibly. Hangup closes local audio immediately and sends departure; another call waits for the service's departure acknowledgment. No uncertain ring write or failed main Gateway session automatically starts another call.
 
-Opening a one-to-one DM also requests its existing call state. An ongoing call shows a
+Opening a one-to-one or group DM also requests its existing call state. An ongoing call shows a
 **Call in progress** banner and **Join call**, even after ringing stops or this device leaves.
 Join uses the existing connection flow without ringing again; browsing never joins or opens
 audio devices. Incoming ringing retains Answer/Decline. Join is disabled while offline, in a
@@ -54,7 +54,29 @@ audio, leaving/rejoining while the peer stays, and disappearance after the peer 
 
 Mute/deafen, session-local input/output selection and focused V push-to-talk are implemented. Push-to-talk releases when focus is lost and is disabled while text entry has focus. It is not a global hotkey. Devices are initialized only following an explicit call and encrypted readiness; no microphone test runs at startup. Acoustic echo cancellation is enabled automatically; see below for its limits. When opening call audio, an unavailable selected input or output falls back independently to its system default. The saved selection is retained for future opens. If no default is available or opening it fails, the call still reports an audio-device failure.
 
-DM calls accept only their expected peer. Server calls support up to 64 total participants, with independent bounded decoder/jitter state and mixed mono playback. Only DAVE version 1 is accepted; encryption downgrades and group identities outside the authenticated participant roster fail closed. Group DMs, Stage channels, recording and incoming video are unsupported. Outgoing screen sharing and macOS camera support is described below. Voice WebSocket resumption has a finite retry budget; failed resumption or main Gateway disconnect requires an explicit new call. Voice credentials, ephemeral DAVE identities and audio stay in bounded session memory. The displayed privacy code applies to the current group epoch; identities are not remembered across calls. Comparing codes does not establish long-term identity verification or text-message encryption.
+One-to-one DM calls accept only their expected peer. Group DM and server calls support up to 64 total participants, with independent bounded decoder/jitter state and mixed mono playback. Only DAVE version 1 is accepted; encryption downgrades and group identities outside the authenticated participant roster fail closed. Stage channels and recording are unsupported. Outgoing screen sharing and macOS camera support is described below. Voice WebSocket resumption has a finite retry budget; failed resumption or main Gateway disconnect requires an explicit new call. Voice credentials, ephemeral DAVE identities and audio stay in bounded session memory. The displayed privacy code applies to the current group epoch; identities are not remembered across calls. Comparing codes does not establish long-term identity verification or text-message encryption.
+
+## Group DM calls
+
+Existing group conversations expose the same Start/Answer/Decline/Join controls, call stage,
+mute/deafen, audio device and gain controls, focused push-to-talk, noise suppression,
+privacy code, camera, screen sharing and stream viewing as one-to-one calls. Opening the
+conversation only requests call presence. Starting a new call rings the group once; joining
+or answering an existing call does not ring again. Group avatars identify incoming calls.
+The shared grid fits the participant tiles in the stage while text chat remains available.
+
+Group membership uses the authenticated voice-server roster and the existing DAVE transition
+validation, rather than pinning the first recipient as a one-to-one peer. Call metadata admits
+only this account and known group recipients, rejects duplicate participants, and is bounded
+to 64 participants per call. Recipient removal drops stale participant/watch UI state; removal
+of this account closes local media and revokes subsequent call actions.
+
+The offline debug command is `cargo run --locked -p serein --example group_call`.
+Group signaling remains unofficial and live-unverified. For owner-controlled verification,
+repeat the one-to-one gate below in a private group whose participating clients the owner
+controls, including simultaneous speech, additions/removals, ringing/decline/join, camera,
+sharing/viewing, last-peer departure/rejoin, and removal of this account. This local `!fast`
+implementation pass does not establish production readiness or physical media behavior.
 
 ## Protocol classification
 

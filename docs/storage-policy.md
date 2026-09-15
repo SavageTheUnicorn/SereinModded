@@ -458,9 +458,12 @@ heartbeat sequencing after unsupported dispatches. No live interoperability clai
 
 ### Existing DM call presence
 
-Session memory keeps at most 64 ongoing one-to-one DM channel IDs (512 bytes of ID storage,
+Session memory keeps at most 64 ongoing one-to-one or group DM channel IDs (512 bytes of ID storage,
 plus the Vec header), independently of the active local media session and incoming ringing.
-No voice secrets, participant payloads, audio, or new disk entries are retained for this list.
+Alongside those IDs, at most 64 call rosters retain 64 fixed-size Participant slots each
+(65,536 participant bytes on 64-bit targets, plus vector/channel headers). These contain
+only user IDs and mute/deafen/video/streaming flags. No voice secrets, audio or new disk
+entries are retained for this list.
 Duplicate updates reuse an entry; at capacity, the oldest entry is evicted. Opening a DM
 requests its call state again through the bounded existing command/signaling queues. There
 is no background polling or all-DM subscription. Deletion/unavailability or channel removal

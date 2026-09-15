@@ -1992,6 +1992,19 @@ impl State {
 					.find(|c| c.id == channel && c.guild.is_none())
 				{
 					c.recipients.retain(|u| u.id != user);
+					for (id, participants) in &mut self.voice.dm_participants {
+						if *id == channel {
+							participants.retain(|p| p.user != user);
+						}
+					}
+					if let Some(call) = &mut self.voice.active
+						&& call.channel == channel
+					{
+						call.participants.retain(|p| p.user != user);
+						if call.watching == Some(user) {
+							call.watching = None;
+						}
+					}
 					if self.selected == Some(channel) && self.members.is_some() {
 						let _ = self.request_members();
 					}

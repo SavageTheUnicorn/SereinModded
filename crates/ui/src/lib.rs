@@ -1558,7 +1558,11 @@ impl MessagingUi {
 								commands.push(state.history(None));
 							}
 						}
-						if let Some(channel) = state.selected.filter(|_| dm) {
+						if let Some(channel) = state.selected.filter(|_| {
+							channel
+								.as_ref()
+								.is_some_and(|c| c.guild.is_none() && matches!(c.kind, 1 | 3))
+						}) {
 							self.voice_settings(ui, state.demo, state.voice.active.is_some());
 							self.call_button(ui, state, channel, commands);
 						}
