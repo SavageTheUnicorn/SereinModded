@@ -794,6 +794,15 @@ No account data, credentials or separate preference is stored. The entry runs on
 at the next graphical login; it has no KeepAlive or immediate launch. Demo mode
 keeps startup changes in memory. OS login-item restrictions remain authoritative.
 
+
+### Per-participant voice volume
+
+The UI lazily retains one fixed 64-slot table of user IDs and integer percentages
+(1,024 bytes of entry storage). The voice watch control holds one fixed table of the same
+size, copied by the transport for a tick; changes replace the existing control value without
+adding a queue. Values are clamped to 0–200 before mixing. A full UI table replaces its first
+retained entry; reset releases a slot. Logout/preview reset clears the table. No SQLite,
+credential-store, network setting write, or diagnostics payload is added.
 Chat author role IDs are session-only message metadata (at most 512 IDs per message),
 counted in the existing timeline byte budget and omitted from SQLite. Names use
 the current guild role catalog, preferring loaded member rows over message role IDs;
