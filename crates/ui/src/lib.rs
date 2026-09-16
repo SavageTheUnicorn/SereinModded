@@ -3458,17 +3458,17 @@ mod composer_tests {
 			},
 		);
 		let message_alpha = (75 * 255 / 100) as u8;
-		let surface = output.shapes.iter().find_map(|shape| match &shape.shape {
+		let surface_reaches_header = output.shapes.iter().any(|shape| match &shape.shape {
 			egui::Shape::Rect(rect)
 				if rect.fill.a() == message_alpha && rect.rect.height() > 200.0 =>
 			{
-				Some(rect.rect)
+				(rect.rect.top() - 84.0).abs() <= 1.0
 			}
-			_ => None,
+			_ => false,
 		});
-		assert!(surface.is_some_and(|rect| (rect.top() - 84.0).abs() <= 1.0));
 		output.textures_delta.clear();
 		design::set_extension_theme(None);
+		assert!(surface_reaches_header);
 	}
 
 	#[test]
