@@ -159,6 +159,13 @@ when no call is active; late updates cannot repopulate an inaccessible channel.
 
 ## Diagnosing a call that never opens audio
 
+Windows call playback uses the selected speaker's default shared-mode mix format,
+with the existing resampler converting 48 kHz call audio when needed. This avoids
+choosing a converted format solely by enumeration order. Speaker-open errors
+distinguish busy, disconnected, unsupported-format and permission failures when
+the audio backend identifies them. This fast local change still needs a retry on
+an affected Windows device; it does not establish that every reported failure is fixed.
+
 Call progress distinguishes requesting allocation, connecting to the voice server, checking the
 UDP network path, securing audio, and opening audio devices. Negotiation errors identify the
 missing server Hello/Ready, transport key, DAVE group or transition execution. These are bounded,
