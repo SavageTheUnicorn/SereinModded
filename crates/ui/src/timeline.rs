@@ -212,9 +212,9 @@ fn anchor_offset(rows: &[(Id, f32)], id: Id, inset: f32) -> f32 {
 }
 fn layout_key(message: &Message) -> u64 {
 	// A layout fingerprint only; spoiler visibility uses exact text instead.
+	// Reaction counts are excluded so a +1/-1 does not drop measured heights.
 	let mut key = DefaultHasher::new();
 	message.content.hash(&mut key);
-	message.reactions.hash(&mut key);
 	for user in &message.mentions {
 		user.id.hash(&mut key);
 		user.name.hash(&mut key);
