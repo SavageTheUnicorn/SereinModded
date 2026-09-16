@@ -2,6 +2,12 @@
 
 Target platforms are Windows, macOS and Linux. **macOS arm64, Windows x64 and Linux x64 have local build evidence.** macOS has native visual checks; Windows has offline tests and a process/window startup smoke check only. Minimum OS versions, other architectures, real screen-reader support and native login-method support are not certified.
 
+Windows defaults to DirectX 12 to avoid reported startup access violations in Intel's
+Vulkan driver (`igvk64.dll`). The existing `WGPU_BACKEND` environment override remains
+available (for example, `dx12` or `vulkan`). Affected users confirmed that forcing
+DX12 launches successfully; the new default still needs native Windows validation.
+macOS and Linux retain their existing backend defaults.
+
 The custom title strip requests a native window move on the initial primary-button press,
 including over its nonselectable context title. It does not wait for egui's text/drag threshold.
 Caption buttons and other clickable title-strip controls keep their own actions; Windows

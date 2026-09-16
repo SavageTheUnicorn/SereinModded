@@ -127,6 +127,13 @@ fn main() -> eframe::Result {
 		wgpu_options: eframe::egui_wgpu::WgpuConfiguration {
 			wgpu_setup: eframe::egui_wgpu::WgpuSetup::CreateNew(
 				eframe::egui_wgpu::WgpuSetupCreateNew {
+					// Avoid Intel Vulkan driver startup crashes; keep the diagnostic override.
+					#[cfg(target_os = "windows")]
+					instance_descriptor: eframe::wgpu::InstanceDescriptor {
+						backends: eframe::wgpu::Backends::from_env()
+							.unwrap_or(eframe::wgpu::Backends::DX12),
+						..eframe::wgpu::InstanceDescriptor::new_without_display_handle_from_env()
+					},
 					// Prefer the efficient adapter; retain the native diagnostic override.
 					power_preference: eframe::wgpu::PowerPreference::from_env()
 						.unwrap_or(eframe::wgpu::PowerPreference::LowPower),
