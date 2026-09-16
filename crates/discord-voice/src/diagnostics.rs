@@ -310,7 +310,7 @@ impl Metrics {
 	}
 
 	/// Queue the current aggregates before a potentially blocking native operation.
-	#[cfg_attr(not(any(target_os = "windows", target_os = "linux")), allow(dead_code))]
+	#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 	pub fn checkpoint(&mut self) {
 		self.flush();
 	}

@@ -35,6 +35,7 @@ pub(crate) struct Config {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Profile {
 	Baseline,
+	#[cfg_attr(target_os = "linux", allow(dead_code))]
 	Main,
 }
 
