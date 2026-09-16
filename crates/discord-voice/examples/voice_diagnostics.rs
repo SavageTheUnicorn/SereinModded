@@ -1,4 +1,5 @@
 // Offline check of the production aggregation, queue and output limits. No devices/network.
+#![allow(dead_code)] // Platform-specific production counters are not all exercised here.
 include!("../src/diagnostics.rs");
 
 fn main() {

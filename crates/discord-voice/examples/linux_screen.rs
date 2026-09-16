@@ -3,6 +3,7 @@
 // This runnable debug example includes implementation modules, not their unit-test harnesses.
 #![cfg(not(test))]
 #![allow(dead_code)]
+#![allow(clippy::duplicate_mod)] // Crate-root shims and screen.rs share production modules.
 #[cfg(target_os = "linux")]
 #[path = "../src/screen.rs"]
 mod screen;
