@@ -241,6 +241,9 @@ impl MessagingUi {
 								},
 							);
 						}
+						if entry.participant.streaming {
+							live_badge(ui);
+						}
 						let response = ui
 							.allocate_ui_with_layout(
 								egui::vec2(ui.available_width(), 28.0),
@@ -2723,6 +2726,22 @@ fn status_icon(ui: &mut egui::Ui, deafened: bool, label: &str) {
 	response.on_hover_text(label);
 }
 
+/// Discord's LIVE pill, sized for the channel list row rather than a stage tile.
+fn live_badge(ui: &mut egui::Ui) {
+	let (rect, response) = ui.allocate_exact_size(egui::vec2(32.0, 16.0), egui::Sense::hover());
+	let colors = design::palette(ui);
+	ui.painter().rect_filled(rect, 4, colors.danger);
+	ui.painter().text(
+		rect.center(),
+		egui::Align2::CENTER_CENTER,
+		"LIVE",
+		egui::FontId::new(9.0, design::medium_family(ui.ctx())),
+		egui::Color32::WHITE,
+	);
+	response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, "Live"));
+	response.on_hover_text("Streaming");
+}
+
 fn device_combo(
 	ui: &mut egui::Ui,
 	id: &str,
@@ -3388,6 +3407,87 @@ mod tests {
 				.unwrap()
 				.contains("Voice is unavailable")
 		);
+	}
+
+	#[test]
+	fn voice_roster_marks_streaming_participants_live() {
+		let mut state = test_support::demo_state();
+		state.voice.roster = vec![RosterEntry {
+			guild: Id(10),
+			channel: Id(25),
+			participant: client_core::voice::Participant {
+				user: Id(1),
+				muted: false,
+				deafened: false,
+				server_muted: false,
+				server_deafened: false,
+				video: false,
+				streaming: true,
+			},
+			member: Some(model::Member {
+				user: model::User {
+					id: Id(1),
+					name: "i play baal".into(),
+					avatar: None,
+					webhook: false,
+					kind: Default::default(),
+					discriminator: 0,
+				},
+				nick: None,
+				roles: vec![],
+				status: None,
+				custom_status: None,
+				activities: vec![],
+			}),
+		}];
+		let mut messaging = MessagingUi::default();
+		let ctx = egui::Context::default();
+		let output = ctx.run_ui(
+			egui::RawInput {
+				screen_rect: Some(egui::Rect::from_min_size(
+					egui::Pos2::ZERO,
+					egui::vec2(190.0, 120.0),
+				)),
+				..Default::default()
+			},
+			|ui| messaging.voice_participant(ui, &state, &state.voice.roster[0]),
+		);
+		let texts: Vec<_> = output
+			.shapes
+			.iter()
+			.filter_map(|shape| match &shape.shape {
+				egui::Shape::Text(text) => Some(text.galley.job.text.as_str()),
+				_ => None,
+			})
+			.collect();
+		assert!(
+			texts.contains(&"LIVE"),
+			"Streamers get a LIVE pill: {texts:?}"
+		);
+		assert!(
+			texts.iter().any(|text| text.contains("i play baal")),
+			"The name stays alongside the pill: {texts:?}"
+		);
+		output.drop_without_applying_deltas();
+		state.voice.roster[0].participant.streaming = false;
+		let output = ctx.run_ui(
+			egui::RawInput {
+				screen_rect: Some(egui::Rect::from_min_size(
+					egui::Pos2::ZERO,
+					egui::vec2(190.0, 120.0),
+				)),
+				..Default::default()
+			},
+			|ui| messaging.voice_participant(ui, &state, &state.voice.roster[0]),
+		);
+		assert!(
+			!output.shapes.iter().any(|shape| matches!(
+				&shape.shape,
+				egui::Shape::Text(text) if text.galley.job.text == "LIVE"
+			)),
+			"Idle participants keep a plain row"
+		);
+		output.drop_without_applying_deltas();
 	}
 
 	#[test]
