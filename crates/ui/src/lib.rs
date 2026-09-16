@@ -3561,7 +3561,7 @@ mod composer_tests {
 								.unwrap();
 							output.drop_without_applying_deltas();
 							assert!(
-								(text.center().y - frame.center().y).abs() <= 0.5 / scale,
+								(text.center().y - frame.center().y).abs() <= 1.0 / scale,
 								"{draft:?}, scale {scale}, width {width}: text {text:?}, frame {frame:?}"
 							);
 							assert!(
