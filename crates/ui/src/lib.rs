@@ -445,6 +445,13 @@ impl MessagingUi {
 			};
 		}
 	}
+	/// A local Rich Presence client asked to show an invite. It is only prefilled here:
+	/// the user still confirms the lookup and the join.
+	pub fn open_rpc_invite(&mut self, generation: u64, code: String) {
+		if invites::input_code(&code).is_some() {
+			self.join_server.open_with(generation, code);
+		}
+	}
 	/// Fixture-only: open the join-server dialog at startup.
 	#[cfg(any(test, feature = "demo"))]
 	pub fn preview_join_server(&mut self, generation: u64) {
