@@ -52,6 +52,49 @@ pub(crate) fn insert(
 	Some(start + inserted)
 }
 
+/// Replace an exact completed Unicode shortcode immediately before the caret.
+pub(crate) fn complete_shortcode(
+	draft: &mut String,
+	cursor: usize,
+	remaining: usize,
+) -> Option<usize> {
+	let end = draft
+		.char_indices()
+		.nth(cursor)
+		.map_or(draft.len(), |(index, _)| index);
+	let prefix = draft[..end].strip_suffix(':')?;
+	let start = prefix.rfind(':')?;
+	if prefix[..start]
+		.chars()
+		.next_back()
+		.is_some_and(|c| !c.is_whitespace() && !matches!(c, '(' | '[' | '{'))
+	{
+		return None;
+	}
+	let name = &prefix[start + 1..];
+	if !(2..=64).contains(&name.chars().count()) {
+		return None;
+	}
+	let emoji = standard()
+		.iter()
+		.zip(shortcodes())
+		.find_map(|((emoji, _), code)| {
+			code[1..code.len() - 1]
+				.eq_ignore_ascii_case(name)
+				.then_some(*emoji)
+		})?;
+	let start = draft[..start].chars().count();
+	insert(
+		draft,
+		emoji,
+		Some(egui::text::CCursorRange::two(
+			egui::text::CCursor::new(start),
+			egui::text::CCursor::new(cursor),
+		)),
+		remaining,
+	)
+}
+
 pub(crate) fn standard() -> &'static [(&'static str, &'static str)] {
 	static ENTRIES: OnceLock<Vec<(&'static str, &'static str)>> = OnceLock::new();
 	ENTRIES.get_or_init(|| {
@@ -1990,6 +2033,20 @@ mod tests {
 		assert_eq!(insert(&mut draft, "👍", selection, 0), Some(1));
 		assert_eq!(draft, "👍");
 		assert_eq!(draft.capacity(), 4);
+	}
+
+	#[test]
+	fn completed_shortcode_becomes_unicode_at_the_caret() {
+		let mut draft = "look :eyes: here :eyes:".to_owned();
+		assert_eq!(complete_shortcode(&mut draft, 11, 0), Some(6));
+		assert_eq!(draft, "look 👀 here :eyes:");
+		assert_eq!(complete_shortcode(&mut draft, 18, 0), Some(13));
+		assert_eq!(draft, "look 👀 here 👀");
+		for literal in ["word:eyes:", "https:", "<:eyes:", ":unknown:"] {
+			let mut draft = literal.to_owned();
+			let cursor = draft.chars().count();
+			assert_eq!(complete_shortcode(&mut draft, cursor, 0), None);
+		}
 	}
 
 	#[test]

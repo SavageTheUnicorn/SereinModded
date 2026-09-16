@@ -2292,6 +2292,19 @@ impl MessagingUi {
                             edit_state.store(ctx, composer_id);
                             mention_changed = true;
                         }
+						if mention_enabled
+							&& let Some(cursor) = cursor
+							&& let Some(cursor) =
+								emoji_picker::complete_shortcode(draft, cursor, remaining)
+						{
+							let mut edit_state = egui::text_edit::TextEditState::load(ctx, composer_id)
+								.unwrap_or_default();
+							edit_state.cursor.set_char_range(Some(egui::text::CCursorRange::one(
+								egui::text::CCursor::new(cursor),
+							)));
+							edit_state.store(ctx, composer_id);
+							mention_changed = true;
+						}
                         if keyboard_enabled
                             && !self.ime_active
                             && !ime_this_frame
