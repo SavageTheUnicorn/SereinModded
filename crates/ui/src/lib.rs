@@ -11,6 +11,7 @@ pub use attachments::DownloadUi;
 mod avatars;
 pub use avatars::{EMBED_EDGE, GifFrames, LARGE_EDGE, fit_edge};
 mod categories;
+mod channel_marks;
 mod channel_menu;
 mod channel_permissions;
 #[cfg(test)]
@@ -2501,6 +2502,9 @@ impl MessagingUi {
 			.hline(line, y, egui::Stroke::new(1.0, colors.border));
 		ui.add_space(6.0);
 	}
+	fn shows_title_bar(&self) -> bool {
+		!cfg!(target_os = "linux") && !self.hide_title_bar
+	}
 	pub fn show(&mut self, ui: &mut egui::Ui, state: &mut State) -> Vec<Command> {
 		if self.editing.is_none()
 			&& let Some(index) = state
@@ -2656,7 +2660,7 @@ impl MessagingUi {
 			.guild
 			.and_then(|id| state.guild(id))
 			.map_or_else(|| "Direct Messages".to_owned(), |g| g.name.clone());
-		if !cfg!(target_os = "linux") && !self.hide_title_bar {
+		if self.shows_title_bar() {
 			self.title_bar(ui, state, &title);
 		}
 		// Server rail and channel list share one resizable column so the account card can
@@ -3458,17 +3462,21 @@ mod composer_tests {
 			},
 		);
 		let message_alpha = (75 * 255 / 100) as u8;
+		let expected_top = if view.shows_title_bar() { 84.0 } else { 48.0 };
 		let surface_reaches_header = output.shapes.iter().any(|shape| match &shape.shape {
 			egui::Shape::Rect(rect)
 				if rect.fill.a() == message_alpha && rect.rect.height() > 200.0 =>
 			{
-				(rect.rect.top() - 84.0).abs() <= 1.0
+				(rect.rect.top() - expected_top).abs() <= 1.0
 			}
 			_ => false,
 		});
 		output.textures_delta.clear();
 		design::set_extension_theme(None);
-		assert!(surface_reaches_header);
+		assert!(
+			surface_reaches_header,
+			"message surface did not reach expected top {expected_top}",
+		);
 	}
 
 	#[test]

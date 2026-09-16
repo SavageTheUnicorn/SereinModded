@@ -1,4 +1,6 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+#[cfg(feature = "demo")]
+mod access_marks_demo;
 mod app_settings;
 mod audio;
 mod avatars;
@@ -69,6 +71,11 @@ fn main() -> eframe::Result {
 				std::process::exit(2);
 			})
 		});
+	#[cfg(feature = "demo")]
+	if demo && std::env::args().any(|arg| arg == "--demo-check-access-marks") {
+		access_marks_demo::check();
+		return Ok(());
+	}
 	#[cfg(feature = "demo")]
 	if demo && std::env::args().any(|arg| arg == "--demo-check-switcher") {
 		dm_demo::check();
@@ -921,6 +928,7 @@ impl Desktop {
 				} else {
 					let mut state = test_support::demo_state();
 					test_support::seed_demo_folder_mosaic(&mut state);
+					test_support::seed_access_marks(&mut state);
 					state
 				}
 			};
@@ -1074,6 +1082,7 @@ impl Desktop {
 				messaging
 					.channel_preferences
 					.set(model::Shortcut::Favorite, model::Id(20), true);
+			messaging.show_hidden_channels = true;
 		}
 		#[cfg(feature = "demo")]
 		if frame_sample.is_some() {
@@ -3000,8 +3009,10 @@ impl Desktop {
 					let generation = self.state.generation + 1;
 					self.state = test_support::demo_state();
 					test_support::seed_demo_folder_mosaic(&mut self.state);
+					test_support::seed_access_marks(&mut self.state);
 					self.state.generation = generation;
 					self.messaging.clear();
+					self.messaging.show_hidden_channels = true;
 				}
 				ui.add_space(8.0);
 				ui.vertical_centered(|ui| {
