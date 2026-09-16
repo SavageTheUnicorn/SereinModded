@@ -2354,35 +2354,43 @@ impl MessagingUi {
                             );
                             rich_layout.select_deleted_inline(ctx, composer_id);
                         }
-                        let mut layouter = |ui: &egui::Ui, buffer: &dyn egui::TextBuffer, width: f32| {
-                            rich_layout.galley(
-                                ui,
-                                buffer.as_str(),
-                                width,
-                                &mention_users,
-                                mass_mentions,
-                                &mut self.avatars,
-                                demo,
-                            )
-                        };
-                        let mut output = TextEdit::multiline(draft)
-                            .interactive(keyboard_enabled)
-                            .layouter(&mut layouter)
-                            .id(composer_id)
-                            .event_filter(egui::EventFilter {
-                                horizontal_arrows: true, vertical_arrows: true, escape: editing_here,
-                                ..Default::default()
-                            })
-                            .char_limit(MAX_CONTENT)
-                            .desired_rows(1)
-                            .desired_width(f32::INFINITY)
-                            // Horizontal layouts reserve the interaction height, including around icons.
-                            .min_size(egui::vec2(0.0, ui.spacing().interact_size.y))
-                            .align(egui::Align2::LEFT_CENTER)
-                            .frame(egui::Frame::NONE)
-                            .hint_text(placeholder.as_str())
-                            .show(ui);
-                        rich_layout.paint(ui, &output);
+                        let mut output = egui::ScrollArea::vertical()
+                            .id_salt((composer_id, channel, editing_key))
+                            .max_height(ui.ctx().viewport_rect().height() * 0.5)
+                            .min_scrolled_height(ui.ctx().viewport_rect().height() * 0.5)
+                            .auto_shrink([false, true])
+                            .show(ui, |ui| {
+                                let mut layouter = |ui: &egui::Ui, buffer: &dyn egui::TextBuffer, width: f32| {
+                                    rich_layout.galley(
+                                        ui,
+                                        buffer.as_str(),
+                                        width,
+                                        &mention_users,
+                                        mass_mentions,
+                                        &mut self.avatars,
+                                        demo,
+                                    )
+                                };
+                                let output = TextEdit::multiline(draft)
+                                    .interactive(keyboard_enabled)
+                                    .layouter(&mut layouter)
+                                    .id(composer_id)
+                                    .event_filter(egui::EventFilter {
+                                        horizontal_arrows: true, vertical_arrows: true, escape: editing_here,
+                                        ..Default::default()
+                                    })
+                                    .char_limit(MAX_CONTENT)
+                                    .desired_rows(1)
+                                    .desired_width(f32::INFINITY)
+                                    // Horizontal layouts reserve the interaction height, including around icons.
+                                    .min_size(egui::vec2(0.0, ui.spacing().interact_size.y))
+                                    .align(egui::Align2::LEFT_CENTER)
+                                    .frame(egui::Frame::NONE)
+                                    .hint_text(placeholder.as_str())
+                                    .show(ui);
+                                rich_layout.paint(ui, &output);
+                                output
+                            }).inner;
                         if !self.ime_active && !ime_this_frame {
                             rich_layout.snap_cursor(&mut output, ctx);
                         }
