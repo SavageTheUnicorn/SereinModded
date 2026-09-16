@@ -622,7 +622,12 @@ mod tests {
 			budget: Arc::new(Budget::default()),
 			history: Arc::new(HistorySafety::default()),
 		};
-		for enabled in [true, false] {
+		let initial = LocalStore::open(&path)
+			.unwrap()
+			.app_preferences()
+			.unwrap()
+			.notifications_enabled;
+		for enabled in [!initial, initial] {
 			let mut store = Ok(LocalStore::open(&path).unwrap());
 			let mut settings = crate::app_settings::Settings {
 				current: store.as_ref().unwrap().app_preferences().unwrap(),

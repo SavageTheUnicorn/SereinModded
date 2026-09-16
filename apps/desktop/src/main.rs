@@ -4756,7 +4756,7 @@ mod tests {
 			.into_iter()
 			.find(|c| c.id == channel)
 			.unwrap();
-		restored.kind = 2;
+		restored.kind = 4; // Categories do not support text; voice channels do.
 		state.channels.push(restored);
 		hydrate_cached_history(
 			&mut state,
