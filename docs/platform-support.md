@@ -182,7 +182,3 @@ build 20348+ (Windows 11 / Server 2022), with a visible audio error on older sys
 Both exclude Serein's playback and capture other applications even when sharing one
 window. There is no whole-output fallback. Hardware exclusion and receiving sound in
 an official client remain unverified.
-
-macOS development checks that compile the Linux media adapter require
-`brew install gstreamer pulseaudio`. The standard macOS application does not link
-libpulse, and ordinary tests never start its server or access audio devices.

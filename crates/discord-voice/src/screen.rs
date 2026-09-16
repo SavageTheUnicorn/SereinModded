@@ -1,7 +1,6 @@
 //! Explicitly selected, memory-only screen capture and H.264 encoding.
 pub use client_core::screen::{Settings, Source, SourceId};
-#[cfg(any(target_os = "linux", all(test, target_os = "macos")))]
-#[cfg_attr(all(test, target_os = "macos"), allow(dead_code))]
+#[cfg(target_os = "linux")]
 #[path = "screen/audio_linux.rs"]
 mod audio_linux;
 #[cfg(all(test, not(target_os = "windows")))]

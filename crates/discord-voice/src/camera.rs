@@ -11,10 +11,7 @@ use std::sync::{
 };
 use std::{thread, time::Duration};
 
-// Compiled under macOS tests too, matching `screen::audio_linux`, so the Linux-only encoder
-// keeps building where most development happens.
-#[cfg(any(target_os = "linux", all(test, target_os = "macos")))]
-#[cfg_attr(all(test, target_os = "macos"), allow(dead_code))]
+#[cfg(target_os = "linux")]
 #[path = "camera/encode_linux.rs"]
 mod encode_linux;
 #[cfg(target_os = "linux")]

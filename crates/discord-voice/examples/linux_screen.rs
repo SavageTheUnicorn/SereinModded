@@ -3,43 +3,42 @@
 // This runnable debug example includes implementation modules, not their unit-test harnesses.
 #![cfg(not(test))]
 #![allow(dead_code)]
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[path = "../src/screen.rs"]
 mod screen;
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 use screen::{
 	AudioChunk, EncodedFrame, MAX_AUDIO_SAMPLES, MAX_ENCODED_BYTES, MAX_RAW_BYTES, RawFrame,
 	Settings, SourceId, encode_pixels, encoder, preview_frame,
 };
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[path = "../src/screen/audio_linux.rs"]
 mod audio_linux;
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[path = "../src/screen/gstreamer.rs"]
 mod gstreamer;
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[path = "../src/screen/linux.rs"]
 mod linux;
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[path = "../src/screen/portal_linux.rs"]
 mod portal_linux;
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[path = "../src/video.rs"]
 mod video;
 // The shared screen module reaches the platform encoders' keyframe check through this path.
-#[cfg(unix)]
-#[path = "../src/video_receive.rs"]
-mod video_receive;
-// Non-Linux builds of this offline example still compile the shared hardware encoder facade.
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[path = "../src/video_encode.rs"]
 mod video_encode;
+#[cfg(target_os = "linux")]
+#[path = "../src/video_receive.rs"]
+mod video_receive;
 // The application-audio worker reports its capture counters through the shared reporter.
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[path = "../src/diagnostics.rs"]
 mod diagnostics;
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn main() {
 	use ::gstreamer as gst;
 	use gstreamer::{Capture, Mode};
@@ -111,7 +110,7 @@ fn main() {
 		println!("Linux screen pipeline: synthetic preview, secure-readiness gates, application audio exclusion/bounded stereo mixing, software H.264 and portal pre-cancellation passed. Native Linux capture/GPU encoding remains unverified.");
 	});
 }
-#[cfg(not(unix))]
+#[cfg(not(target_os = "linux"))]
 fn main() {
-	eprintln!("This debug check requires Linux or macOS with GStreamer.");
+	eprintln!("This debug check requires Linux with GStreamer.");
 }

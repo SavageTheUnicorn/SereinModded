@@ -352,7 +352,7 @@ generation are discarded even if a pause and restart happen between worker itera
 Stop sharing and call teardown release audio together with the screen capture.
 
 The offline debug command is `cargo run --offline --locked -p discord-voice --example linux_screen`.
-It compiles the actual portal/pipeline/worker modules on Linux or macOS with GStreamer,
+It compiles the actual portal/pipeline/worker modules on Linux with GStreamer,
 checks pre-cancellation without D-Bus, and exercises synthetic preview, the secure-readiness
 gate, stereo audio, bounded slow-consumer behavior, oversized-buffer rejection and software
 H.264. It never captures a desktop or opens an audio device. Native Linux portal interaction,
