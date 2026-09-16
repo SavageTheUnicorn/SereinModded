@@ -54,7 +54,7 @@ impl MessagingUi {
 			.open_bool(&mut open)
 			.align(egui::RectAlign::TOP_START)
 			.close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-			.width(300.0)
+			.width(340.0)
 			.frame(
 				egui::Frame::popup(&anchor.ctx.style_of(anchor.ctx.theme()))
 					.fill(colors.raised)
@@ -62,7 +62,7 @@ impl MessagingUi {
 					.corner_radius(10),
 			)
 			.show(|ui| {
-				ui.set_width(300.0);
+				ui.set_width(340.0);
 				let height = (ui.ctx().content_rect().height() - 90.0).clamp(180.0, 620.0);
 				egui::ScrollArea::vertical()
 					.min_scrolled_height(height)
@@ -143,6 +143,25 @@ impl MessagingUi {
 			.show(ui, |ui| {
 				ui.set_width(ui.available_width());
 				self.account_identity_card(ui, state, commands);
+				if let Some(user) = &state.user {
+					let guild = state
+						.selected
+						.and_then(|id| state.channel(id))
+						.and_then(|c| c.guild);
+					let (_, _, activities) = profiles::presence(state, user.id, guild);
+					if !activities.is_empty() {
+						ui.add_space(8.0);
+						for activity in activities {
+							profiles::activity_card(
+								ui,
+								activity,
+								&mut self.avatars,
+								state.demo,
+								(colors.base, colors.muted),
+							);
+						}
+					}
+				}
 				ui.add_space(8.0);
 				ui.spacing_mut().item_spacing.y = 2.0;
 				self.account_status_row(ui);
