@@ -18,17 +18,14 @@ if (plan) assert.equal(channel, plan.channel, 'Release channel changed');
 const caskPath = 'Casks/serein.rb';
 
 function updateCask() {
-  const digest = arch => createHash('sha256')
-    .update(readFileSync(`release-assets/serein-${plan.gitTag}-macOS-${arch}.zip`))
-    .digest('hex');
+  const asset = `release-assets/serein-${plan.gitTag}-macOS-ARM64.zip`;
+  const checksum = createHash('sha256').update(readFileSync(asset)).digest('hex');
   const source = readFileSync(caskPath, 'utf8');
   assert.match(source, /^  version "[^"]+"$/m, 'Cannot locate Homebrew cask version');
-  assert.match(source, /^  sha256 arm: +"[0-9a-f]{64}",$/m, 'Cannot locate Homebrew cask arm checksum');
-  assert.match(source, /^ +intel: +"[0-9a-f]{64}"$/m, 'Cannot locate Homebrew cask intel checksum');
+  assert.match(source, /^  sha256 "[0-9a-f]{64}"$/m, 'Cannot locate Homebrew cask checksum');
   writeFileSync(caskPath, source
     .replace(/(^  version ")[^"]+("$)/m, `$1${plan.version}$2`)
-    .replace(/(^  sha256 arm: +")[^"]+("),$/m, `$1${digest('ARM64')}$2,`)
-    .replace(/(^ +intel: +")[^"]+("$)/m, `$1${digest('X64')}$2`));
+    .replace(/(^  sha256 ")[^"]+("$)/m, `$1${checksum}$2`));
 }
 
 function commitNightlyCask() {
