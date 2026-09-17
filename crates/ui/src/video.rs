@@ -103,7 +103,8 @@ impl VideoUi {
 			.show(ctx, |ui| {
 				ui.set_min_size(screen.size());
 				ui.set_max_size(screen.size());
-				let response = self.show_player(ui, message, attachment, true);
+				let response =
+					self.show_player(ui, message, attachment, true, download, opening, demo);
 				crate::attachments::media_context_menu(
 					&response, attachment, download, opening, demo,
 				);
@@ -201,15 +202,22 @@ impl VideoUi {
 		ui: &mut egui::Ui,
 		message: &Message,
 		attachment: &Attachment,
+		download: &mut crate::DownloadUi,
+		opening: &mut Option<String>,
+		demo: bool,
 	) -> egui::Response {
-		self.show_player(ui, message, attachment, false)
+		self.show_player(ui, message, attachment, false, download, opening, demo)
 	}
+	#[allow(clippy::too_many_arguments)]
 	fn show_player(
 		&mut self,
 		ui: &mut egui::Ui,
 		message: &Message,
 		attachment: &Attachment,
 		fullscreen: bool,
+		download: &mut crate::DownloadUi,
+		opening: &mut Option<String>,
+		demo: bool,
 	) -> egui::Response {
 		let colors = crate::design::palette(ui);
 		let active = self.active.as_ref().is_some_and(|(channel, id, file)| {
@@ -587,6 +595,55 @@ impl VideoUi {
 			);
 		}
 		self.controls_focused = controls_focused;
+		// Download/open controls stay visible regardless of load state, unlike the bottom bar.
+		// Added last so Tab order still reaches the playback controls first.
+		let overlay = egui::Rect::from_min_size(
+			egui::pos2(stage.left() + 8.0, stage.top() + 8.0),
+			egui::vec2((stage.width() - 16.0).max(0.0), 28.0),
+		);
+		ui.scope_builder(
+			egui::UiBuilder::new()
+				.max_rect(overlay)
+				.layout(egui::Layout::right_to_left(egui::Align::Min)),
+			|ui| {
+				ui.spacing_mut().item_spacing.x = 6.0;
+				let idle = !demo && !download.busy();
+				if ui
+					.add_enabled_ui(idle, |ui| {
+						crate::attachments::glass_button(
+							ui,
+							crate::icons::Icon::Download,
+							28.0,
+							"Download",
+						)
+					})
+					.inner
+					.on_disabled_hover_text(if demo {
+						"Downloads are disabled for synthetic attachments"
+					} else {
+						"A download is already active"
+					})
+					.clicked()
+				{
+					download.request = Some(attachment.clone());
+				}
+				if let Some(url) = attachment
+					.media
+					.url
+					.as_deref()
+					.and_then(crate::markdown::external_url)
+					&& crate::attachments::glass_button(
+						ui,
+						crate::icons::Icon::External,
+						28.0,
+						"Open original…",
+					)
+					.clicked()
+				{
+					*opening = Some(url);
+				}
+			},
+		);
 		if response.has_focus() {
 			ui.painter().rect_stroke(
 				stage,

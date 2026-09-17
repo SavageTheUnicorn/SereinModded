@@ -1,6 +1,7 @@
 //! Offline UI check, without a window, account, decoder, or audio device.
 //! cargo run --locked -p serein --features demo --example video_controls
 use eframe::egui;
+use ui::DownloadUi;
 
 fn frame(
 	ctx: &egui::Context,
@@ -193,7 +194,14 @@ fn main() {
 		compact
 			.run_ui(egui::RawInput::default(), |ui| {
 				ui.set_width(width);
-				view.video().show(ui, message, &message.attachments[0]);
+				view.video().show(
+					ui,
+					message,
+					&message.attachments[0],
+					&mut DownloadUi::default(),
+					&mut None,
+					false,
+				);
 				assert!(
 					ui.min_rect().width() <= width + 2.0,
 					"Compact video controls overflow"

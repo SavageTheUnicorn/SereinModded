@@ -324,7 +324,7 @@ pub fn show(
 			for attachment in group {
 				ui.push_id(("attachment", attachment.id), |ui| {
 					if attachment.is_video() {
-						let response = video.show(ui, message, attachment);
+						let response = video.show(ui, message, attachment, download, opening, demo);
 						surface.keep(&response);
 						media_context_menu(&response, attachment, download, opening, demo);
 					} else if attachment.is_audio() {
@@ -482,7 +482,7 @@ fn media_menu(
 	action
 }
 impl DownloadUi {
-	fn busy(&self) -> bool {
+	pub(crate) fn busy(&self) -> bool {
 		self.active
 			|| self.request.is_some()
 			|| self.copy_request.is_some()
@@ -534,7 +534,12 @@ fn gallery_step(attachments: &[Attachment], current: Id, previous: bool) -> Opti
 }
 
 /// Translucent round control floating over the viewer backdrop; always light-on-dark.
-fn glass_button(ui: &mut egui::Ui, icon: Icon, diameter: f32, label: &str) -> egui::Response {
+pub(crate) fn glass_button(
+	ui: &mut egui::Ui,
+	icon: Icon,
+	diameter: f32,
+	label: &str,
+) -> egui::Response {
 	let (rect, response) = ui.allocate_exact_size(egui::Vec2::splat(diameter), Sense::click());
 	let enabled = ui.is_enabled();
 	let hot = enabled && (response.hovered() || response.has_focus());
