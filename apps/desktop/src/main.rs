@@ -1219,6 +1219,14 @@ impl Desktop {
 		}
 		messaging.tray_available = platform::tray::supported();
 		let startup = startup::Startup::new(&cc.egui_ctx, &runtime, &mut messaging, demo);
+		// `--demo-update`: a pending release without any network check. The system title bar
+		// comes with it, since that is when the sidebar prompt stands in for the title strip.
+		#[cfg(feature = "demo")]
+		if demo && std::env::args().any(|arg| arg == "--demo-update") {
+			messaging.hide_title_bar = true;
+			// The demo updater owns the flags, so ask it for its synthetic release.
+			messaging.updates.check_requested = true;
+		}
 		#[cfg(feature = "demo")]
 		if demo && std::env::args().any(|arg| arg == "--demo-game-activity") {
 			messaging.share_game_activity = true;

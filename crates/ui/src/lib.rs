@@ -1239,13 +1239,20 @@ impl MessagingUi {
 			.show(ui, |ui| {
 				ui.set_width(ui.available_width());
 				ui.spacing_mut().item_spacing.y = 0.0;
-				if in_call {
-					self.voice_card_section(ui, state, commands);
+				let divider = |ui: &mut egui::Ui| {
 					let (line, _) = ui.allocate_exact_size(
 						egui::vec2(ui.available_width(), 1.0),
 						egui::Sense::hover(),
 					);
 					ui.painter().rect_filled(line, 0, colors.border);
+				};
+				if self.shows_update_banner() {
+					self.update_banner(ui);
+					divider(ui);
+				}
+				if in_call {
+					self.voice_card_section(ui, state, commands);
+					divider(ui);
 				}
 				egui::Frame::new()
 					.inner_margin(egui::Margin::symmetric(8, 6))
@@ -2781,12 +2788,26 @@ impl MessagingUi {
 			.show(ui, |ui| {
 				egui::Panel::bottom("account-footer")
 					.show_separator_line(false)
-					.frame(egui::Frame::new().inner_margin(egui::Margin {
-						left: 8,
-						right: 8,
-						top: 8,
-						bottom: 8,
-					}))
+					.frame(
+						egui::Frame::new()
+							// The card's strip continues the channel list, so a window image
+							// shows through it at the same opacity instead of full strength.
+							.fill(if design::has_window_background(ui) {
+								design::section_surface(
+									ui,
+									background.sidebar,
+									design::ImageSection::ChannelList,
+								)
+							} else {
+								egui::Color32::TRANSPARENT
+							})
+							.inner_margin(egui::Margin {
+								left: 8,
+								right: 8,
+								top: 8,
+								bottom: 8,
+							}),
+					)
 					.show(ui, |ui| self.account_card(ui, state, &mut commands));
 				self.notification_rail(ui, state, &mut commands);
 				// The lists sit on their own rounded surface beside the rail, above the card.

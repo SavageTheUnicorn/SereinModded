@@ -1,5 +1,5 @@
 //! Device update preferences and host-owned status. No transport or filesystem work lives here.
-use crate::{MessagingUi, design};
+use crate::{MessagingUi, design, icons};
 
 pub struct Updates {
 	pub auto_update: bool,
@@ -17,6 +17,8 @@ pub struct Updates {
 	pub restart_requested: bool,
 	pub copied_diagnostics: Option<f64>,
 	pub copied_command: Option<f64>,
+	/// Ready flag the sidebar banner was dismissed at, so a later stage prompts again.
+	pub banner_dismissed: Option<bool>,
 }
 impl Default for Updates {
 	fn default() -> Self {
@@ -36,10 +38,74 @@ impl Default for Updates {
 			restart_requested: false,
 			copied_diagnostics: None,
 			copied_command: None,
+			banner_dismissed: None,
 		}
 	}
 }
 impl MessagingUi {
+	/// Whether the account card grows an update row, which it does only while Serein's own
+	/// title bar is hidden: the title-bar button is the only other place the prompt appears.
+	pub(super) fn shows_update_banner(&mut self) -> bool {
+		if self.shows_title_bar() {
+			return false;
+		}
+		if !self.updates.available && !self.updates.ready {
+			self.updates.banner_dismissed = None;
+			return false;
+		}
+		self.updates.banner_dismissed != Some(self.updates.ready)
+	}
+
+	/// Update prompt stacked into the account card, the way a call grows its own section.
+	pub(super) fn update_banner(&mut self, ui: &mut egui::Ui) {
+		let ready = self.updates.ready;
+		let colors = design::palette(ui);
+		let (label, icon) = if ready {
+			("Restart to update", icons::Icon::Reload)
+		} else if self.updates.busy {
+			("Updating…", icons::Icon::Download)
+		} else {
+			("Update available", icons::Icon::Download)
+		};
+		let status = self.updates.status.clone();
+		let mut open = false;
+		let mut dismiss = false;
+		egui::Frame::new()
+			.inner_margin(egui::Margin::symmetric(8, 6))
+			.show(ui, |ui| {
+				ui.set_width(ui.available_width());
+				ui.horizontal(|ui| {
+					ui.spacing_mut().item_spacing.x = 8.0;
+					let (mark, _) =
+						ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::hover());
+					icons::paint(ui.painter(), icon, mark, colors.link);
+					ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+						dismiss =
+							icons::button(ui, icons::Icon::Close, 20.0, "Dismiss update").clicked();
+						ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+							open = ui
+								.add(
+									egui::Label::new(
+										design::medium(ui, label, 13.0).color(colors.link),
+									)
+									.truncate()
+									.selectable(false)
+									.sense(egui::Sense::click()),
+								)
+								.on_hover_text(status)
+								.clicked();
+						});
+					});
+				});
+			});
+		if dismiss {
+			self.updates.banner_dismissed = Some(ready);
+		}
+		if open {
+			self.open_update_settings();
+		}
+	}
+
 	/// Formats system and client environment details for GitHub issue reports.
 	pub fn diagnostic_info(&self, ctx: &egui::Context) -> String {
 		let os = std::env::consts::OS;
@@ -246,5 +312,151 @@ impl MessagingUi {
 		{
 			self.copy_diagnostic_info(ui.ctx());
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use crate::{MessagingUi, State};
+
+	/// Rectangles of the banner's text and icon shapes, in paint order.
+	fn scan(
+		ctx: &egui::Context,
+		view: &mut MessagingUi,
+		state: &mut State,
+	) -> (Vec<(String, egui::Rect)>, Vec<egui::Rect>) {
+		let output = ctx.run_ui(
+			egui::RawInput {
+				screen_rect: Some(egui::Rect::from_min_size(
+					egui::Pos2::ZERO,
+					egui::vec2(1200.0, 760.0),
+				)),
+				focused: true,
+				..Default::default()
+			},
+			|ui| {
+				view.show(ui, state);
+			},
+		);
+		let mut text = Vec::new();
+		let mut images = Vec::new();
+		fn walk(
+			shape: &egui::Shape,
+			text: &mut Vec<(String, egui::Rect)>,
+			images: &mut Vec<egui::Rect>,
+		) {
+			match shape {
+				egui::Shape::Text(shape) => text.push((
+					shape.galley.job.text.clone(),
+					egui::Rect::from_min_size(shape.pos, shape.galley.size()),
+				)),
+				egui::Shape::Mesh(mesh) => images.push(mesh.calc_bounds()),
+				egui::Shape::Vec(shapes) => {
+					for shape in shapes {
+						walk(shape, text, images);
+					}
+				}
+				_ => {}
+			}
+		}
+		for shape in &output.shapes {
+			walk(&shape.shape, &mut text, &mut images);
+		}
+		output.drop_without_applying_deltas();
+		(text, images)
+	}
+
+	fn banner(entries: &[(String, egui::Rect)]) -> Option<egui::Rect> {
+		entries
+			.iter()
+			.find(|(label, rect)| label == "Update available" && rect.top() > 100.0)
+			.map(|(_, rect)| *rect)
+	}
+
+	#[test]
+	fn hidden_title_bar_moves_the_update_prompt_above_the_account_card() {
+		let ctx = egui::Context::default();
+		crate::design::apply(&ctx);
+		let mut state = test_support::demo_state();
+		let mut view = MessagingUi::default();
+		view.updates.available = true;
+		scan(&ctx, &mut view, &mut state);
+		// With Serein's own title bar the prompt stays up there, not in the sidebar.
+		#[cfg(not(target_os = "linux"))]
+		assert!(banner(&scan(&ctx, &mut view, &mut state).0).is_none());
+		view.hide_title_bar = true;
+		let (text, _) = scan(&ctx, &mut view, &mut state);
+		let prompt = banner(&text).expect("sidebar update prompt");
+		let card = text
+			.iter()
+			.find(|(label, _)| label == "Your account" || label == "Kestrel")
+			.map(|(_, rect)| *rect);
+		if let Some(card) = card {
+			assert!(prompt.bottom() < card.top(), "{prompt:?} {card:?}");
+		}
+		assert!(prompt.left() < 400.0, "{prompt:?}");
+	}
+
+	#[test]
+	fn dismissing_the_banner_hides_it_until_the_update_is_ready() {
+		let ctx = egui::Context::default();
+		crate::design::apply(&ctx);
+		let mut state = test_support::demo_state();
+		let mut view = MessagingUi {
+			hide_title_bar: true,
+			..Default::default()
+		};
+		view.updates.available = true;
+		scan(&ctx, &mut view, &mut state);
+		let (text, images) = scan(&ctx, &mut view, &mut state);
+		let prompt = banner(&text).expect("sidebar update prompt");
+		let close = images
+			.iter()
+			.filter(|rect| {
+				rect.width() < 24.0
+					&& rect.center().x < 400.0
+					&& (rect.center().y - prompt.center().y).abs() < 14.0
+			})
+			.max_by(|a, b| a.center().x.total_cmp(&b.center().x))
+			.copied()
+			.expect("dismiss button");
+		assert!(close.center().x > prompt.right(), "{close:?} {prompt:?}");
+		let click = |ctx: &egui::Context, view: &mut MessagingUi, state: &mut State, pos| {
+			for pressed in [true, false] {
+				let output = ctx.run_ui(
+					egui::RawInput {
+						screen_rect: Some(egui::Rect::from_min_size(
+							egui::Pos2::ZERO,
+							egui::vec2(1200.0, 760.0),
+						)),
+						focused: true,
+						events: vec![
+							egui::Event::PointerMoved(pos),
+							egui::Event::PointerButton {
+								pos,
+								button: egui::PointerButton::Primary,
+								pressed,
+								modifiers: egui::Modifiers::NONE,
+							},
+						],
+						..Default::default()
+					},
+					|ui| {
+						view.show(ui, state);
+					},
+				);
+				output.drop_without_applying_deltas();
+			}
+		};
+		click(&ctx, &mut view, &mut state, close.center());
+		assert!(banner(&scan(&ctx, &mut view, &mut state).0).is_none());
+		assert!(!view.settings.open, "dismissing must not open settings");
+		// A finished download is a new prompt, so it speaks up again.
+		view.updates.ready = true;
+		let (text, _) = scan(&ctx, &mut view, &mut state);
+		assert!(
+			text.iter()
+				.any(|(label, rect)| label == "Restart to update" && rect.top() > 100.0)
+		);
 	}
 }
