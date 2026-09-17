@@ -13,6 +13,7 @@ pub use permissions::ChannelAccess;
 mod permissions_tests;
 
 pub mod invites;
+pub mod member_search;
 pub mod message_actions;
 pub mod messaging_permissions;
 pub mod notification_settings;
@@ -53,6 +54,7 @@ pub const EVENT_SLOTS: usize = 8; // UI drain batch; reliable events share a 32 
 pub const COMMAND_SLOTS: usize = 16; // ordinary commands <=16 KiB; bulk DM settings <=33 KiB; channel edit <=128 KiB; group icon <=350 KiB
 
 pub enum Command {
+	MemberSearch(member_search::Request),
 	MessagingPermissions {
 		request: u64,
 		change: Option<model::messaging_permissions::Change>,
@@ -329,6 +331,10 @@ fn prepare_navigation(
 	Ok(permission_state)
 }
 pub enum Event {
+	MemberSearch {
+		request: member_search::Request,
+		result: Result<Vec<Member>, auth::Failure>,
+	},
 	Startup(Box<PreparedStartup>),
 	StartupWarnings(model::account::Warnings),
 	MessagingPermissions {
@@ -556,6 +562,8 @@ pub struct State {
 	pub auth: auth::AuthState,
 	pub user: Option<User>,
 	pub members: Option<MemberList>,
+	pub member_search: [member_search::View; 1],
+	pub member_search_nonce: u64,
 	pub direct_presences: Vec<MemberPresence>,
 	pub local_game_activity: Option<model::RichActivity>,
 	#[doc(hidden)]
@@ -635,6 +643,8 @@ impl Default for State {
 			auth: auth::AuthState::Unauthenticated,
 			user: None,
 			members: None,
+			member_search: Default::default(),
+			member_search_nonce: 0,
 			direct_presences: vec![],
 			local_game_activity: Default::default(),
 			direct_presence_bytes: None,
@@ -836,6 +846,7 @@ impl State {
 		self.select_resident(channel);
 		self.history_targeted = false;
 		self.members = None;
+		self.member_search = Default::default();
 		self.selected = Some(channel);
 		self.clear_search();
 		self.search_target = None;
@@ -2029,6 +2040,10 @@ impl State {
 			Event::MemberPresence { .. } | Event::DirectPresence(_) => {
 				unreachable!("presence handled before timeline revision")
 			}
+			Event::MemberSearch { request, result } => {
+				self.searched_members(request, result);
+				Ok(())
+			}
 			Event::Members(list) => {
 				if !self.gateway_connected
 					|| self.freshness == Freshness::Unavailable
@@ -2117,6 +2132,7 @@ impl State {
 				self.voice.dm_calls.clear();
 				self.voice.dm_participants.clear();
 				self.members = None;
+				self.member_search = Default::default();
 				self.clear_profile();
 				self.profile_cache.clear();
 				self.read_state.reset();
@@ -2459,6 +2475,7 @@ impl State {
 				Ok(())
 			}
 			Event::Disconnected => {
+				self.member_search = Default::default();
 				self.interrupt_notification_settings(auth::Failure::ProtocolAt(
 					"Disconnected; reload notification settings",
 				));
@@ -2484,6 +2501,7 @@ impl State {
 			}
 			Event::Resumed => {
 				self.members = None;
+				self.member_search = Default::default();
 				self.gateway_connected = true;
 				self.cancel_history();
 				self.freshness = Freshness::Stale;
@@ -2609,6 +2627,7 @@ impl State {
 		self.enforce_resident_budget();
 	}
 	fn invalidate_members(&mut self) {
+		self.member_search = Default::default();
 		self.member_request = self.member_request.wrapping_add(1);
 		if let Some(list) = &mut self.members {
 			list.request = self.member_request;
@@ -2977,6 +2996,13 @@ impl Event {
 							.iter()
 							.map(presence::Update::heap_bytes)
 							.sum::<usize>()
+				}
+				Self::MemberSearch { request, result } => {
+					request.query.capacity()
+						+ result.as_ref().map_or(0, |rows| {
+							rows.capacity() * size_of::<Member>()
+								+ rows.iter().map(Member::bytes).sum::<usize>()
+						})
 				}
 				Self::Members(list) => {
 					list.rows.capacity() * size_of::<Option<Member>>()

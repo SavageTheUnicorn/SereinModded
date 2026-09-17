@@ -677,11 +677,15 @@ impl TimelineView {
 			for channel in state
 				.channels
 				.iter()
-				.filter(|c| c.guild.is_some() && c.supports_text())
+				.filter(|c| c.guild.is_some() && (c.supports_text() || matches!(c.kind, 15 | 16)))
 			{
 				channel.id.hash(&mut labels);
 				channel.guild.hash(&mut labels);
 				channel.name.hash(&mut labels);
+			}
+			for role in crate::mentions::known_roles(state, state.selected.unwrap_or(Id(0))) {
+				role.id.hash(&mut labels);
+				role.name.hash(&mut labels);
 			}
 			let labels = labels.finish();
 			labels_changed = self.channel_labels != labels;
@@ -1363,6 +1367,10 @@ impl TimelineView {
 														&state.channels,
 														&mut self.channel_reference,
 														&state.guilds,
+														crate::mentions::known_roles(
+															state,
+															message.channel,
+														),
 													),
 													(avatars, state.demo, &mut text),
 												);

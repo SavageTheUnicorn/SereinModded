@@ -26,6 +26,26 @@ pub fn user_mention_prefix(text: &str) -> Option<(Id, usize)> {
 		text.len() - digits.len() + end + 1,
 	))
 }
+/// Return one exact role mention prefix with a nonzero, bounded snowflake.
+pub fn role_mention_prefix(text: &str) -> Option<(Id, usize)> {
+	let rest = text.strip_prefix("<@&")?;
+	let end = rest.find('>')?;
+	Some((rest[..end].parse().ok()?, end + 4))
+}
+pub fn mentioned_role_ids(content: &str) -> Vec<Id> {
+	let mut ids = Vec::new();
+	for (start, _) in content.match_indices("<@&") {
+		if let Some((id, _)) = role_mention_prefix(&content[start..])
+			&& !ids.contains(&id)
+		{
+			if ids.len() == MAX_MENTIONS {
+				break;
+			}
+			ids.push(id);
+		}
+	}
+	ids
+}
 /// Return one exact mass-mention prefix without matching longer words.
 pub fn mass_mention_prefix(text: &str) -> Option<usize> {
 	["@everyone", "@here"].into_iter().find_map(|mention| {

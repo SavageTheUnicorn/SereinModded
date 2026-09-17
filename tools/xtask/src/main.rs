@@ -55,8 +55,7 @@ fn policy() -> Result<(), String> {
 		let features = node["features"].as_array().ok_or("Missing features")?;
 		for feature in features {
 			let feature = feature.as_str().unwrap_or("");
-			if ((id.contains("#eframe@") || id.contains("#egui@")) && feature == "persistence")
-				|| (id.contains("#eframe@") && feature == "glow")
+			if (id.contains("#eframe@") || id.contains("#egui@")) && feature == "persistence"
 				|| (id.contains("#reqwest@") && feature == "cookies")
 			{
 				return Err(format!("Forbidden runtime feature: {id} / {feature}"));

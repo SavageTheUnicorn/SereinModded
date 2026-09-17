@@ -1,3 +1,4 @@
+#![allow(clippy::items_after_test_module)]
 //! Native egui views; emits commands without owning transports or session credentials.
 mod account_badge;
 mod account_menu;
@@ -36,6 +37,7 @@ pub mod icons;
 mod invites;
 mod local_time;
 mod markdown;
+mod member_search;
 mod mentions;
 mod messaging_permissions;
 mod notification_settings;
@@ -283,6 +285,7 @@ pub struct MessagingUi {
 	deleting: Option<(Id, Id)>,
 	ime_active: bool,
 	mention_menu: mentions::Menu,
+	mention_lookup: member_search::Search,
 	emoji_picker: emoji_picker::Picker,
 	reaction_picker: emoji_picker::Picker,
 	/// Set when the user picks a theme preset; the host persists it.
@@ -2105,6 +2108,12 @@ impl MessagingUi {
 			state.drafts.get(&channel).map_or("", String::as_str)
 		};
 		let count_before = composer_content.chars().count();
+		// Suggestion rows can take focus on press; keep the editor alive until release
+		// so the shared member/channel/emoji popup can finish the click.
+		let suggestion_pointer = self.mention_menu.pointer_interacting(ctx, channel);
+		if keyboard_enabled && !self.ime_active && !ime_this_frame && suggestion_pointer {
+			ctx.memory_mut(|memory| memory.request_focus(composer_id));
+		}
 		let mention_enabled = keyboard_enabled
 			&& !self.ime_active
 			&& !ime_this_frame
@@ -2359,6 +2368,8 @@ impl MessagingUi {
                                 draft,
                                 ui.available_width(),
                                 &mention_users,
+                                mentions::known_roles(state, channel),
+                                &state.channels,
                                 mass_mentions,
                                 &mut self.avatars,
                                 demo,
@@ -2377,6 +2388,8 @@ impl MessagingUi {
                                         buffer.as_str(),
                                         width,
                                         &mention_users,
+                                        mentions::known_roles(state, channel),
+                                        &state.channels,
                                         mass_mentions,
                                         &mut self.avatars,
                                         demo,
@@ -2405,13 +2418,14 @@ impl MessagingUi {
                         if !self.ime_active && !ime_this_frame {
                             rich_layout.snap_cursor(&mut output, ctx);
                         }
-                        if mention_changed {
+                        if mention_changed || (mention_enabled && suggestion_pointer) {
                             output.response.request_focus();
                         }
                         let mention_cursor = output
                             .cursor_range
                             .filter(|r| r.is_empty())
                             .map(|r| r.primary.index.0)
+                            .or(cursor.filter(|_| suggestion_pointer))
                             .filter(|_| mention_enabled);
                         self.mention_menu
                             .refresh(state, channel, draft, mention_cursor, &mention_users);
@@ -2440,6 +2454,19 @@ impl MessagingUi {
                                 self.clear_draft(state, channel);
                             } else {
                                 self.draft_changes.push(channel);
+                            }
+                        }
+                        self.mention_lookup.text = self.mention_menu.member_query().to_owned();
+                        self.mention_lookup.sync(ctx, state, channel, 0, commands);
+                        if !self.mention_lookup.text.is_empty() && state.channel(channel).and_then(|c| c.guild).is_some() {
+                            let search = &state.member_search[0];
+                            if let Some(error) = search.error {
+                                ui.small(error);
+                                if ui.small_button("Retry member search").clicked() { self.mention_lookup.retry(); }
+                            } else if !search.finished {
+                                ui.small("Searching server members…");
+                            } else if search.rows.is_empty() {
+                                ui.small("No server matches. Try a username, nickname, or user ID.");
                             }
                         }
                         if !editing_here && (!new_draft.is_empty() || restore_empty_draft) {
@@ -3216,7 +3243,7 @@ impl MessagingUi {
 		if let Some(id) = self.timeline.pending_channel_reference {
 			if let Some(target) = state
 				.channel(id)
-				.filter(|c| c.guild.is_some() && c.supports_text())
+				.filter(|c| c.guild.is_some() && (c.supports_text() || matches!(c.kind, 15 | 16)))
 			{
 				self.timeline.pending_channel_reference = None;
 				self.guild = target.guild;
@@ -3548,7 +3575,17 @@ mod composer_tests {
 									view.composer(ui, &mut state, Id(10), &ctx, &mut vec![]);
 									empty_height = view
 										.composer_layout
-										.galley(ui, "", 300.0, &[], false, &mut view.avatars, true)
+										.galley(
+											ui,
+											"",
+											300.0,
+											&[],
+											&[],
+											&[],
+											false,
+											&mut view.avatars,
+											true,
+										)
 										.rect
 										.height();
 								},
@@ -6228,4 +6265,19 @@ mod composer_tests {
 		);
 		assert_eq!(messaging.draft_changes, [Id(1), Id(1)]);
 	}
+}
+
+#[cfg(debug_assertions)]
+pub fn debug_member_search_check(state: &State, channel: Id) {
+	mentions::debug_member_search_check(state, channel);
+}
+
+#[cfg(debug_assertions)]
+pub fn debug_suggestion_pointer_check(state: &mut State, channel: Id) {
+	mentions::debug_pointer_check(state, channel);
+}
+
+#[cfg(debug_assertions)]
+pub fn debug_role_mentions_check(state: &mut State) {
+	mentions::debug_role_mentions_check(state);
 }

@@ -93,6 +93,7 @@ impl Connection {
                 let (member_send,member_receive)=watch::channel(None);
                 let (voice_send,voice_receive)=mpsc::channel(8);
 				let (activity_send,activity_receive)=watch::channel(None);
+				let (member_query_send, member_query_receive) = watch::channel([None]);
 				let _sharing_task=AbortTask(tokio::spawn(run_activity_sharing(api.clone(),share_receive.clone(),sharing_requests,sharing_report,finished.clone(),wake.clone())));
 				let _activity_task=AbortTask(tokio::spawn(crate::game_activity::run(share_receive,activity_send,game_report,invite_send,wake.clone(),user.clone(),api.clone())));
                 let dm_channels=Arc::new(Mutex::new(BTreeSet::new()));
@@ -102,7 +103,7 @@ impl Connection {
                 let gateway_wake=wake.clone();
                 let activity_wake=wake.clone();
                 let mut gateway_task=AbortTask(tokio::spawn(async move {
-                    let error=discord_gateway::run_with_activity(secret,gateway,member_receive,voice_receive,(activity_receive,presence_receive),move |observation| {
+                    let error=discord_gateway::run_with_activity(secret,gateway,member_receive,voice_receive,(activity_receive,presence_receive,member_query_receive),move |observation| {
                         if activity_observed.send_if_modified(|current| { if *current == observation { false } else { *current = observation; true } }) { activity_wake.request_repaint(); }
                         Ok(())
                     },|event|{
@@ -311,6 +312,12 @@ impl Connection {
                                     if let Some(error)=error {api.stop();let _=finished.send(Some(error));}
                                     wake.request_repaint();
                                 })));
+                                continue;
+                            }
+                            if let Command::MemberSearch(request) = command {
+                                if request.valid() {
+                                    member_query_send.send_modify(|queries| { let slot=request.slot; queries[slot]=Some(request); });
+                                }
                                 continue;
                             }
                             if let Command::Members {guild,channel,request,list_id,thread} = command {

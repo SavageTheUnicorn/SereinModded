@@ -1750,6 +1750,7 @@ dependencies = [
  "egui-winit",
  "egui_glow",
  "egui_system_fonts",
+ "glow",
  "glutin",
  "glutin-winit",
  "image",

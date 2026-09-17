@@ -1,5 +1,15 @@
 # Local storage policy and audit
 
+## Server-wide member lookup (September 17, 2026)
+
+Mention autocomplete retains at most one query of 64 Unicode scalars / 256 UTF-8
+bytes and 100 member results / 128 KiB. The query and results are session-only;
+navigation, disconnect and logout retire them. The Gateway watch channel retains
+one replaceable query; queued and active requests are fixed at one slot. Matching
+chunk bodies are capped at
+512 KiB, then validated before entering the existing byte-budgeted event queue.
+Unrelated chunks are ignored; no guild directory cache or persistence is added.
+
 ## Forum post context menu (September 15, 2026)
 
 Post actions share the existing single pending channel-operation slot and retain

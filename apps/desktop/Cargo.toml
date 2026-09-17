@@ -5,7 +5,9 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-default = []
+default = ["vulkan"]
+vulkan = ["eframe/wgpu"]
+opengl = ["eframe/glow"]
 # No-op: token sign-in used to require this flag; it is now always built in.
 # Kept only so `--features developer-session` in older scripts keeps building.
 developer-session = []

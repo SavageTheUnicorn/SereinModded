@@ -729,7 +729,9 @@ impl DiscordApi {
 				result: self.edit_profile(user, changes).await,
 			},
 			Command::CancelProfile => Event::Failure(Failure::Protocol),
-			Command::Voice(_) | Command::Members { .. } => Event::Failure(Failure::Protocol),
+			Command::MemberSearch(_) | Command::Voice(_) | Command::Members { .. } => {
+				Event::Failure(Failure::Protocol)
+			}
 			Command::History {
 				channel,
 				before,
@@ -2051,7 +2053,7 @@ fn allowed_mentions(content: &str) -> serde_json::Value {
 	} else {
 		&[]
 	};
-	serde_json::json!({"parse":everyone,"users":model::mentioned_user_ids(content),"replied_user":false})
+	serde_json::json!({"parse":everyone,"users":model::mentioned_user_ids(content),"roles":model::mentioned_role_ids(content),"replied_user":false})
 }
 #[cfg(test)]
 mod mention_tests {
@@ -2059,15 +2061,15 @@ mod mention_tests {
 	fn mass_mentions_and_explicit_users_are_allowed() {
 		assert_eq!(
 			super::allowed_mentions("hello test"),
-			serde_json::json!({"parse":[],"users":[],"replied_user":false})
+			serde_json::json!({"parse":[],"users":[],"roles":[],"replied_user":false})
 		);
 		assert_eq!(
 			super::allowed_mentions("@everyone <@&4> <@7> <@!7> <@9>"),
-			serde_json::json!({"parse":["everyone"],"users":["7","9"],"replied_user":false})
+			serde_json::json!({"parse":["everyone"],"users":["7","9"],"roles":["4"],"replied_user":false})
 		);
 		assert_eq!(
 			super::allowed_mentions("@here"),
-			serde_json::json!({"parse":["everyone"],"users":[],"replied_user":false})
+			serde_json::json!({"parse":["everyone"],"users":[],"roles":[],"replied_user":false})
 		);
 	}
 }

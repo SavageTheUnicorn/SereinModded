@@ -1,5 +1,20 @@
 # Discord compatibility — checked 2026-09-10
 
+## Server-wide member lookup (September 17, 2026)
+
+`@name` autocomplete requests matching members beyond the first 100 subscribed
+sidebar positions.
+Queries use Gateway opcode 8 and nonce-matched `GUILD_MEMBERS_CHUNK` replies;
+no administrator permission or bot-only REST member search is used. The
+[documented Gateway request](https://docs.discord.com/developers/events/gateway-events#request-guild-members)
+specifies the wire shape; normal-account interoperability remains unofficial and
+live-unverified. Name matching is controlled by the service; numeric queries request
+an exact user ID. Results are capped at 100 matches. The unfiltered live sidebar
+still retains its first 100 positions and has no search field. Lookups are on
+demand, debounced by 350 ms, spaced by at least one second, and time out after
+15 seconds. No complete directory is downloaded. Offline debug validation covers
+remote nickname mention insertion, stale replies and response limits.
+
 ## Chat links — September 16, 2026
 
 Clicked message and embed links matching HTTPS `/channels/{guild|@me}/{channel}`

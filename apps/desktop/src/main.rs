@@ -51,6 +51,69 @@ const SIGN_IN_HEADER_HEIGHT: f32 = if cfg!(target_os = "windows") {
 };
 
 fn main() -> eframe::Result {
+	#[cfg(all(debug_assertions, feature = "demo"))]
+	if std::env::args().any(|arg| arg == "--demo")
+		&& std::env::args().any(|arg| arg == "--demo-check-suggestion-clicks")
+	{
+		let mut state = test_support::demo_state();
+		let channel = state
+			.channels
+			.iter()
+			.find(|c| c.guild.is_some() && c.kind == 0)
+			.unwrap()
+			.id;
+		state.select(channel);
+		state.gateway_connected = true;
+		ui::debug_suggestion_pointer_check(&mut state, channel);
+		println!(
+			"Suggestion pointer debug check passed: members, emoji and channels insert on click without sending."
+		);
+		return Ok(());
+	}
+
+	#[cfg(all(debug_assertions, feature = "demo"))]
+	if std::env::args().any(|arg| arg == "--demo")
+		&& std::env::args().any(|arg| arg == "--demo-check-member-search")
+	{
+		let mut state = test_support::demo_state();
+		let channel = state
+			.channels
+			.iter()
+			.find(|c| c.guild.is_some() && c.kind == 0)
+			.unwrap()
+			.id;
+		state.select(channel);
+		state.gateway_connected = true;
+		let Some(Command::MemberSearch(request)) = state.search_members(channel, "Outside", 0)
+		else {
+			panic!("search should be permitted");
+		};
+		let event = discord_gateway::debug_member_search_check(request.clone());
+		state.apply(Envelope {
+			generation: state.generation,
+			event,
+		});
+		ui::debug_member_search_check(&state, channel);
+		let Some(Command::MemberSearch(_)) = state.search_members(channel, "Replacement", 0) else {
+			panic!("replacement search");
+		};
+		state.apply(Envelope {
+			generation: state.generation,
+			event: Event::MemberSearch {
+				request,
+				result: Ok(vec![]),
+			},
+		});
+		assert!(
+			!state.member_search[0].finished,
+			"stale result must be ignored"
+		);
+		println!(
+			"Member search debug check passed: Gateway query, remote nickname mention, nonce matching, bounded results, and stale-result rejection."
+		);
+		return Ok(());
+	}
+
 	let demo = std::env::args().any(|arg| arg == "--demo");
 	let start_minimized = startup::minimized_launch(demo, std::env::args());
 	if !cfg!(feature = "demo")
@@ -123,7 +186,9 @@ fn main() -> eframe::Result {
 				builder
 			}
 		},
+		#[cfg(feature = "vulkan")]
 		renderer: eframe::Renderer::Wgpu,
+		#[cfg(feature = "vulkan")]
 		wgpu_options: eframe::egui_wgpu::WgpuConfiguration {
 			wgpu_setup: eframe::egui_wgpu::WgpuSetup::CreateNew(
 				eframe::egui_wgpu::WgpuSetupCreateNew {
@@ -147,6 +212,8 @@ fn main() -> eframe::Result {
 			},
 			..Default::default()
 		},
+		#[cfg(feature = "opengl")]
+		renderer: eframe::Renderer::Glow,
 		persist_window: false,
 		persistence_path: None,
 		..Default::default()
@@ -2117,6 +2184,27 @@ impl Desktop {
 		#[cfg(feature = "demo")]
 		if self.state.demo {
 			let event = match command {
+				Command::MemberSearch(request) => {
+					let query = request.query.to_lowercase();
+					let rows = demo_members(Some(request.guild), request.channel, request.nonce)
+						.rows
+						.into_iter()
+						.flatten()
+						.filter(|member| {
+							member.user.name.to_lowercase().contains(&query)
+								|| member
+									.nick
+									.as_ref()
+									.is_some_and(|name| name.to_lowercase().contains(&query))
+								|| member.user.id.to_string() == query
+						})
+						.collect();
+					Event::MemberSearch {
+						request,
+						result: Ok(rows),
+					}
+				}
+
 				// Demo preference changes are applied synchronously by client-core.
 				Command::AccountNotificationSettings { .. }
 				| Command::MessagingPermissions { .. } => return,
@@ -4881,3 +4969,7 @@ mod tests {
 		));
 	}
 }
+#[cfg(all(feature = "vulkan", feature = "opengl"))]
+compile_error!("Select exactly one renderer feature: vulkan or opengl");
+#[cfg(not(any(feature = "vulkan", feature = "opengl")))]
+compile_error!("Select a renderer feature: vulkan or opengl");

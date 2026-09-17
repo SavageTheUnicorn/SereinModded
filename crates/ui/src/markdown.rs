@@ -26,6 +26,7 @@ struct Style {
 	small: bool,
 	link: Option<usize>,
 	mention: Option<Id>,
+	role: Option<Id>,
 	mass_mention: bool,
 	channel: Option<Id>,
 	no_autolink: bool,
@@ -768,6 +769,7 @@ impl Formatted {
 		let mut raw_cursor = 0;
 		for (start, _) in text.match_indices(['<', '@']) {
 			let reference = &text[start..];
+			let is_role = reference.starts_with("<@&");
 			let (id, len, is_channel, mass_mention) =
 				if let Some(len) = model::mass_mention_prefix(reference) {
 					(None, len, false, true)
@@ -775,6 +777,8 @@ impl Formatted {
 					let is_channel = reference.starts_with("<#");
 					let Some((id, len)) = (if is_channel {
 						model::channel_mention_prefix(reference)
+					} else if is_role {
+						model::role_mention_prefix(reference)
 					} else {
 						model::user_mention_prefix(reference)
 					}) else {
@@ -803,7 +807,8 @@ impl Formatted {
 			self.push(
 				token,
 				Style {
-					mention: id.filter(|_| !is_channel),
+					mention: id.filter(|_| !is_channel && !is_role),
+					role: id.filter(|_| is_role),
 					mass_mention,
 					channel: id.filter(|_| is_channel),
 					..style
@@ -849,7 +854,7 @@ impl Formatted {
 			opening,
 			users,
 			profile,
-			(&[], &mut None, guilds),
+			(&[], &mut None, guilds, &[]),
 			(images, demo, &mut revealed),
 		);
 	}
@@ -859,10 +864,15 @@ impl Formatted {
 		opening: &mut Option<String>,
 		users: &[model::User],
 		profile: &mut Option<model::User>,
-		references: (&[model::Channel], &mut Option<Id>, &[model::Guild]),
+		references: (
+			&[model::Channel],
+			&mut Option<Id>,
+			&[model::Guild],
+			&[model::permissions::Role],
+		),
 		media: (&mut crate::avatars::Avatars, bool, &mut u32),
 	) {
-		let (channels, channel, guilds) = references;
+		let (channels, channel, guilds, roles) = references;
 		let (images, demo, revealed) = media;
 		ui.allocate_ui_with_layout(
 			egui::vec2(ui.available_width(), 0.0),
@@ -900,7 +910,7 @@ impl Formatted {
 						if let Some(target) = channels.iter().find(|target| {
 							target.id == id
 								&& target.guild.is_some()
-								&& matches!(target.kind, 0 | 5 | 10..=12)
+								&& matches!(target.kind, 0 | 5 | 10..=12 | 15 | 16)
 						}) {
 							let label = format!("#{}", target.name);
 							let response = ui
@@ -1010,6 +1020,33 @@ impl Formatted {
 						&trimmed[..]
 					} else {
 						&self.spans[start..start + count]
+					};
+					// Role pills share the surrounding text's galley, including wrapping and emoji heights.
+					let resolved;
+					let spans = if spans.iter().any(|(_, style)| style.role.is_some()) {
+						resolved = spans
+							.iter()
+							.map(|(text, style)| {
+								if let Some(id) = style.role {
+									let name = roles.iter().find(|role| role.id == id).map_or_else(
+										|| format!("unknown-role ({id})"),
+										|role| role.name.clone(),
+									);
+									(
+										format!("@{name}"),
+										Style {
+											mass_mention: true,
+											..*style
+										},
+									)
+								} else {
+									(text.clone(), *style)
+								}
+							})
+							.collect::<Vec<_>>();
+						&resolved[..]
+					} else {
+						spans
 					};
 					if let Some(index) = target {
 						let url = &self.links[index];
@@ -1977,7 +2014,7 @@ mod tests {
 							&mut opening,
 							&[],
 							&mut profile,
-							(&[], &mut channel, &[]),
+							(&[], &mut channel, &[], &[]),
 							(&mut images, false, mask),
 						)
 					},
@@ -2074,7 +2111,7 @@ mod tests {
 						&mut None,
 						&[],
 						&mut None,
-						(&[], &mut None, &[]),
+						(&[], &mut None, &[], &[]),
 						(&mut images, false, &mut mask),
 					)
 				},
@@ -2233,7 +2270,7 @@ mod tests {
 							&mut opening,
 							&[],
 							&mut profile,
-							(&channels, &mut channel, &[]),
+							(&channels, &mut channel, &[], &[]),
 							(&mut crate::avatars::Avatars::default(), true, &mut revealed),
 						)
 					},

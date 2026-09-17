@@ -122,7 +122,12 @@ pub fn show(
 								opening,
 								&crate::mentions::known_users(state, pending.channel),
 								profile,
-								(&state.channels, channel, &state.guilds),
+								(
+									&state.channels,
+									channel,
+									&state.guilds,
+									crate::mentions::known_roles(state, pending.channel),
+								),
 								(avatars, state.demo, &mut revealed),
 							);
 							if revealed != 0 {
