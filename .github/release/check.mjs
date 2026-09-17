@@ -55,6 +55,14 @@ assert(!nightlyNotes.includes('notification sounds'));
 const workflow = load(readFileSync('.github/workflows/release.yml', 'utf8'));
 assert.deepEqual(Object.keys(workflow.on), ['workflow_dispatch']);
 assert(workflow.jobs.build.strategy.matrix.os.includes('windows-11-arm'));
+assert(workflow.jobs.build.strategy.matrix.os.includes('macos-13'));
+assert(workflow.jobs.build.strategy.matrix.os.includes('macos-latest'));
+const macRuns = workflow.jobs.build.steps
+  .filter(step => step.if === "runner.os == 'macOS'")
+  .map(step => step.run ?? '').join('\n');
+// Shipped updaters resolve serein-<tag>-macOS-<arch>.zip by name, so dropping the
+// archive strands every installed Mac on its version with no in-app recovery.
+assert(macRuns.includes('$ASSET.zip'), 'Mac builds must keep the .zip auto-update asset');
 for (const job of Object.values(workflow.jobs)) {
   for (const step of job.steps ?? []) {
     if (step.run && step.shell !== 'pwsh') execFileSync('bash', ['-n'], { input: step.run });
