@@ -25,7 +25,7 @@ mod pointer;
 #[cfg(feature = "demo")]
 mod post_menu_demo;
 mod reading_settings;
-#[cfg(all(feature = "demo", feature = "vulkan"))]
+#[cfg(feature = "demo")]
 mod rendering_demo;
 mod screen;
 #[cfg(feature = "demo")]
@@ -235,9 +235,7 @@ fn main() -> eframe::Result {
 				builder
 			}
 		},
-		#[cfg(feature = "vulkan")]
 		renderer: eframe::Renderer::Wgpu,
-		#[cfg(feature = "vulkan")]
 		wgpu_options: eframe::egui_wgpu::WgpuConfiguration {
 			wgpu_setup: eframe::egui_wgpu::WgpuSetup::CreateNew(
 				eframe::egui_wgpu::WgpuSetupCreateNew {
@@ -261,8 +259,6 @@ fn main() -> eframe::Result {
 			},
 			..Default::default()
 		},
-		#[cfg(feature = "opengl")]
-		renderer: eframe::Renderer::Glow,
 		#[cfg(target_os = "windows")]
 		window_builder: Some(Box::new(|builder| {
 			// winit's shadow hack offsets the restored client area by one pixel.
@@ -652,7 +648,7 @@ struct Desktop {
 	monitor_geometry: Option<(Option<egui::Rect>, Option<f32>)>,
 	monitor_period: Option<Duration>,
 	frame_metrics: FrameMetrics,
-	#[cfg(all(feature = "demo", feature = "vulkan"))]
+	#[cfg(feature = "demo")]
 	rendering_demo: Option<rendering_demo::RenderingDemo>,
 	avatars: Option<avatars::AvatarWorker>,
 	avatar_start_failed: bool,
@@ -1567,7 +1563,7 @@ impl Desktop {
 			monitor_geometry: None,
 			monitor_period: None,
 			frame_metrics: FrameMetrics::new(frame_sample),
-			#[cfg(all(feature = "demo", feature = "vulkan"))]
+			#[cfg(feature = "demo")]
 			rendering_demo: (demo && std::env::args().any(|arg| arg == "--demo-rendering"))
 				.then(rendering_demo::RenderingDemo::default),
 			avatars: None,
@@ -4625,7 +4621,7 @@ impl eframe::App for Desktop {
 		} else {
 			self.sign_in_screen(ui);
 		}
-		#[cfg(all(feature = "demo", feature = "vulkan"))]
+		#[cfg(feature = "demo")]
 		if let Some(diagnostic) = &self.rendering_demo {
 			diagnostic.show(&ctx, &self.window);
 		}
@@ -5046,7 +5042,3 @@ mod tests {
 		));
 	}
 }
-#[cfg(all(feature = "vulkan", feature = "opengl"))]
-compile_error!("Select exactly one renderer feature: vulkan or opengl");
-#[cfg(not(any(feature = "vulkan", feature = "opengl")))]
-compile_error!("Select a renderer feature: vulkan or opengl");

@@ -351,10 +351,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 			viewport: egui::ViewportBuilder::default()
 				.with_inner_size([width, height])
 				.with_decorations(false),
-			#[cfg(feature = "vulkan")]
 			renderer: eframe::Renderer::Wgpu,
-			#[cfg(feature = "opengl")]
-			renderer: eframe::Renderer::Glow,
 			persist_window: false,
 			..Default::default()
 		},
