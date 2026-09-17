@@ -203,3 +203,14 @@ build 20348+ (Windows 11 / Server 2022), with a visible audio error on older sys
 Both exclude Serein's playback and capture other applications even when sharing one
 window. There is no whole-output fallback. Hardware exclusion and receiving sound in
 an official client remain unverified.
+
+## Additional macOS attachment codecs
+
+WebM and MOV codecs unavailable in the native inline decoder can use an installed
+FFmpeg from `/opt/homebrew/bin`, `/usr/local/bin`, or `/usr/bin`. Nothing is installed
+automatically. The helper must include H.264 (`libx264`) and AAC encoding; converted
+video plays through the existing native controls. Conversion may take up to two
+minutes before playback and is limited to 100 MiB input/output, 1080p and two hours.
+Missing FFmpeg or conversion failures appear in the video card. Linux and Windows
+continue to use their installed native codecs. This optional fallback is not bundled
+in release packages; actual codec coverage depends on the local FFmpeg build.

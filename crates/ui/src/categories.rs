@@ -7,6 +7,8 @@ use egui::RichText;
 use model::{Channel, Id, Shortcut};
 use std::collections::{BTreeMap, BTreeSet};
 
+const MAX_VISIBLE_THREADS: usize = 3;
+
 /// Where a channel row came from. A mirrored guild channel differs from its tree copy by slot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum Slot {
@@ -253,13 +255,18 @@ fn rows<'a>(
 				.get(&channel.id)
 				.into_iter()
 				.flatten()
+				.take(MAX_VISIBLE_THREADS)
 				.map(|c| Row::Channel(c, slot, true)),
 		);
 	};
 	let count = |channels: &[&Channel]| {
 		channels
 			.iter()
-			.map(|c| 1 + threads.get(&c.id).map_or(0, Vec::len))
+			.map(|c| {
+				1 + threads
+					.get(&c.id)
+					.map_or(0, |threads| threads.len().min(MAX_VISIBLE_THREADS))
+			})
 			.sum::<usize>()
 	};
 	let mut rows = Vec::with_capacity(channels.len());

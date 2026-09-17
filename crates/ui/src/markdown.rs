@@ -1291,17 +1291,9 @@ impl Formatted {
 					job.append(&text[start..offset], 0.0, format.clone());
 					source.push_str(&text[start..offset]);
 				}
-				// One zero-width glyph plus leading space forms an unbroken inline slot; its
+				// One blank glyph forms an unbroken inline slot; its
 				// character is expanded to the wire text below so selection copies the original.
-				job.append(
-					"\u{200b}",
-					size,
-					TextFormat {
-						color: egui::Color32::TRANSPARENT,
-						line_height: Some(size),
-						..format.clone()
-					},
-				);
+				job.append(" ", 0.0, crate::emoji::inline_format(ui, size, size));
 				inlines.push(Inline {
 					text: cluster.to_owned(),
 					custom: custom.map(|(id, _)| id),
@@ -1335,7 +1327,7 @@ impl Formatted {
 					|| !placed
 						.glyphs
 						.iter()
-						.any(|glyph| glyph.chr == '\u{200b}' && glyph.line_height == size)
+						.any(|glyph| glyph.chr == ' ' && glyph.line_height == size)
 				{
 					continue;
 				}
@@ -1343,15 +1335,14 @@ impl Formatted {
 				let mut glyphs = Vec::with_capacity(row.glyphs.len());
 				for glyph in &row.glyphs {
 					// Placeholders are the only glyphs with the artwork line height; a literal
-					// zero-width space in message text keeps the body font's row height.
-					if next >= inlines.len() || glyph.chr != '\u{200b}' || glyph.line_height != size
-					{
+					// space in message text keeps the body font's row height.
+					if next >= inlines.len() || glyph.chr != ' ' || glyph.line_height != size {
 						glyphs.push(*glyph);
 						continue;
 					}
 					let index = next;
 					next += 1;
-					let left = glyph.pos.x - size;
+					let left = glyph.pos.x;
 					slots.push((
 						index,
 						egui::Rect::from_min_size(
@@ -1587,6 +1578,56 @@ impl Formatted {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn wrapped_text_and_emoji_stay_inside_the_starting_margin() {
+		let ctx = egui::Context::default();
+		for source in [
+			"Words break across a narrow conversation window.",
+			"Words 😀 more words <:wave:9001> and 😀 again.",
+			"😀😀😀😀😀😀😀😀😀",
+		] {
+			for width in [40.0, 80.0, 140.0] {
+				let parsed = Formatted::parse(source);
+				let output = ctx.run_ui(Default::default(), |ui| {
+					ui.set_width(width);
+					parsed.show(ui, &mut None);
+				});
+				let galley = output
+					.shapes
+					.iter()
+					.find_map(|shape| {
+						if let egui::Shape::Text(text) = &shape.shape
+							&& text.galley.text() == source
+						{
+							Some(&text.galley)
+						} else {
+							None
+						}
+					})
+					.expect("message galley");
+				assert!(galley.rows.len() > 1);
+				assert_eq!(
+					galley
+						.rows
+						.iter()
+						.map(|row| row.glyphs.len())
+						.sum::<usize>(),
+					source.chars().count(),
+				);
+				for row in &galley.rows {
+					for glyph in &row.glyphs {
+						assert!(row.pos.x + glyph.pos.x >= -0.5, "{source}: {glyph:?}");
+						assert!(
+							row.pos.x + glyph.max_x() <= width + 1.0,
+							"{source}: {glyph:?}"
+						);
+					}
+				}
+				output.drop_without_applying_deltas();
+			}
+		}
+	}
 
 	#[test]
 	fn discord_chat_links_validate_origin_route_and_ids() {

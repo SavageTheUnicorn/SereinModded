@@ -56,6 +56,19 @@ pub(crate) fn inline_size(ui: &egui::Ui) -> f32 {
 	egui::TextStyle::Body.resolve(ui.style()).size * 1.6
 }
 
+/// A blank glyph with real advance width keeps inline objects intact across row breaks.
+pub(crate) fn inline_format(ui: &egui::Ui, width: f32, height: f32) -> egui::TextFormat {
+	let mut font_id = egui::FontId::monospace(height);
+	let space = ui.fonts_mut(|fonts| fonts.glyph_width(&font_id, ' '));
+	font_id.size *= width / space.max(f32::EPSILON);
+	egui::TextFormat {
+		font_id,
+		color: egui::Color32::TRANSPARENT,
+		line_height: Some(height),
+		..Default::default()
+	}
+}
+
 pub(crate) fn lookup(text: &str) -> Option<usize> {
 	// Explicit text presentation must stay text. Do not partially match unknown sequences.
 	if text.is_ascii() || text.contains('\u{fe0e}') || text.len() > 128 {

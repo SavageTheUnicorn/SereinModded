@@ -4192,8 +4192,7 @@ impl eframe::App for Desktop {
 		}
 
 		let download_status = match self.downloads.poll() {
-			downloads::Status::Idle => String::new(),
-			downloads::Status::Choosing => "Choose where to save the attachment…".into(),
+			downloads::Status::Idle | downloads::Status::Choosing => String::new(),
 			downloads::Status::Downloading { total: 0, .. } => "Loading image…".into(),
 			downloads::Status::Downloading { received, total } => {
 				format!("Downloading: {} / {} KiB", received / 1024, total / 1024)
@@ -4493,6 +4492,9 @@ impl eframe::App for Desktop {
 					self.window.clone(),
 				) {
 				self.state.status = error;
+			}
+			if std::mem::take(&mut self.messaging.downloads().dismiss_requested) {
+				self.downloads.dismiss();
 			}
 			if std::mem::take(&mut self.messaging.downloads().cancel_requested) {
 				self.downloads.cancel();

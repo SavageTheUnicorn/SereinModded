@@ -381,6 +381,7 @@ pub struct DownloadUi {
 	pub copy_request: Option<Attachment>,
 	pub embed_request: Option<(model::EmbedMedia, bool)>,
 	pub cancel_requested: bool,
+	pub dismiss_requested: bool,
 	pub active: bool,
 	pub status: String,
 }
@@ -488,11 +489,14 @@ impl DownloadUi {
 			|| self.embed_request.is_some()
 	}
 	pub fn show_status(&mut self, ui: &mut egui::Ui) {
-		if self.active || !self.status.is_empty() {
+		if !self.status.is_empty() {
 			ui.horizontal_wrapped(|ui| {
 				ui.small(&self.status);
 				if self.active && ui.small_button("Cancel download").clicked() {
 					self.cancel_requested = true;
+				}
+				if !self.active && ui.small_button("Dismiss").clicked() {
+					self.dismiss_requested = true;
 				}
 			});
 		}

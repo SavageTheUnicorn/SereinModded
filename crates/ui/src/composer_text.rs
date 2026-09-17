@@ -164,17 +164,9 @@ impl Layout {
 			let count = raw.chars().count();
 			if label.is_some() || image.is_some() || artwork {
 				let slot = label.as_ref().map_or(size, |g| g.size().x + 6.0);
-				// One zero-width glyph plus leading space forms an unbroken inline object.
+				// One blank glyph forms an unbroken inline object, even at a row break.
 				// Expand its character slots below, so native selection/copy/undo use wire text.
-				job.append(
-					"\u{200b}",
-					slot,
-					TextFormat {
-						color: Color32::TRANSPARENT,
-						line_height: Some(size),
-						..format.clone()
-					},
-				);
+				job.append(" ", 0.0, emoji::inline_format(ui, slot, size));
 				self.inlines.push(Inline {
 					source: source..source + count,
 					projected,
@@ -210,8 +202,7 @@ impl Layout {
 					for (index, chr) in chars[inline.source.clone()].iter().enumerate() {
 						let mut slot = *glyph;
 						slot.chr = *chr;
-						slot.pos.x =
-							glyph.pos.x - inline.width + inline.width * index as f32 / count as f32;
+						slot.pos.x = glyph.pos.x + inline.width * index as f32 / count as f32;
 						slot.advance_width = inline.width / count as f32;
 						glyphs.push(slot);
 					}

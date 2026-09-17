@@ -372,7 +372,7 @@ the actual roster's 4,096-entry / 1 MiB bounds are unchanged; no new disk storag
 
 Image attachment metadata remains bounded by 10 attachments / 64 KiB retained metadata and 256 KiB JSON per message, including original/proxy signed URLs. It counts toward existing window, pending-patch and database budgets. Decoded pixels reuse the shared media worker/cache; spoiler attachments are not requested before explicit reveal. Profile metadata (bio, pronouns, badges, connections and mutual-server summaries) stays in the single bounded RAM view. Profile and server-specific banner/avatar pixels may remain in the shared account image cache after closing the profile; cache clear/logout removes them under the same policy.
 
-Explicit Download creates an original attachment file only at the user-selected location. Suggested filenames are sanitized; downloads never reinterpret message filenames as destination paths, follow redirects, or send credentials to the CDN. Existing regular files are replaced only after native Save confirmation and a complete, flushed transfer. A new destination is published without overwriting a file created meanwhile. The one worker closes/removes its sibling partial on cancellation or failure; cleanup failures are visible. Forced termination or a filesystem error can leave a `.serein-*.partial` sibling, and filesystems without hard links cannot use the atomic new-file publication path. Normal close waits for the active worker; a cancelled native dialog must still be dismissed. Downloads are explicit user files, not account cache entries, and survive logout/cache clearing. Limits and transfer bounds are strictly enforced.
+Explicit Download creates an original attachment file only at the user-selected location. Suggested filenames are sanitized; downloads never reinterpret message filenames as destination paths, follow redirects, or send credentials to the CDN. Existing regular files are replaced only after native Save confirmation and a complete, flushed transfer. A new destination is published without overwriting a file created meanwhile. The one worker closes/removes its sibling partial on cancellation or failure; cleanup failures are visible. Forced termination or a filesystem error can leave a `.serein-*.partial` sibling, and macOS, Linux and Windows publish new files with exclusive native moves so hard-link support is not required. Normal close waits for the active worker; a cancelled native dialog must still be dismissed. Downloads are explicit user files, not account cache entries, and survive logout/cache clearing. Limits and transfer bounds are strictly enforced.
 
 Conversation search queries and result snippets are session-only, limited to one 25-result / 64 KiB page and a 256-character query. Neither is written to SQLite or diagnostics. Opening a result uses normal bounded history retrieval, whose revalidated messages can enter the existing account cache.
 
@@ -695,7 +695,7 @@ never publish, persist or initialize account transports.
 
 ### Inline attachment video
 
-Video data is memory-only. One lazy worker handles the latest requested attachment,
+Native video decoding is memory-only. One lazy worker handles the latest requested attachment,
 with a replaceable pending request and cancellation fencing. The network source retains
 up to eight 256 KiB ranges (2 MiB, including an in-flight range); responses are checked for exact range/total/body lengths and reject
 redirects and content encoding. Encoded attachment size is capped at 100 MiB.
@@ -883,3 +883,16 @@ at 100 members / 128 KiB, with at most 100 requested user IDs. It shares the
 mention transport's 512-KiB payload cap, rate limit and bounded event queue.
 Channel/session changes fence late results; session reset releases the snapshot.
 No author lookup results are persisted and no complete guild directory is fetched.
+
+On macOS, formats rejected by the native decoder can use an installed FFmpeg helper.
+This explicit-playback fallback stages one input (100 MiB maximum) and converted MP4
+in a randomized mode-0700 temporary directory. Conversion has a two-minute deadline,
+a 100 MiB output acceptance limit and an OS-enforced 128 MiB per-file ceiling.
+Cancellation kills/reaps the helper; normal cleanup unlinks both files before playback,
+while the native decoder retains an open descriptor. Forced termination or filesystem
+errors may leave temporary files. No URLs, credentials or media diagnostics reach the
+helper; its file-only demuxing is restricted to MOV/MP4 and Matroska/WebM.
+FFmpeg's own demuxer/codec allocations are additional to the native-player budget;
+its individual allocation requests are capped at 16 MiB and conversion uses two
+codec threads plus one filter thread. The helper is an optional installed process,
+not a bundled decoder or a total-process memory sandbox.
