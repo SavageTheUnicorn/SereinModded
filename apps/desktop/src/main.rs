@@ -25,6 +25,8 @@ mod pointer;
 #[cfg(feature = "demo")]
 mod post_menu_demo;
 mod reading_settings;
+#[cfg(all(feature = "demo", feature = "vulkan"))]
+mod rendering_demo;
 mod screen;
 #[cfg(feature = "demo")]
 mod server_settings_demo;
@@ -215,6 +217,13 @@ fn main() -> eframe::Result {
 		},
 		#[cfg(feature = "opengl")]
 		renderer: eframe::Renderer::Glow,
+		#[cfg(target_os = "windows")]
+		window_builder: Some(Box::new(|builder| {
+			use winit::platform::windows::WindowAttributesExtWindows as _;
+			// winit's shadow hack offsets the restored client area by one pixel.
+			// Keep the undecorated client aligned with the DX12 presentation area.
+			builder.with_undecorated_shadow(false)
+		})),
 		persist_window: false,
 		persistence_path: None,
 		..Default::default()
@@ -598,6 +607,8 @@ struct Desktop {
 	monitor_geometry: Option<(Option<egui::Rect>, Option<f32>)>,
 	monitor_period: Option<Duration>,
 	frame_metrics: FrameMetrics,
+	#[cfg(all(feature = "demo", feature = "vulkan"))]
+	rendering_demo: Option<rendering_demo::RenderingDemo>,
 	avatars: Option<avatars::AvatarWorker>,
 	avatar_start_failed: bool,
 	avatar_clear_account: Option<model::Id>,
@@ -1511,6 +1522,9 @@ impl Desktop {
 			monitor_geometry: None,
 			monitor_period: None,
 			frame_metrics: FrameMetrics::new(frame_sample),
+			#[cfg(all(feature = "demo", feature = "vulkan"))]
+			rendering_demo: (demo && std::env::args().any(|arg| arg == "--demo-rendering"))
+				.then(rendering_demo::RenderingDemo::default),
 			avatars: None,
 			avatar_cleanup: None,
 			avatar_start_failed: false,
@@ -4566,12 +4580,16 @@ impl eframe::App for Desktop {
 		} else {
 			self.sign_in_screen(ui);
 		}
+		#[cfg(all(feature = "demo", feature = "vulkan"))]
+		if let Some(diagnostic) = &self.rendering_demo {
+			diagnostic.show(&ctx, &self.window);
+		}
 		let appearance = ctx.options(|options| options.theme_preference);
 		#[cfg(target_os = "windows")]
 		if self.window.is_decorated() != self.messaging.hide_title_bar {
-			ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(
-				self.messaging.hide_title_bar,
-			));
+			// egui's Decorations command also re-enables the shifted shadow client area.
+			// Change decorations directly, retaining the shadow-free creation policy.
+			self.window.set_decorations(self.messaging.hide_title_bar);
 		}
 		#[cfg(target_os = "macos")]
 		if let Err(error) =

@@ -1260,6 +1260,7 @@ pub fn debug_role_mentions_check(state: &mut State) {
 		let output = ctx.run_ui(Default::default(), |ui| {
 			let roles = known_roles(state, channel);
 			let mut profile = None;
+			let mut surface = crate::select::Surface::new(ui, "mention-test");
 			parsed.show_references(
 				ui,
 				&mut None,
@@ -1267,7 +1268,9 @@ pub fn debug_role_mentions_check(state: &mut State) {
 				&mut profile,
 				(&state.channels, &mut None, &state.guilds, roles),
 				(&mut avatars, true, &mut 0),
+				&mut surface,
 			);
+			surface.finish(ui);
 			assert!(profile.is_none());
 			let galley = composer.galley(
 				ui,

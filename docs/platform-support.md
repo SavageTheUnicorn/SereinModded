@@ -8,6 +8,20 @@ available (for example, `dx12` or `vulkan`). Affected users confirmed that forci
 DX12 launches successfully; the new default still needs native Windows validation.
 macOS and Linux retain their existing backend defaults.
 
+Windows disables winit's undecorated drop-shadow workaround, including after title-bar
+changes. That workaround shifts the restored client area by one pixel; maximizing bypasses
+it. This is a candidate mitigation for machine-specific windowed blur, not a confirmed
+diagnosis on the affected hardware. Native DPI and eframe's physical surface sizing remain
+unchanged. macOS/Linux window creation is unchanged.
+For offline inspection, run `cargo run --locked -p serein --features demo -- --demo --demo-rendering`.
+The diagnostic shows the physical client size, logical viewport, native/egui scale and WGPU
+surface dimensions sampled by a render callback, plus alternating one-pixel stripes.
+The surface sample is from the previous paint: compare at rest after resizing, maximizing,
+restoring, toggling the title bar and moving between monitors (including mixed DPI).
+Surface/client dimensions should match and stripes/text/images should stay sharp. If dimensions
+match but blur persists, the surface-resolution hypothesis is not established; investigate
+driver/DWM presentation on that machine. Windows visual acceptance remains unverified.
+
 The custom title strip requests a native window move on the initial primary-button press,
 including over its nonselectable context title. It does not wait for egui's text/drag threshold.
 Caption buttons and other clickable title-strip controls keep their own actions; Windows
