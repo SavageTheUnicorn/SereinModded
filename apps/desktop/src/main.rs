@@ -2968,16 +2968,6 @@ impl Desktop {
 							p.accent,
 						);
 					}
-					ui.add_space(18.0);
-					for detail in [self.credential_status, self.state.status]
-						.into_iter()
-						.filter(|detail| !detail.is_empty() && *detail != "Disconnected")
-					{
-						ui.add(
-							egui::Label::new(egui::RichText::new(detail).size(12.0).color(p.muted))
-								.wrap(),
-						);
-					}
 					ui.add_space(26.0);
 					ui.allocate_ui_with_layout(
 						egui::vec2(220.0, 0.0),
@@ -3567,11 +3557,14 @@ impl Desktop {
 			}
 			match outcome {
 				credentials::Outcome::Loaded(result) => {
-					let status = credentials::loaded_status(&result);
 					if let Ok(Some(secret)) = result {
+						// `connect()` already sets a "Connecting to Discord…" status; avoid
+						// stacking a second, near-duplicate line under the restore screen.
+						self.credential_status = "";
 						self.connect(secret, false, ctx);
+					} else {
+						self.credential_status = credentials::loaded_status(&result);
 					}
-					self.credential_status = status;
 				}
 				credentials::Outcome::Saved(Ok(())) => {
 					self.credential_status = "Login saved in the OS credential store"
@@ -4205,8 +4198,9 @@ impl eframe::App for Desktop {
 			downloads::Status::Downloading { received, total } => {
 				format!("Downloading: {} / {} KiB", received / 1024, total / 1024)
 			}
-			downloads::Status::Saved | downloads::Status::Cancelled => String::new(),
-			downloads::Status::Copied => "Copied to clipboard".into(),
+			downloads::Status::Saved | downloads::Status::Cancelled | downloads::Status::Copied => {
+				String::new()
+			}
 			downloads::Status::Failed(error) => (*error).into(),
 		};
 		self.messaging.downloads().active = self.downloads.is_active();
