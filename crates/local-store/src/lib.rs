@@ -34,6 +34,8 @@ pub struct AppPreferences {
 	pub keybinds: model::Keybinds,
 	/// Expanded server folders, bounded so one device preference stays small.
 	pub expanded_folders: Vec<u64>,
+	/// Per-user voice volume overrides, bounded so one device preference stays small.
+	pub user_volumes: Vec<(u64, u16)>,
 }
 impl Default for AppPreferences {
 	fn default() -> Self {
@@ -55,6 +57,7 @@ impl Default for AppPreferences {
 			output_percent: 100,
 			keybinds: Default::default(),
 			expanded_folders: Vec::new(),
+			user_volumes: Vec::new(),
 		}
 	}
 }
@@ -63,6 +66,8 @@ impl AppPreferences {
 		self.input_percent <= 200
 			&& self.output_percent <= 200
 			&& self.expanded_folders.len() <= 256
+			&& self.user_volumes.len() <= 64
+			&& self.user_volumes.iter().all(|(_, volume)| *volume <= 200)
 			&& self.keybinds.is_valid()
 			&& [&self.voice_input, &self.voice_output]
 				.into_iter()

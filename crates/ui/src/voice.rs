@@ -10,12 +10,36 @@ use egui::RichText;
 use model::Id;
 
 impl MessagingUi {
-	/// Fixed session-only overrides; zero IDs are unused slots.
+	/// Fixed session overrides; zero IDs are unused slots.
 	pub fn voice_user_volumes(&self) -> [(u64, u16); 64] {
 		self.voice_user_volumes
 			.as_deref()
 			.copied()
 			.unwrap_or([(0, 100); 64])
+	}
+
+	/// Non-default volume overrides, for persistence to device settings.
+	pub fn voice_user_volume_overrides(&self) -> Vec<(u64, u16)> {
+		self.voice_user_volumes
+			.as_deref()
+			.into_iter()
+			.flatten()
+			.filter(|(id, volume)| *id != 0 && *volume != 100)
+			.copied()
+			.collect()
+	}
+
+	/// Restore persisted per-user volume overrides, e.g. at startup.
+	pub fn set_voice_user_volume_overrides(&mut self, values: &[(u64, u16)]) {
+		if values.is_empty() {
+			self.voice_user_volumes = None;
+			return;
+		}
+		let mut array = [(0u64, 100u16); 64];
+		for (slot, value) in array.iter_mut().zip(values.iter().take(64)) {
+			*slot = *value;
+		}
+		self.voice_user_volumes = Some(Box::new(array));
 	}
 
 	fn voice_participant_menu(

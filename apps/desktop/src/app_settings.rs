@@ -43,6 +43,7 @@ impl Settings {
 			output_percent: ui.voice_gain.output_percent,
 			keybinds: ui.keybinds.clone(),
 			expanded_folders: ui.expanded_folders.clone(),
+			user_volumes: ui.voice_user_volume_overrides(),
 		};
 		if value != self.current {
 			self.state.touched = true;
@@ -72,5 +73,6 @@ impl Settings {
 		ui.voice_gain.output_percent = value.output_percent;
 		ui.keybinds = value.keybinds.clone();
 		ui.expanded_folders.clone_from(&value.expanded_folders);
+		ui.set_voice_user_volume_overrides(&value.user_volumes);
 	}
 }
