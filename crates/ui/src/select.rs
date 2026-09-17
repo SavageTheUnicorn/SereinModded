@@ -47,7 +47,7 @@ impl Surface {
 	/// `salt` distinguishes several blocks under one `Ui` id (body, forwarded preview, …).
 	pub fn new(ui: &egui::Ui, salt: impl egui::AsIdSalt) -> Self {
 		Self {
-			base: ui.id().with(salt),
+			base: ui.scope_id().with(salt),
 			runs: Vec::new(),
 			holes: Vec::new(),
 			overlays: Vec::new(),

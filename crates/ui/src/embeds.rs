@@ -321,8 +321,11 @@ pub fn show(
 						response.rect.right_top() + egui::vec2(-34.0, 4.0),
 						egui::Vec2::splat(30.0),
 					);
-					let star =
-						ui.interact(star_rect, ui.id().with("favorite"), egui::Sense::click());
+					let star = ui.interact(
+						star_rect,
+						ui.scope_id().with("favorite"),
+						egui::Sense::click(),
+					);
 					ui.painter()
 						.rect_filled(star_rect, 6, egui::Color32::from_black_alpha(190));
 					crate::icons::paint(

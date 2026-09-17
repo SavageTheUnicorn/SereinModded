@@ -1333,7 +1333,7 @@ impl MessagingUi {
 											let identity = ui
 												.interact(
 													identity.rect,
-													ui.id().with("account-identity"),
+													ui.scope_id().with("account-identity"),
 													egui::Sense::click(),
 												)
 												.on_hover_text("Profile and status");

@@ -1113,7 +1113,7 @@ impl Formatted {
 		} else {
 			&block.segments
 		};
-		let id = ui.id().with(("code-block", index));
+		let id = ui.scope_id().with(("code-block", index));
 		ui.allocate_ui_with_layout(
 			egui::vec2(width, 0.0),
 			egui::Layout::top_down(egui::Align::Min),

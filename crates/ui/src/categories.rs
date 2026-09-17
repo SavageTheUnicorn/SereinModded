@@ -1060,7 +1060,7 @@ impl MessagingUi {
 				);
 				let response = ui.interact(
 					empty,
-					ui.id().with(("server-channel-area", guild)),
+					ui.scope_id().with(("server-channel-area", guild)),
 					egui::Sense::click(),
 				);
 				let mut next = hide_muted;

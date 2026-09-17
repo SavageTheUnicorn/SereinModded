@@ -483,7 +483,7 @@ fn overlay_bar(
 	ui.painter().rect_filled(rect, radius, fill);
 	let mut bar = ui.new_child(
 		egui::UiBuilder::new()
-			.id(ui.make_persistent_id(("timeline-overlay", radius.sw == 0)))
+			.scope_id(ui.make_persistent_id(("timeline-overlay", radius.sw == 0)))
 			.max_rect(rect.shrink2(egui::vec2(12.0, 0.0)))
 			.layout(egui::Layout::left_to_right(egui::Align::Center)),
 	);
@@ -824,7 +824,7 @@ impl TimelineView {
 		if history_available && state.freshness == model::Freshness::Loading && empty {
 			let area = ui.available_rect_before_wrap().intersect(ui.clip_rect());
 			loading_messages(ui);
-			session.bind(ui, ui.id().with(("timeline", state.selected)), area);
+			session.bind(ui, ui.scope_id().with(("timeline", state.selected)), area);
 			return;
 		} else if empty && history_available && !welcome {
 			ui.label(match state.freshness {
@@ -864,7 +864,8 @@ impl TimelineView {
 			}
 		}
 		let area = ui.available_rect_before_wrap().intersect(ui.clip_rect());
-		let autoscroll_delta = session.bind(ui, ui.id().with(("timeline", state.selected)), area);
+		let autoscroll_delta =
+			session.bind(ui, ui.scope_id().with(("timeline", state.selected)), area);
 		if autoscroll_delta > 0.0 {
 			self.following = false;
 		}
@@ -1108,7 +1109,7 @@ impl TimelineView {
 				let compact = grouped(previous, message, self.unread_boundary);
 				let new_day =
 					previous.is_none_or(|p| timestamp(p.id).date() != timestamp(*id).date());
-				let response = ui.scope_builder(egui::UiBuilder::new().id(row_id), |ui| {
+				let response = ui.scope_builder(egui::UiBuilder::new().scope_id(row_id), |ui| {
 					if new_day {
 						let date = timestamp(*id);
 						divider(
@@ -1622,7 +1623,7 @@ impl TimelineView {
 					}
 					let focus = ui.interact(
 						rect,
-						ui.id().with("message-focus"),
+						ui.scope_id().with("message-focus"),
 						egui::Sense::focusable_noninteractive(),
 					);
 					focus.widget_info(|| {
@@ -1686,8 +1687,12 @@ impl TimelineView {
 								egui::FontId::proportional(11.0),
 								colors.muted,
 							);
-							ui.interact(rect, ui.id().with("timestamp"), egui::Sense::hover())
-								.on_hover_text_with(|| format!("{} UTC", time));
+							ui.interact(
+								rect,
+								ui.scope_id().with("timestamp"),
+								egui::Sense::hover(),
+							)
+							.on_hover_text_with(|| format!("{} UTC", time));
 						}
 						let own = state
 							.user

@@ -570,7 +570,7 @@ impl MessagingUi {
 		let has_video = self.tile_has_video(state, channel, tile);
 		let response = ui.interact(
 			rect,
-			ui.id().with(("voice-tile", tile.key())),
+			ui.scope_id().with(("voice-tile", tile.key())),
 			if has_video || matches!(tile, Tile::Participant(_)) {
 				egui::Sense::click()
 			} else {

@@ -919,7 +919,11 @@ pub const WINDOW_CONTROLS_WIDTH: f32 = if cfg!(target_os = "windows") {
 /// draws its own frame (Windows), a double click toggles maximize.
 pub fn window_drag(ui: &mut egui::Ui, rect: egui::Rect) {
 	// The OS owns dragging. Sensing only clicks lets child caption buttons win hit testing.
-	let response = ui.interact(rect, ui.id().with("window-drag"), egui::Sense::click());
+	let response = ui.interact(
+		rect,
+		ui.scope_id().with("window-drag"),
+		egui::Sense::click(),
+	);
 	// StartDrag must reach the window backend on the press, before egui's drag threshold.
 	if response.is_pointer_button_down_on()
 		&& ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Primary))

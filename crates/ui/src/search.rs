@@ -967,7 +967,7 @@ impl SearchUi {
 		let jump = ui
 			.interact(
 				card.response.rect,
-				ui.id().with("jump-result"),
+				ui.scope_id().with("jump-result"),
 				egui::Sense::click(),
 			)
 			.on_hover_text("Jump to this message");

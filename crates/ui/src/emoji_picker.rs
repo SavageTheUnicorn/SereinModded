@@ -779,7 +779,7 @@ impl Picker {
 											};
 											let search = ui.add(
 												egui::TextEdit::singleline(text)
-													.id(ui.id().with("picker-search"))
+													.id(ui.scope_id().with("picker-search"))
 													.char_limit(64)
 													.frame(egui::Frame::NONE)
 													.hint_text(hint)
@@ -1467,7 +1467,7 @@ fn tile(
 ) -> egui::Response {
 	let response = ui.interact(
 		rect,
-		ui.id().with(("gif-tile", label)),
+		ui.scope_id().with(("gif-tile", label)),
 		egui::Sense::click(),
 	);
 	let lifted = response.hovered() || response.has_focus();
@@ -1661,7 +1661,7 @@ fn gif_grid(
 				if !ui.is_rect_visible(rect) {
 					continue;
 				}
-				let id = ui.id().with(("gif", &gif.id));
+				let id = ui.scope_id().with(("gif", &gif.id));
 				let response = ui.interact(rect, id, egui::Sense::click());
 				let star_rect = egui::Rect::from_min_size(
 					egui::pos2(rect.right() - 32.0, rect.top() + 6.0),

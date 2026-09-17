@@ -1147,7 +1147,7 @@ fn section_diagram(
 		let response = ui
 			.interact(
 				region_rect,
-				ui.id().with((region as u8, part)),
+				ui.scope_id().with((region as u8, part)),
 				egui::Sense::click(),
 			)
 			.on_hover_text(region.label());

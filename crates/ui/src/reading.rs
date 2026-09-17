@@ -149,7 +149,7 @@ impl MessagingUi {
 			|| self.reading_sidebar_constrained != constrained
 		{
 			ui.ctx()
-				.data_mut(|data| data.remove::<PanelState>(ui.id().with(panel)));
+				.data_mut(|data| data.remove::<PanelState>(ui.scope_id().with(panel)));
 			self.reading_sidebar_applied = Some(self.reading_preferences.sidebar_width);
 		}
 		self.reading_sidebar_constrained = constrained;

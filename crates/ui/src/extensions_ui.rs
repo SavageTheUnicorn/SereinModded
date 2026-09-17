@@ -509,7 +509,11 @@ impl ExtensionUi {
 					.contains(&Capability::DeletedMessages))
 		{
 			draw_native_preview(ui, rect, entry, radius);
-			let response = ui.interact(rect, ui.id().with("enlarge-preview"), egui::Sense::click());
+			let response = ui.interact(
+				rect,
+				ui.scope_id().with("enlarge-preview"),
+				egui::Sense::click(),
+			);
 			response.widget_info(|| {
 				egui::WidgetInfo::labeled(
 					egui::WidgetType::Button,
@@ -586,8 +590,11 @@ impl ExtensionUi {
 						.corner_radius(radius)
 						.paint_at(ui, egui::Rect::from_center_size(rect.center(), fit));
 				}
-				let response =
-					ui.interact(rect, ui.id().with("enlarge-preview"), egui::Sense::click());
+				let response = ui.interact(
+					rect,
+					ui.scope_id().with("enlarge-preview"),
+					egui::Sense::click(),
+				);
 				response.widget_info(|| {
 					egui::WidgetInfo::labeled(
 						egui::WidgetType::Button,

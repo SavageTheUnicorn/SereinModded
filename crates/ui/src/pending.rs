@@ -114,7 +114,7 @@ pub fn show(
 								model::Id(egui::Id::unique(&pending.nonce).value()),
 								&pending.content,
 							);
-							let id = ui.id().with("spoilers");
+							let id = ui.scope_id().with("spoilers");
 							let mut revealed =
 								ui.data_mut(|data| data.get_temp::<u32>(id).unwrap_or(0));
 							let mut surface = crate::select::Surface::new(ui, "pending-body");
