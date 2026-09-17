@@ -203,13 +203,12 @@ fn modifier_bits(modifiers: Modifiers) -> u8 {
 }
 
 fn egui_modifiers(bits: u8) -> Modifiers {
-	let primary = bits & model::keybinds::PRIMARY != 0;
 	Modifiers {
 		alt: bits & model::keybinds::ALT != 0,
-		ctrl: bits & model::keybinds::CTRL != 0 || (primary && !cfg!(target_os = "macos")),
+		ctrl: bits & model::keybinds::CTRL != 0,
 		shift: bits & model::keybinds::SHIFT != 0,
-		mac_cmd: primary && cfg!(target_os = "macos"),
-		command: primary,
+		mac_cmd: false,
+		command: bits & model::keybinds::PRIMARY != 0,
 	}
 }
 
@@ -455,11 +454,15 @@ mod tests {
 		assert!(bindings.is_valid());
 		assert_eq!(
 			chord_parts(bindings.chord(KeybindAction::SwitchConversation)).join(" + "),
-			"Ctrl + K"
+			if cfg!(target_os = "macos") {
+				"⌘ + K"
+			} else {
+				"Ctrl + K"
+			}
 		);
 		let ctx = egui::Context::default();
 		let mut matched = false;
-		let _ = ctx.run_ui(
+		let mut output = ctx.run_ui(
 			egui::RawInput {
 				events: vec![Event::Key {
 					key: Key::V,
@@ -475,6 +478,7 @@ mod tests {
 					ui.input_mut(|input| pressed(input, bindings.chord(KeybindAction::PushToTalk)))
 			},
 		);
+		output.textures_delta.clear();
 		assert!(matched);
 	}
 }

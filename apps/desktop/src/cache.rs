@@ -53,7 +53,7 @@ fn message_bytes(messages: &Vec<Message>) -> usize {
 #[allow(clippy::large_enum_variant)]
 pub enum Operation {
 	LoadAppPreferences,
-	SaveAppPreferences(local_store::AppPreferences),
+	SaveAppPreferences(Box<local_store::AppPreferences>),
 	LoadAppearance,
 	SaveAppearance(Appearance),
 	SaveThemeVariant(Option<String>),
@@ -94,7 +94,7 @@ pub enum Operation {
 }
 #[allow(clippy::large_enum_variant)]
 pub enum Outcome {
-	AppPreferences(Result<local_store::AppPreferences, StoreError>),
+	AppPreferences(Result<Box<local_store::AppPreferences>, StoreError>),
 	AppPreferencesSaved(Result<(), StoreError>),
 	/// Saved appearance plus the saved theme preset key, if any.
 	Appearance(Appearance, Option<String>),
@@ -350,7 +350,7 @@ fn execute(
 		}
 		Operation::LoadAppPreferences => {
 			return Outcome::AppPreferences(match store {
-				Ok(store) => store.app_preferences(),
+				Ok(store) => store.app_preferences().map(Box::new),
 				Err(error) => Err(*error),
 			});
 		}

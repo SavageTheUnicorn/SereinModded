@@ -311,11 +311,15 @@ fn divider(ui: &mut egui::Ui, label: String, unread: bool) {
 		let text = ui.painter().layout_no_wrap(label.clone(), font, color);
 		let (rect, response) = ui.allocate_exact_size(
 			egui::vec2((ui.available_width() - 16.0).max(0.0), 20.0),
-			egui::Sense::hover(),
+			crate::select::band_sense(),
 		);
 		response.widget_info(|| {
 			egui::WidgetInfo::labeled(egui::WidgetType::Label, ui.is_enabled(), &label)
 		});
+		let pos = egui::pos2(
+			rect.center().x - text.size().x / 2.0,
+			rect.center().y - text.size().y / 2.0,
+		);
 		let gap = (rect.width() - text.size().x - 24.0).max(0.0) / 2.0;
 		for (a, b) in [
 			(rect.left(), rect.left() + gap),
@@ -329,14 +333,17 @@ fn divider(ui: &mut egui::Ui, label: String, unread: bool) {
 				egui::Stroke::new(1.0, if unread { color } else { colors.border }),
 			);
 		}
-		ui.painter().galley(
-			egui::pos2(
-				rect.center().x - text.size().x / 2.0,
-				rect.center().y - text.size().y / 2.0,
-			),
+		egui::text_selection::LabelSelectionState::label_text_selection(
+			ui,
+			&response,
+			pos,
 			text,
 			color,
+			egui::Stroke::NONE,
 		);
+		if response.hovered() {
+			ui.ctx().set_cursor_icon(egui::CursorIcon::Default);
+		}
 	});
 	ui.add_space(4.0);
 }
@@ -377,6 +384,10 @@ fn message_actions(
 				}
 			});
 			ui.separator();
+		}
+		if crate::select::has_selection(ui.ctx()) && ui.button("Copy").clicked() {
+			crate::select::request_copy(ui.ctx());
+			ui.close();
 		}
 		if ui.button("Copy message").clicked() {
 			ui.ctx().copy_text(message.display_text().into_owned());
@@ -513,6 +524,7 @@ fn show_system(
 	state: &State,
 	profile: &mut Option<model::User>,
 	user_action: &mut Option<crate::user_menu::Action>,
+	surface: &mut crate::select::Surface,
 ) {
 	{
 		let colors = crate::design::palette(ui);
@@ -520,29 +532,41 @@ fn show_system(
 			ui.spacing_mut().item_spacing = egui::vec2(0.0, 2.0);
 			for segment in &system.segments {
 				if !segment.strong {
-					ui.label(RichText::new(&segment.text).color(colors.muted));
+					let (pos, galley, response) =
+						egui::Label::new(RichText::new(&segment.text).color(colors.muted))
+							.wrap()
+							.selectable(false)
+							.layout_in_ui(ui);
+					surface.run(ui, &response, pos, galley, Vec::new());
 					continue;
 				}
 				let text = crate::design::medium(ui, &segment.text, 15.0).color(colors.text_strong);
 				let Some(user) = &segment.user else {
-					ui.add(egui::Label::new(text));
+					let (pos, galley, response) = egui::Label::new(text)
+						.wrap()
+						.selectable(false)
+						.layout_in_ui(ui);
+					surface.run(ui, &response, pos, galley, Vec::new());
 					continue;
 				};
 				let response = ui
 					.add(egui::Label::new(text).sense(egui::Sense::click()))
 					.on_hover_cursor(egui::CursorIcon::PointingHand);
+				surface.keep(&response);
 				crate::user_menu::show(&response, state, user, profile, user_action);
 				if response.clicked() {
 					*profile = Some(user.clone());
 				}
 			}
 			ui.add_space(8.0);
-			ui.label(
-				RichText::new(format!("{:02}:{:02}", time.hour(), time.minute()))
-					.size(12.0)
-					.color(colors.muted),
-			)
-			.on_hover_text_with(|| format!("{time} UTC"));
+			let stamp = ui
+				.label(
+					RichText::new(format!("{:02}:{:02}", time.hour(), time.minute()))
+						.size(12.0)
+						.color(colors.muted),
+				)
+				.on_hover_text_with(|| format!("{time} UTC"));
+			surface.keep(&stamp);
 		});
 	}
 }
@@ -797,7 +821,9 @@ impl TimelineView {
 			ui.weak("Message history is unavailable with current permission information.");
 		}
 		if history_available && state.freshness == model::Freshness::Loading && empty {
+			let area = ui.available_rect_before_wrap().intersect(ui.clip_rect());
 			loading_messages(ui);
+			session.bind(ui, ui.id().with(("timeline", state.selected)), area);
 			return;
 		} else if empty && history_available && !welcome {
 			ui.label(match state.freshness {
@@ -991,6 +1017,7 @@ impl TimelineView {
 							.show(ui, |ui| {
 								ui.set_min_width((width - 32.0).max(1.0));
 								ui.spacing_mut().item_spacing = egui::vec2(16.0, 4.0);
+								let mut surface = crate::select::Surface::new(ui, "deleted-body");
 								ui.horizontal_top(|ui| {
 									avatars.show_plain(ui, &message.author, 40.0, state.demo);
 									ui.vertical(|ui| {
@@ -1033,20 +1060,19 @@ impl TimelineView {
 												});
 											},
 										);
-										let body = ui.add(
-											egui::Label::new(
-												RichText::new(if message.content.is_empty() {
-													"[Deleted message had no text]"
-												} else {
-													&message.content
-												})
-												.size(16.0)
-												.color(colors.danger),
-											)
-											.wrap()
-											.selectable(true),
-										);
-										body.widget_info(|| {
+										let (pos, galley, response) = egui::Label::new(
+											RichText::new(if message.content.is_empty() {
+												"[Deleted message had no text]"
+											} else {
+												&message.content
+											})
+											.size(16.0)
+											.color(colors.danger),
+										)
+										.wrap()
+										.selectable(false)
+										.layout_in_ui(ui);
+										response.widget_info(|| {
 											egui::WidgetInfo::labeled(
 												egui::WidgetType::Label,
 												true,
@@ -1057,7 +1083,10 @@ impl TimelineView {
 												),
 											)
 										});
+										surface.run(ui, &response, pos, galley, Vec::new());
 									});
+									surface.cover(ui.min_rect());
+									surface.finish(ui);
 								});
 							});
 					});
@@ -1094,6 +1123,7 @@ impl TimelineView {
 							bottom: 1,
 						})
 						.show(ui, |ui| {
+							let mut surface = crate::select::Surface::new(ui, "row");
 							ui.spacing_mut().item_spacing = egui::vec2(16.0, 4.0);
 							if let Some(reply) = message.reply_to {
 								ui.horizontal(|ui| {
@@ -1132,7 +1162,7 @@ impl TimelineView {
 									);
 									// Reuse only loaded content; never fetch a thread while painting.
 									if message.reply_deleted || state.timeline.is_deleted(reply) {
-										ui.add(
+										let deleted = ui.add(
 											egui::Label::new(
 												RichText::new("Message deleted")
 													.size(13.0)
@@ -1141,6 +1171,7 @@ impl TimelineView {
 											)
 											.truncate(),
 										);
+										surface.keep(&deleted);
 									} else {
 										ui.add_enabled_ui(
 											state.can_open_reply_target(reply),
@@ -1149,17 +1180,16 @@ impl TimelineView {
 												let text = if let Some(original) =
 													state.timeline.get(reply)
 												{
-													if avatars
-														.show(
-															ui,
-															&original.author,
-															16.0,
-															state.demo,
-														)
-														.clicked()
-													{
+													let reply_avatar = avatars.show(
+														ui,
+														&original.author,
+														16.0,
+														state.demo,
+													);
+													if reply_avatar.clicked() {
 														self.reply_target = Some(reply);
 													}
+													surface.keep(&reply_avatar);
 													preview.append(
 														&format!(
 															"@{}  ",
@@ -1205,7 +1235,7 @@ impl TimelineView {
 														..Default::default()
 													},
 												);
-												if ui
+												let reply_preview = ui
 													.add(
 														egui::Label::new(preview)
 															.truncate()
@@ -1215,9 +1245,9 @@ impl TimelineView {
 													.on_hover_text("View original message")
 													.on_disabled_hover_text(
 														"Wait for readable, current message history",
-													)
-													.clicked()
-												{
+													);
+												surface.keep(&reply_preview);
+												if reply_preview.clicked() {
 													self.reply_target = Some(reply);
 												}
 											},
@@ -1226,6 +1256,7 @@ impl TimelineView {
 								});
 							}
 							let system = message.system_message();
+							let mut body_bottom = f32::NAN;
 							ui.horizontal_top(|ui| {
 								if system.is_some() {
 									let (gutter, _) = ui.allocate_exact_size(
@@ -1263,6 +1294,7 @@ impl TimelineView {
 									if avatar.clicked() {
 										*profile = Some(message.author.clone());
 									}
+									surface.keep(&avatar);
 								}
 								ui.vertical(|ui| {
 									ui.set_width(ui.available_width());
@@ -1300,17 +1332,20 @@ impl TimelineView {
 												if author.clicked() {
 													*profile = Some(message.author.clone());
 												}
+												surface.keep(&author);
 												let time = timestamp(*id);
-												ui.label(
-													RichText::new(format!(
-														"{:02}:{:02}",
-														time.hour(),
-														time.minute()
-													))
-													.size(12.0)
-													.color(colors.muted),
-												)
-												.on_hover_text_with(|| format!("{} UTC", time));
+												let time = ui
+													.label(
+														RichText::new(format!(
+															"{:02}:{:02}",
+															time.hour(),
+															time.minute()
+														))
+														.size(12.0)
+														.color(colors.muted),
+													)
+													.on_hover_text_with(|| format!("{} UTC", time));
+												surface.keep(&time);
 											},
 										);
 									}
@@ -1322,6 +1357,7 @@ impl TimelineView {
 											state,
 											profile,
 											&mut self.user_action,
+											&mut surface,
 										);
 									}
 									let body = egui::Frame::NONE
@@ -1373,6 +1409,7 @@ impl TimelineView {
 														),
 													),
 													(avatars, state.demo, &mut text),
+													&mut surface,
 												);
 											}
 											if formatted.limited {
@@ -1386,10 +1423,13 @@ impl TimelineView {
 											}
 											if crate::embeds::has_media_spoilers(message) && !media
 											{
-												if ui.button("Reveal spoiler media").clicked() {
+												let reveal = ui.button("Reveal spoiler media");
+												surface.keep(&reveal);
+												if reveal.clicked() {
 													media = true;
 												}
 											} else {
+												let invite_top = ui.cursor().top();
 												crate::invites::show(
 													ui,
 													message,
@@ -1398,6 +1438,14 @@ impl TimelineView {
 													&mut self.invite_requests,
 													&mut self.invite_action,
 												);
+												surface.exclude(egui::Rect::from_min_max(
+													egui::pos2(ui.max_rect().left(), invite_top),
+													egui::pos2(
+														ui.max_rect().right(),
+														ui.min_rect().bottom(),
+													),
+												));
+												let embed_top = ui.cursor().top();
 												if let Some(gif) = crate::embeds::show(
 													ui,
 													message,
@@ -1410,6 +1458,13 @@ impl TimelineView {
 												) {
 													self.gif_favorite = Some(gif);
 												}
+												surface.exclude(egui::Rect::from_min_max(
+													egui::pos2(ui.max_rect().left(), embed_top),
+													egui::pos2(
+														ui.max_rect().right(),
+														ui.min_rect().bottom(),
+													),
+												));
 												crate::attachments::show(
 													ui,
 													message,
@@ -1420,13 +1475,16 @@ impl TimelineView {
 													&mut self.audio,
 													&mut self.video,
 													state.demo,
+													&mut surface,
 												);
 											}
-											if (text != 0 || media)
-												&& ui.small_button("Hide spoilers").clicked()
-											{
-												text = 0;
-												media = false;
+											if text != 0 || media {
+												let hide = ui.small_button("Hide spoilers");
+												surface.keep(&hide);
+												if hide.clicked() {
+													text = 0;
+													media = false;
+												}
 											}
 											if before != (text, media) {
 												if text == 0 && !media {
@@ -1492,17 +1550,17 @@ impl TimelineView {
 															&& state.can_view(c.id)
 													})
 													.and_then(|c| discord_url(c, Some(message.id)));
-												if ui
-													.add_enabled(
-														target.is_some(),
-														egui::Button::new("Open in Discord"),
-													)
-													.clicked()
-												{
+												let open = ui.add_enabled(
+													target.is_some(),
+													egui::Button::new("Open in Discord"),
+												);
+												surface.keep(&open);
+												if open.clicked() {
 													self.browser_opening = target;
 												}
 											}
 										});
+									body_bottom = body.response.rect.bottom();
 									if message.forwarded {
 										let rail = egui::Rect::from_min_max(
 											body.response.rect.min,
@@ -1529,6 +1587,12 @@ impl TimelineView {
 									}
 								});
 							});
+							let mut cover = ui.min_rect();
+							if body_bottom.is_finite() {
+								cover.max.y = body_bottom;
+							}
+							surface.cover(cover);
+							surface.finish(ui);
 						});
 					let rect = row.response.rect;
 					let mentioned =
@@ -1586,7 +1650,8 @@ impl TimelineView {
 					let context_menu = (ui.rect_contains_pointer(rect) || toolbar_hover)
 						&& !other_toolbar_hover
 						&& !egui::Popup::is_any_open(ui.ctx())
-						&& ui.input(|i| i.pointer.secondary_clicked());
+						&& (ui.input(|i| i.pointer.secondary_clicked())
+							|| crate::select::open_menu(ui.ctx()));
 					if context_menu
 						|| hovered || focus.has_focus()
 						|| keyboard_focus.as_ref().is_some_and(|r| r.id == focus.id)
@@ -1864,10 +1929,11 @@ impl TimelineView {
 
 		let scrolled_toward_bottom = ui.input(|input| {
 			(scroll_delta < 0.0
-				&& input
-					.pointer
-					.hover_pos()
-					.is_some_and(|pos| output.inner_rect.contains(pos)))
+				&& (session.holding()
+					|| input
+						.pointer
+						.hover_pos()
+						.is_some_and(|pos| output.inner_rect.contains(pos))))
 				|| (input.pointer.any_down() && output.state.offset.y > output.inner)
 		});
 		if at_bottom && (can_load_newer || self.at_current_latest) {
@@ -1946,9 +2012,10 @@ impl TimelineView {
 			&& output.state.offset.y < 160.0
 			&& ui.input(|i| {
 				scroll_delta > 0.0
-					&& i.pointer
-						.hover_pos()
-						.is_some_and(|pos| output.inner_rect.contains(pos))
+					&& (session.holding()
+						|| i.pointer
+							.hover_pos()
+							.is_some_and(|pos| output.inner_rect.contains(pos)))
 			}) && state.can_load_older();
 		// Discord-style overlays: an unread strip hangs from the top edge, and a translucent
 		// "older messages" bar floats above the composer while the user is not following. They

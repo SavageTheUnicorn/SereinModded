@@ -58,8 +58,9 @@ mod profile_edit;
 mod reactions;
 mod reading;
 pub mod screen;
-mod scroll;
+pub mod scroll;
 mod search;
+pub mod select;
 mod server_admin;
 mod server_audit_log;
 mod server_integrations;
@@ -321,6 +322,16 @@ fn composer_cap(
 		.rect
 }
 impl MessagingUi {
+	/// Feed the frame's middle button before `show`. Never fed means never pressed.
+	pub fn middle_button(&mut self, middle: scroll::Middle) {
+		self.scroll.middle(middle);
+	}
+
+	/// True while a drive needs the cursor position, including outside the window.
+	pub fn tracking_pointer(&self) -> bool {
+		self.scroll.tracking()
+	}
+
 	/// Returns whether the configured push-to-talk chord is held in the focused window.
 	pub fn push_to_talk_down(&self, ctx: &egui::Context) -> bool {
 		ctx.input(|input| {
@@ -1053,7 +1064,8 @@ impl MessagingUi {
 						egui::Label::new(
 							design::semibold(ui, title, 15.0).color(colors.text_strong),
 						)
-						.truncate(),
+						.truncate()
+						.selectable(false),
 					);
 				});
 				ui.painter().hline(
