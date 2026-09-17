@@ -4,7 +4,7 @@ use egui::{Align2, Color32, FontId};
 use model::Id;
 
 /// Fixed width of the server rail column.
-pub(super) const RAIL_WIDTH: f32 = 72.0;
+pub(super) const RAIL_WIDTH: f32 = 68.0;
 
 #[derive(Default)]
 pub(super) struct RailCache {
@@ -174,28 +174,28 @@ impl MessagingUi {
 						design::ImageSection::ServerList,
 					))
 					.inner_margin(egui::Margin {
-						left: 12,
-						right: 12,
+						left: 11,
+						right: 11,
 						top: 4,
 						bottom: 8,
 					}),
 			)
 			.show(ui, |ui| {
-				ui.spacing_mut().item_spacing.y = 12.0;
+				ui.spacing_mut().item_spacing.y = 11.0;
 				let home = self.guild.is_none();
 				let (rect, response) =
-					ui.allocate_exact_size(egui::Vec2::splat(48.0), egui::Sense::click());
+					ui.allocate_exact_size(egui::Vec2::splat(46.0), egui::Sense::click());
 				let hovered = response.hovered() || response.has_focus();
 				let fill = if home || hovered {
 					colors.accent
 				} else {
 					colors.raised
 				};
-				ui.painter().rect_filled(rect, 14, fill);
+				ui.painter().rect_filled(rect, 13, fill);
 				crate::icons::paint(
 					ui.painter(),
 					crate::icons::Icon::Serein,
-					rect.shrink(11.0),
+					rect.shrink(10.5),
 					if home || hovered {
 						colors.accent_text
 					} else {

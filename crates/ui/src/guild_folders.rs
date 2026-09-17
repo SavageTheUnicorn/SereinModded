@@ -240,8 +240,8 @@ fn drop_target(
 }
 
 const MOSAIC: usize = 4;
-const MOSAIC_PREVIEW: f32 = 40.0;
-const MOSAIC_ICON: f32 = 19.0;
+const MOSAIC_PREVIEW: f32 = 38.0;
+const MOSAIC_ICON: f32 = 18.0;
 const MOSAIC_GAP: f32 = 2.0;
 
 fn folder_mosaic<'a>(folder: &Folder, state: &'a State) -> [Option<&'a model::Guild>; MOSAIC] {
@@ -392,7 +392,7 @@ impl MessagingUi {
 							let tint =
 								Color32::from_rgb((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8);
 							let (rect, response) = ui.allocate_exact_size(
-								egui::Vec2::splat(48.0),
+								egui::Vec2::splat(46.0),
 								Sense::click_and_drag(),
 							);
 							let open = self.folder_ui.expanded.contains(&id);
@@ -400,7 +400,7 @@ impl MessagingUi {
 								icons::paint(
 									ui.painter(),
 									Icon::FolderOpen,
-									rect.shrink(9.0),
+									rect.shrink(8.5),
 									tint,
 								);
 							} else {
@@ -622,8 +622,8 @@ impl MessagingUi {
 		{
 			let clip = ui.clip_rect();
 			let top = clip.top();
-			let bottom = (clip.bottom() - 48.0).max(top);
-			let position = egui::pos2(ui.max_rect().left(), (pointer.y - 24.0).clamp(top, bottom));
+			let bottom = (clip.bottom() - 46.0).max(top);
+			let position = egui::pos2(ui.max_rect().left(), (pointer.y - 23.0).clamp(top, bottom));
 			ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
 			egui::Area::new(egui::Id::unique("server-drag-preview"))
 				.order(egui::Order::Tooltip)
@@ -634,7 +634,8 @@ impl MessagingUi {
 					match *item {
 						Item::Server(id) => {
 							if let Some(guild) = state.guilds.iter().find(|g| g.id == id) {
-								self.avatars.show_guild(ui, guild, false, state.demo);
+								self.avatars
+									.show_guild_sized(ui, guild, false, state.demo, 46.0);
 							}
 						}
 						Item::Folder(id) => {
@@ -650,7 +651,7 @@ impl MessagingUi {
 									rgb as u8,
 								);
 								let (rect, _) =
-									ui.allocate_exact_size(egui::Vec2::splat(48.0), Sense::hover());
+									ui.allocate_exact_size(egui::Vec2::splat(46.0), Sense::hover());
 								paint_folder_tile(
 									ui,
 									&mut self.avatars,
