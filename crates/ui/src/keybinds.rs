@@ -22,6 +22,11 @@ const FORMATTING: &[KeybindAction] = &[
 	KeybindAction::CodeBlock,
 	KeybindAction::Spoiler,
 ];
+const VOICE: &[KeybindAction] = &[
+	KeybindAction::ToggleMute,
+	KeybindAction::ToggleDeafen,
+	KeybindAction::PushToTalk,
+];
 
 pub(super) fn show(
 	ui: &mut egui::Ui,
@@ -30,27 +35,6 @@ pub(super) fn show(
 	global_status: &str,
 ) {
 	let colors = design::palette(ui);
-	ui.heading("Custom Keybinds");
-	ui.label(
-		"Make Serein feel like yours. Click any shortcut, then press the key combination you want.",
-	);
-	design::card(ui, |ui| {
-		ui.horizontal(|ui| {
-			ui.label(RichText::new("⌨").size(20.0).color(colors.accent));
-			ui.vertical(|ui| {
-				ui.label(design::semibold(
-					ui,
-					"Shortcuts are saved on this device",
-					14.0,
-				));
-				ui.weak(
-					"Application shortcuts work while Serein is focused. Push to Talk can also work globally.",
-				);
-			});
-		});
-	});
-
-	ui.add_space(18.0);
 	section(
 		ui,
 		"Navigation",
@@ -75,14 +59,7 @@ pub(super) fn show(
 		bindings,
 		capturing,
 	);
-	section(
-		ui,
-		"Voice",
-		"Hold the key during a connected call to speak.",
-		&[KeybindAction::PushToTalk],
-		bindings,
-		capturing,
-	);
+	voice_section(ui, bindings, capturing);
 	ui.add_space(10.0);
 	ui.label(
 		RichText::new("GLOBAL AVAILABILITY")
@@ -91,6 +68,47 @@ pub(super) fn show(
 	);
 	ui.label(RichText::new(global_status).color(colors.muted));
 
+	capture(ui, bindings, capturing);
+}
+
+pub(super) fn show_voice(
+	ui: &mut egui::Ui,
+	bindings: &mut Keybinds,
+	capturing: &mut Option<KeybindAction>,
+	global_status: &str,
+) {
+	let colors = design::palette(ui);
+	ui.add_space(12.0);
+	ui.label(design::eyebrow(ui, "VOICE KEYBINDS", colors.muted));
+	ui.label("Mute, deafen and Push to Talk can be remapped independently.");
+	voice_section(ui, bindings, capturing);
+	ui.add_space(10.0);
+	ui.label(
+		RichText::new("GLOBAL AVAILABILITY")
+			.size(11.0)
+			.color(colors.muted),
+	);
+	ui.label(RichText::new(global_status).color(colors.muted));
+	capture(ui, bindings, capturing);
+}
+
+fn voice_section(
+	ui: &mut egui::Ui,
+	bindings: &mut Keybinds,
+	capturing: &mut Option<KeybindAction>,
+) {
+	section(
+		ui,
+		"Voice",
+		"Control your microphone and incoming audio during a connected call.",
+		VOICE,
+		bindings,
+		capturing,
+	);
+}
+
+fn capture(ui: &mut egui::Ui, bindings: &mut Keybinds, capturing: &mut Option<KeybindAction>) {
+	let colors = design::palette(ui);
 	if let Some(action) = *capturing {
 		let mut captured = None;
 		let mut cancelled = false;
@@ -449,7 +467,7 @@ mod tests {
 	use super::*;
 
 	#[test]
-	fn default_bindings_round_trip_and_match() {
+	fn default_push_to_talk_does_not_consume_typing() {
 		let bindings = Keybinds::default();
 		assert!(bindings.is_valid());
 		assert_eq!(
@@ -461,7 +479,7 @@ mod tests {
 			}
 		);
 		let ctx = egui::Context::default();
-		let mut matched = false;
+		let mut down_without_consuming = false;
 		let mut output = ctx.run_ui(
 			egui::RawInput {
 				events: vec![Event::Key {
@@ -474,11 +492,22 @@ mod tests {
 				..Default::default()
 			},
 			|ui| {
-				matched =
-					ui.input_mut(|input| pressed(input, bindings.chord(KeybindAction::PushToTalk)))
+				down_without_consuming = ui.input(|input| {
+					down(input, bindings.chord(KeybindAction::PushToTalk))
+						&& input.events.iter().any(|event| {
+							matches!(
+								event,
+								Event::Key {
+									key: Key::V,
+									pressed: true,
+									..
+								}
+							)
+						})
+				})
 			},
 		);
 		output.textures_delta.clear();
-		assert!(matched);
+		assert!(down_without_consuming);
 	}
 }

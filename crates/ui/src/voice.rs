@@ -1005,8 +1005,12 @@ impl MessagingUi {
 		.on_hover_text(hint)
 		.on_disabled_hover_text(hint);
 		if response.clicked()
-			&& let Some(command) = state.start_call(channel, !guild && !incoming)
-		{
+			&& let Some(command) = state.start_call_with_mute(
+				channel,
+				!guild && !incoming,
+				self.voice_muted,
+				self.voice_deafened,
+			) {
 			commands.push(command);
 		}
 		response
@@ -1150,7 +1154,7 @@ impl MessagingUi {
 				design::switch(
 					ui,
 					"Push to talk",
-					Some("Hold V while this window is focused and you are not typing."),
+					Some("Hold your configured shortcut when you want to speak."),
 					&mut self.voice_push_to_talk,
 				);
 			} else {
@@ -1226,6 +1230,14 @@ impl MessagingUi {
 				design::card(ui, |ui| self.voice_processing_controls(ui));
 			}
 		});
+		if !compact {
+			crate::keybinds::show_voice(
+				ui,
+				&mut self.keybinds,
+				&mut self.keybind_capture,
+				self.global_keybind_status,
+			);
+		}
 		ui.add_space(8.0);
 		ui.label(design::eyebrow(ui, "Camera", colors.muted));
 		design::card(ui, |ui| self.camera_settings_content(ui, demo));
@@ -1429,7 +1441,7 @@ impl MessagingUi {
 		design::switch(
 			ui,
 			"Push to talk",
-			Some("Hold V while this window is focused and you are not typing."),
+			Some("Hold your configured shortcut when you want to speak."),
 			&mut self.voice_push_to_talk,
 		)
 		.on_hover_text("Mute and deafen always take priority.");
@@ -1466,28 +1478,51 @@ impl MessagingUi {
 	) -> egui::Response {
 		let colors = design::palette(ui);
 		let Some(call) = state.voice.active.as_ref() else {
+			let active = if deafen {
+				self.voice_deafened
+			} else {
+				self.voice_muted
+			};
+			let label = match (deafen, active) {
+				(true, true) => "Undeafen",
+				(true, false) => "Deafen",
+				(false, true) => "Unmute",
+				(false, false) => "Mute",
+			};
 			let (rect, response) =
-				ui.allocate_exact_size(egui::Vec2::splat(size), egui::Sense::hover());
+				ui.allocate_exact_size(egui::Vec2::splat(size), egui::Sense::click());
+			if response.hovered() || response.has_focus() {
+				ui.painter().rect_filled(rect, 6, colors.hover);
+			}
 			crate::icons::paint(
 				ui.painter(),
-				if deafen {
-					crate::icons::Icon::Headphones
-				} else {
-					crate::icons::Icon::Microphone
+				match (deafen, active) {
+					(true, true) => crate::icons::Icon::HeadphonesSlash,
+					(true, false) => crate::icons::Icon::Headphones,
+					(false, true) => crate::icons::Icon::MicrophoneSlash,
+					(false, false) => crate::icons::Icon::Microphone,
 				},
 				rect.shrink(size * 0.2),
-				colors.muted.gamma_multiply(0.5),
+				if active { colors.danger } else { colors.muted },
 			);
-			let label = if deafen { "Deafen" } else { "Mute" };
-			response
-				.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, false, label));
-			return response.on_hover_text("Join a voice channel or call first.");
+			response.widget_info(|| {
+				egui::WidgetInfo::selected(egui::WidgetType::Button, true, active, label)
+			});
+			if response.clicked() {
+				if deafen {
+					self.voice_deafened = !active;
+				} else {
+					self.voice_muted = !active;
+				}
+			}
+			return response.on_hover_text(format!("{label}; applies to your next call."));
 		};
 		let channel = call.channel;
 		let can_speak = state.can_speak(channel);
-		let (mut muted, mut deafened) = (call.muted || !can_speak, call.deafened);
+		let (mut muted, mut deafened) = (self.voice_muted || !can_speak, self.voice_deafened);
 		let active = if deafen { deafened } else { muted };
-		let enabled = self.controls_enabled(state) && (deafen || can_speak);
+		let enabled =
+			(self.controls_enabled(state) || state.demo) && (deafen || can_speak || state.demo);
 		let label = match (deafen, active) {
 			(true, true) => "Undeafen",
 			(true, false) => "Deafen",
@@ -1536,6 +1571,8 @@ impl MessagingUi {
 			} else {
 				muted = !muted;
 			}
+			self.voice_muted = muted;
+			self.voice_deafened = deafened;
 			if let Some(command) = state.set_call_mute(muted, deafened) {
 				commands.push(command);
 			}
@@ -1561,8 +1598,9 @@ impl MessagingUi {
 			&& state.can_camera(channel)
 			&& matches!(phase, Phase::Connected | Phase::Waiting);
 		let can_speak = state.can_speak(channel);
-		let (mut muted, mut deafened) = (call.muted || !can_speak, call.deafened);
+		let (mut muted, mut deafened) = (self.voice_muted || !can_speak, self.voice_deafened);
 		let controls = self.controls_enabled(state);
+		let voice_toggles = controls || state.demo;
 		let focused = self.voice_focus.is_some();
 		let pill_width = MEDIA_PILL + if focused { 48.0 } else { 0.0 };
 		let width = pill_width + BAR_GAP + HANG_UP;
@@ -1582,7 +1620,7 @@ impl MessagingUi {
 						crate::icons::Icon::Microphone
 					},
 					48.0,
-					controls && can_speak,
+					voice_toggles && (can_speak || state.demo),
 					if muted { colors.danger } else { STAGE_TEXT },
 					if muted { "Unmute" } else { "Mute" },
 					if !can_speak {
@@ -1612,7 +1650,7 @@ impl MessagingUi {
 						crate::icons::Icon::Headphones
 					},
 					48.0,
-					controls,
+					voice_toggles,
 					if deafened { colors.danger } else { STAGE_TEXT },
 					if deafened { "Undeafen" } else { "Deafen" },
 					if deafened {
@@ -1735,6 +1773,10 @@ impl MessagingUi {
 		}
 		if deafen_clicked {
 			deafened = !deafened;
+		}
+		if mute_clicked || deafen_clicked {
+			self.voice_muted = muted;
+			self.voice_deafened = deafened;
 		}
 		if (mute_clicked || deafen_clicked)
 			&& let Some(command) = state.set_call_mute(muted, deafened)
@@ -1938,8 +1980,12 @@ impl MessagingUi {
 							}
 							.on_disabled_hover_text(unavailable.unwrap_or(""));
 							if answer.clicked()
-								&& let Some(command) = state.start_call(channel, false)
-							{
+								&& let Some(command) = state.start_call_with_mute(
+									channel,
+									false,
+									self.voice_muted,
+									self.voice_deafened,
+								) {
 								commands.push(command);
 							}
 							ui.with_layout(

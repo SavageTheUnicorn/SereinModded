@@ -1519,9 +1519,12 @@ impl Desktop {
 		if demo && std::env::args().any(|arg| arg == "--demo-server-settings") {
 			server_settings_demo::open(&mut state, &mut messaging);
 		}
-		let mut hotkeys = platform::hotkeys::Hotkeys::new();
+		let mut hotkeys = platform::hotkeys::Hotkeys::new({
+			let ctx = cc.egui_ctx.clone();
+			move || ctx.request_repaint()
+		});
 		if !demo {
-			hotkeys.sync(messaging.keybinds.chord(model::KeybindAction::PushToTalk));
+			hotkeys.sync(&messaging.keybinds, &runtime);
 		}
 		Ok(Self {
 			extensions: extension_bridge::Bridge::default(),
@@ -2203,6 +2206,7 @@ impl Desktop {
 				channel,
 				request,
 				ring,
+				..
 			} = control
 			{
 				let result = self.voice.begin(&self.state, *ring);
@@ -3930,13 +3934,31 @@ impl eframe::App for Desktop {
 		);
 		self.messaging.sync_reading_zoom(ctx);
 		self.poll(ctx);
-		self.hotkeys.sync(
-			self.messaging
-				.keybinds
-				.chord(model::KeybindAction::PushToTalk),
-		);
+		self.hotkeys.sync(&self.messaging.keybinds, &self.runtime);
 		self.messaging.global_keybind_status = self.hotkeys.status();
 		self.hotkeys.poll();
+		let voice_toggles = self.hotkeys.take_toggle_pending()
+			| self
+				.messaging
+				.voice_toggle_pressed(ctx, self.hotkeys.global_toggle_mask());
+		if voice_toggles != 0 && !self.fixture_only {
+			let mut muted = self.messaging.voice_muted;
+			let mut deafened = self.messaging.voice_deafened;
+			if voice_toggles & 1 != 0 {
+				muted = !muted;
+			}
+			if voice_toggles & 2 != 0 {
+				deafened = !deafened;
+			}
+			self.messaging.voice_muted = muted;
+			self.messaging.voice_deafened = deafened;
+			if self.state.auth == AuthState::Authenticated
+				&& let Some(command) = self.state.set_call_mute(muted, deafened)
+				&& !self.state.demo
+			{
+				self.command(command);
+			}
+		}
 		if self.updater.sync(
 			ctx,
 			&self.runtime,
@@ -4056,7 +4078,6 @@ impl eframe::App for Desktop {
 		}
 		self.messaging.voice_ptt_active = self.messaging.voice_push_to_talk
 			&& self.state.voice.active.is_some()
-			&& !self.state.demo
 			&& (self.messaging.push_to_talk_down(ctx) || self.hotkeys.push_to_talk_down());
 	}
 	fn ui(&mut self, ui: &mut egui::Ui, _: &mut eframe::Frame) {

@@ -255,6 +255,9 @@ pub struct MessagingUi {
 	pub voice_device_status: &'static str,
 	pub voice_microphone_unavailable: bool,
 	pub voice_push_to_talk: bool,
+	/// Device-local voice intent, retained between calls and restarts.
+	pub voice_muted: bool,
+	pub voice_deafened: bool,
 	pub voice_noise_suppression: bool,
 	/// Device-local application shortcuts; the desktop host mirrors the global binding.
 	pub keybinds: model::Keybinds,
@@ -341,6 +344,31 @@ impl MessagingUi {
 					input,
 					self.keybinds.chord(model::KeybindAction::PushToTalk),
 				)
+		})
+	}
+
+	/// Returns focused-window mute/deafen presses that were not claimed by a native global hotkey.
+	pub fn voice_toggle_pressed(&self, ctx: &egui::Context, global_mask: u8) -> u8 {
+		if !ctx.input(|input| input.focused) || ctx.egui_wants_keyboard_input() {
+			return 0;
+		}
+		ctx.input_mut(|input| {
+			let mut toggles = 0;
+			if global_mask & 1 == 0
+				&& crate::keybinds::pressed(
+					input,
+					self.keybinds.chord(model::KeybindAction::ToggleMute),
+				) {
+				toggles |= 1;
+			}
+			if global_mask & 2 == 0
+				&& crate::keybinds::pressed(
+					input,
+					self.keybinds.chord(model::KeybindAction::ToggleDeafen),
+				) {
+				toggles |= 2;
+			}
+			toggles
 		})
 	}
 
@@ -3509,10 +3537,6 @@ impl MessagingUi {
 			}
 		}
 		self.verification.show(&ctx, state);
-		self.voice_ptt_active = self.voice_push_to_talk
-			&& state.voice.active.is_some()
-			&& !state.demo
-			&& self.push_to_talk_down(&ctx);
 		self.scroll.clear_if_unbound(&ctx);
 		self.scroll.paint(&ctx);
 		if !commands.is_empty() {
