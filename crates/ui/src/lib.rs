@@ -756,18 +756,49 @@ impl MessagingUi {
 						design::window_controls(ui);
 						ui.spacing_mut().item_spacing.x = 10.0;
 						if self.updates.available || self.updates.ready {
-							let label = if self.updates.ready {
-								"Restart to update"
+							let (label, icon) = if self.updates.ready {
+								("Restart to update", icons::Icon::Reload)
 							} else if self.updates.busy {
-								"Updating…"
+								("Updating…", icons::Icon::Download)
 							} else {
-								"Update available"
+								("Update available", icons::Icon::Download)
 							};
-							if ui
-								.small_button(egui::RichText::new(label).color(colors.link))
-								.on_hover_text(&self.updates.status)
-								.clicked()
-							{
+							let font = egui::FontId::new(12.0, design::medium_family(ui.ctx()));
+							let galley =
+								ui.painter()
+									.layout_no_wrap(label.to_owned(), font, colors.accent);
+							let icon_size = 13.0;
+							let gap = 5.0;
+							let pad = egui::vec2(6.0, 2.0);
+							let size = egui::vec2(
+								galley.size().x + icon_size + gap + pad.x * 2.0,
+								galley.size().y.max(icon_size) + pad.y * 2.0,
+							);
+							let (rect, response) =
+								ui.allocate_exact_size(size, egui::Sense::click());
+							ui.painter().rect_filled(
+								rect,
+								255,
+								colors.accent.gamma_multiply(if response.hovered() {
+									0.24
+								} else {
+									0.16
+								}),
+							);
+							let icon_rect = egui::Rect::from_center_size(
+								egui::pos2(rect.left() + pad.x + icon_size / 2.0, rect.center().y),
+								egui::Vec2::splat(icon_size),
+							);
+							icons::paint(ui.painter(), icon, icon_rect, colors.accent);
+							ui.painter().galley(
+								egui::pos2(
+									icon_rect.right() + gap,
+									rect.center().y - galley.size().y / 2.0,
+								),
+								galley,
+								colors.accent,
+							);
+							if response.on_hover_text(&self.updates.status).clicked() {
 								self.open_update_settings();
 							}
 						} else {

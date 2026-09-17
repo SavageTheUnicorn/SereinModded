@@ -57,6 +57,8 @@ impl MessagingUi {
 	}
 
 	/// Update prompt stacked into the account card, the way a call grows its own section.
+	/// Tinted with the accent colour (rather than plain link-coloured text on the card's flat
+	/// background) so it reads as a distinct, tappable banner instead of a stray line of text.
 	pub(super) fn update_banner(&mut self, ui: &mut egui::Ui) {
 		let ready = self.updates.ready;
 		let colors = design::palette(ui);
@@ -68,36 +70,45 @@ impl MessagingUi {
 			("Update available", icons::Icon::Download)
 		};
 		let status = self.updates.status.clone();
-		let mut open = false;
+		// Reserve the row and interact with it *before* the dismiss button below is added, so
+		// that button (registered after, "on top") keeps first claim on an overlapping click.
+		let (rect, response) =
+			ui.allocate_exact_size(egui::vec2(ui.available_width(), 32.0), egui::Sense::click());
+		let hovered = response.hovered() || response.has_focus();
+		ui.painter().rect_filled(
+			rect,
+			egui::CornerRadius {
+				nw: 8,
+				ne: 8,
+				sw: 0,
+				se: 0,
+			},
+			colors
+				.accent
+				.gamma_multiply(if hovered { 0.18 } else { 0.12 }),
+		);
+		let mut content = ui.new_child(
+			egui::UiBuilder::new()
+				.max_rect(rect.shrink2(egui::vec2(10.0, 0.0)))
+				.layout(egui::Layout::left_to_right(egui::Align::Center)),
+		);
+		let ui = &mut content;
+		ui.spacing_mut().item_spacing.x = 8.0;
+		let (mark, _) = ui.allocate_exact_size(egui::vec2(15.0, 15.0), egui::Sense::hover());
+		icons::paint(ui.painter(), icon, mark, colors.accent);
+		ui.add(
+			egui::Label::new(design::medium(ui, label, 12.0).color(colors.accent))
+				.truncate()
+				.selectable(false),
+		);
 		let mut dismiss = false;
-		egui::Frame::new()
-			.inner_margin(egui::Margin::symmetric(8, 6))
-			.show(ui, |ui| {
-				ui.set_width(ui.available_width());
-				ui.horizontal(|ui| {
-					ui.spacing_mut().item_spacing.x = 8.0;
-					let (mark, _) =
-						ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::hover());
-					icons::paint(ui.painter(), icon, mark, colors.link);
-					ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-						dismiss =
-							icons::button(ui, icons::Icon::Close, 20.0, "Dismiss update").clicked();
-						ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-							open = ui
-								.add(
-									egui::Label::new(
-										design::medium(ui, label, 13.0).color(colors.link),
-									)
-									.truncate()
-									.selectable(false)
-									.sense(egui::Sense::click()),
-								)
-								.on_hover_text(status)
-								.clicked();
-						});
-					});
-				});
-			});
+		ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+			dismiss = icons::button(ui, icons::Icon::Close, 18.0, "Dismiss update").clicked();
+		});
+		response.widget_info(|| {
+			egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label)
+		});
+		let open = !dismiss && response.on_hover_text(status).clicked();
 		if dismiss {
 			self.updates.banner_dismissed = Some(ready);
 		}

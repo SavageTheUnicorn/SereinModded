@@ -622,8 +622,21 @@ fn customize(mut palette: Palette, primary: Option<[u8; 3]>) -> Palette {
 		} else {
 			Color32::BLACK
 		};
+		// Mention pills tint with the user's accent too, not just the default house colour.
+		palette.mention_bg = palette.accent.gamma_multiply(76.0 / 255.0);
+		palette.mention_text = readable_tint(palette.accent, palette.chat);
 	}
 	palette
+}
+/// Whichever of a light or dark tint of `base` reads better against `background`.
+fn readable_tint(base: Color32, background: Color32) -> Color32 {
+	let light = base.lerp_to_gamma(Color32::WHITE, 0.55);
+	let dark = base.lerp_to_gamma(Color32::BLACK, 0.45);
+	if contrast(light, background) >= contrast(dark, background) {
+		light
+	} else {
+		dark
+	}
 }
 pub(crate) fn theme_preview_palette(ui: &egui::Ui, theme: &extensions::Theme) -> Palette {
 	let base = builtin_colors(ui.visuals().dark_mode, variant());
