@@ -19,23 +19,23 @@ struct Chunk {
 	members: Vec<MemberDto>,
 }
 pub(super) struct Search {
-	pub queued: [Option<Request>; 1],
-	active: [Option<(Request, Instant)>; 1],
+	pub queued: [Option<Request>; 2],
+	active: [Option<(Request, Instant)>; 2],
 	next_send: Instant,
-	seen: [Option<u64>; 1],
+	seen: [Option<u64>; 2],
 }
 impl Default for Search {
 	fn default() -> Self {
 		Self {
 			queued: Default::default(),
 			active: Default::default(),
-			seen: [None],
+			seen: [None; 2],
 			next_send: Instant::now(),
 		}
 	}
 }
 impl Search {
-	pub fn update(&mut self, requests: &[Option<Request>; 1]) {
+	pub fn update(&mut self, requests: &[Option<Request>; 2]) {
 		for (slot, request) in requests.iter().enumerate() {
 			if let Some(request) = request
 				&& self.seen[slot] != Some(request.nonce)
@@ -87,7 +87,15 @@ impl Search {
 			return Ok(None);
 		}
 		let mut data = serde_json::json!({"guild_id": request.guild.to_string(), "limit": LIMIT, "nonce": request.nonce.to_string()});
-		if let Ok(id) = request.query.parse::<u64>()
+		if !request.users.is_empty() {
+			data["user_ids"] = serde_json::json!(
+				request
+					.users
+					.iter()
+					.map(ToString::to_string)
+					.collect::<Vec<_>>()
+			);
+		} else if let Ok(id) = request.query.parse::<u64>()
 			&& id != 0
 		{
 			data["user_ids"] = serde_json::json!([id.to_string()]);
@@ -144,7 +152,21 @@ pub fn debug_check(request: Request) -> Event {
 	let frame = search.tick(&|_| Ok(())).unwrap().unwrap();
 	let packet: serde_json::Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
 	assert_eq!(packet["op"], 8);
-	assert_eq!(packet["d"]["query"], request.query);
+	if request.users.is_empty() {
+		assert_eq!(packet["d"]["query"], request.query);
+	} else {
+		assert_eq!(
+			packet["d"]["user_ids"],
+			serde_json::json!(
+				request
+					.users
+					.iter()
+					.map(ToString::to_string)
+					.collect::<Vec<_>>()
+			)
+		);
+		assert!(packet["d"].get("query").is_none());
+	}
 	assert_eq!(packet["d"]["limit"], 100);
 	let mut chunk = serde_json::json!({"guild_id":request.guild.to_string(),"nonce":"wrong","chunk_index":0,"chunk_count":1,"members":[{"user":{"id":"987654321","username":"remote-person"},"nick":"OutsideFirstHundred","roles":[]}]});
 	assert!(search.chunk(&serde_json::to_vec(&chunk).unwrap()).is_none());

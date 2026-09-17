@@ -562,7 +562,7 @@ pub struct State {
 	pub auth: auth::AuthState,
 	pub user: Option<User>,
 	pub members: Option<MemberList>,
-	pub member_search: [member_search::View; 1],
+	pub member_search: [member_search::View; 2],
 	pub member_search_nonce: u64,
 	pub direct_presences: Vec<MemberPresence>,
 	pub local_game_activity: Option<model::RichActivity>,
@@ -1083,6 +1083,13 @@ impl State {
 		})
 	}
 	pub fn command_rejected(&mut self, command: Command) {
+		if let Command::MemberSearch(request) = command {
+			self.searched_members(
+				request,
+				Err(auth::Failure::ProtocolAt("Member lookup was not queued")),
+			);
+			return;
+		}
 		if let Command::MessagingPermissions { request, .. } = command {
 			self.apply_messaging_permissions(
 				request,
@@ -3004,6 +3011,7 @@ impl Event {
 				}
 				Self::MemberSearch { request, result } => {
 					request.query.capacity()
+						+ request.users.capacity() * size_of::<Id>()
 						+ result.as_ref().map_or(0, |rows| {
 							rows.capacity() * size_of::<Member>()
 								+ rows.iter().map(Member::bytes).sum::<usize>()

@@ -424,6 +424,15 @@ impl State {
 					.flatten()
 					.find(|member| member.user.id == message.author.id)
 			})
+			.or_else(|| {
+				let view = &self.member_search[1];
+				view.request.as_ref().filter(|request| {
+					request.guild == guild && request.channel == message.channel
+				})?;
+				view.rows
+					.iter()
+					.find(|member| member.user.id == message.author.id)
+			})
 			.map_or(message.author_roles.as_slice(), |member| {
 				member.roles.as_slice()
 			});

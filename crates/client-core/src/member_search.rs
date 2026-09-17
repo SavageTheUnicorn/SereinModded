@@ -1,4 +1,4 @@
-//! One bounded, session-only composer member lookup.
+//! Bounded, session-only composer and visible-author member lookups.
 use crate::{Command, State, auth::Failure};
 use model::{Id, Member};
 
@@ -9,6 +9,7 @@ pub struct Request {
 	pub guild: Id,
 	pub channel: Id,
 	pub query: String,
+	pub users: Vec<Id>,
 	pub nonce: u64,
 	pub slot: usize,
 }
@@ -16,11 +17,23 @@ impl Request {
 	pub fn valid(&self) -> bool {
 		self.guild.0 != 0
 			&& self.channel.0 != 0
-			&& self.slot == 0
-			&& !self.query.is_empty()
-			&& self.query.len() <= 256
-			&& self.query.chars().count() <= 64
-			&& !self.query.chars().any(char::is_control)
+			&& match self.slot {
+				0 => {
+					self.users.is_empty()
+						&& !self.query.is_empty()
+						&& self.query.len() <= 256
+						&& self.query.chars().count() <= 64
+						&& !self.query.chars().any(char::is_control)
+				}
+				1 => {
+					self.query.is_empty()
+						&& !self.users.is_empty()
+						&& self.users.len() <= LIMIT
+						&& self.users.iter().all(|id| id.0 != 0)
+						&& self.users.windows(2).all(|ids| ids[0] < ids[1])
+				}
+				_ => false,
+			}
 	}
 }
 #[derive(Default)]
@@ -45,6 +58,7 @@ impl State {
 			guild,
 			channel,
 			query: query.to_owned(),
+			users: vec![],
 			nonce: self.member_search_nonce,
 			slot,
 		};
@@ -52,6 +66,54 @@ impl State {
 			return None;
 		}
 		self.member_search[slot] = View {
+			request: Some(request.clone()),
+			..Default::default()
+		};
+		Some(Command::MemberSearch(request))
+	}
+	pub fn request_author_members(&mut self, users: &[Id]) -> Option<Command> {
+		let channel = self.selected?;
+		let guild = self.channel(channel)?.guild?;
+		if self.demo || !self.gateway_connected || !self.can_view(channel) {
+			return None;
+		}
+		let mut users: Vec<_> = users
+			.iter()
+			.copied()
+			.filter(|id| id.0 != 0)
+			.take(LIMIT)
+			.collect();
+		users.sort_unstable();
+		users.dedup();
+		let view = &self.member_search[1];
+		if users.is_empty()
+			|| view.request.as_ref().is_some_and(|request| {
+				request.channel == channel
+					&& request.guild == guild
+					&& (!view.finished || users.iter().all(|user| request.users.contains(user)))
+			}) {
+			return None;
+		}
+		self.member_search_nonce = self.member_search_nonce.wrapping_add(1);
+		let request = Request {
+			guild,
+			channel,
+			query: String::new(),
+			users,
+			nonce: self.member_search_nonce,
+			slot: 1,
+		};
+		let rows = if view
+			.request
+			.as_ref()
+			.is_some_and(|old| old.channel == channel && old.guild == guild)
+		{
+			std::mem::take(&mut self.member_search[1].rows)
+		} else {
+			vec![]
+		};
+		self.member_search[1] = View {
+			rows,
 			request: Some(request.clone()),
 			..Default::default()
 		};
@@ -77,6 +139,10 @@ impl State {
 			Ok(rows)
 				if rows.len() <= LIMIT
 					&& rows.iter().all(Member::valid)
+					&& (request.users.is_empty()
+						|| rows
+							.iter()
+							.all(|member| request.users.contains(&member.user.id)))
 					&& rows.iter().map(Member::bytes).sum::<usize>() <= MAX_BYTES =>
 			{
 				view.rows = rows

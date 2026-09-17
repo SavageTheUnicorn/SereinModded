@@ -5,9 +5,9 @@
 Mention autocomplete retains at most one query of 64 Unicode scalars / 256 UTF-8
 bytes and 100 member results / 128 KiB. The query and results are session-only;
 navigation, disconnect and logout retire them. The Gateway watch channel retains
-one replaceable query; queued and active requests are fixed at one slot. Matching
-chunk bodies are capped at
-512 KiB, then validated before entering the existing byte-budgeted event queue.
+two replaceable queries: one composer query and one visible-author lookup. Queued
+and active requests have the same fixed two-slot bound. Matching chunk bodies are
+capped at 512 KiB, then validated before entering the existing byte-budgeted event queue.
 Unrelated chunks are ignored; no guild directory cache or persistence is added.
 
 ## Forum post context menu (September 15, 2026)
@@ -877,3 +877,9 @@ Custom emoji artwork shares the existing account-isolated image disk cache
 (4,096 files / 1 GiB, 90-day inactivity retention). Its GPU working set is separate
 from avatars and media, bounded to 1,024 textures / 16 MiB with least-recently-used
 eviction. Evicted textures reload from disk when available.
+
+Visible chat author lookups retain a second session-only member snapshot, capped
+at 100 members / 128 KiB, with at most 100 requested user IDs. It shares the
+mention transport's 512-KiB payload cap, rate limit and bounded event queue.
+Channel/session changes fence late results; session reset releases the snapshot.
+No author lookup results are persisted and no complete guild directory is fetched.

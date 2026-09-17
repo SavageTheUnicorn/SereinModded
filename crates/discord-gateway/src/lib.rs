@@ -595,7 +595,7 @@ pub async fn run_with_activity(
 	activity: (
 		watch::Receiver<Option<discord_protocol::rpc::Activity>>,
 		watch::Receiver<model::OwnPresence>,
-		watch::Receiver<[Option<client_core::member_search::Request>; 1]>,
+		watch::Receiver<[Option<client_core::member_search::Request>; 2]>,
 	),
 	observe: impl Fn(ActivityObservation) -> Result<(), Failure> + Sync,
 	emit: impl Fn(Event) -> Result<(), Failure>,
@@ -618,7 +618,7 @@ pub async fn run_with_activity(
 	.await
 }
 struct ActivityInput<'a> {
-	member_queries: watch::Receiver<[Option<client_core::member_search::Request>; 1]>,
+	member_queries: watch::Receiver<[Option<client_core::member_search::Request>; 2]>,
 	receiver: watch::Receiver<Option<discord_protocol::rpc::Activity>>,
 	own_presence: watch::Receiver<model::OwnPresence>,
 	observe: &'a (dyn Fn(ActivityObservation) -> Result<(), Failure> + Sync),

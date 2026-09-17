@@ -93,7 +93,7 @@ impl Connection {
                 let (member_send,member_receive)=watch::channel(None);
                 let (voice_send,voice_receive)=mpsc::channel(8);
 				let (activity_send,activity_receive)=watch::channel(None);
-				let (member_query_send, member_query_receive) = watch::channel([None]);
+				let (member_query_send, member_query_receive) = watch::channel([None, None]);
 				let _sharing_task=AbortTask(tokio::spawn(run_activity_sharing(api.clone(),share_receive.clone(),sharing_requests,sharing_report,finished.clone(),wake.clone())));
 				let _activity_task=AbortTask(tokio::spawn(crate::game_activity::run(share_receive,activity_send,game_report,invite_send,wake.clone(),user.clone(),api.clone())));
                 let dm_channels=Arc::new(Mutex::new(BTreeSet::new()));

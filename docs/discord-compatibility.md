@@ -1445,3 +1445,13 @@ Offline tests cover the IPC and WebSocket transports end to end, origin and hand
 URL proxying, late artwork uploads, proxy-path traversal attempts, badge fallback, detection
 precedence and cache round-tripping. The detectable list, its endpoint and the external-assets
 route were checked against live responses; game-to-Gateway publication remains unverified.
+
+### Visible chat author roles
+
+Visible guild message authors use a separate bounded Gateway opcode 8 `user_ids`
+lookup, sharing the mention search transport and its one-second send interval.
+This fills role colors when history omits membership and the author is outside
+People's retained member list. Up to 100 visible authors are requested at once;
+failed lookups retain the normal fallback color. Profile cards already request
+guild membership through the profile endpoint. Normal-account Gateway behavior
+remains unofficial and live compatibility is unverified by the synthetic check.

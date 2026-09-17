@@ -69,6 +69,7 @@ pub struct TimelineView {
 	scale: f32,
 	pub(super) load_older: bool,
 	pub(super) latest: bool,
+	pub(super) visible_authors: Vec<Id>,
 	jump: bool,
 	unread_boundary: Option<Id>,
 }
@@ -932,6 +933,7 @@ impl TimelineView {
 		if let Some(offset) = offset {
 			scroll = scroll.vertical_scroll_offset(offset);
 		}
+		self.visible_authors.clear();
 		let mut measurements = Vec::new();
 		let mut selected_reply = None;
 		// ScrollArea consumes wheel input while applying it; retain the viewing gesture.
@@ -1001,6 +1003,12 @@ impl TimelineView {
 				let Some(message) = state.timeline.get_display(*id) else {
 					continue;
 				};
+				if !message.author.webhook
+					&& self.visible_authors.len() < client_core::member_search::LIMIT
+					&& !self.visible_authors.contains(&message.author.id)
+				{
+					self.visible_authors.push(message.author.id);
+				}
 				let previous = index
 					.checked_sub(1)
 					.and_then(|i| state.timeline.get(self.rows[i].0));

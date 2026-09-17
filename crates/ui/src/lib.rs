@@ -3112,6 +3112,11 @@ impl MessagingUi {
 							self.pending_upload.as_ref(),
 							&mut self.scroll,
 						);
+						if let Some(command) =
+							state.request_author_members(&self.timeline.visible_authors)
+						{
+							commands.push(command);
+						}
 						if let Some((action, text)) = self.timeline.extension_request.take() {
 							self.extensions
 								.invoke_message(action, text, state, ui.ctx());

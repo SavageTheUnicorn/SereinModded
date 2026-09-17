@@ -111,8 +111,54 @@ fn main() -> eframe::Result {
 			!state.member_search[0].finished,
 			"stale result must be ignored"
 		);
+		state.demo = false;
+		let user = model::Id(987654321);
+		let Some(Command::MemberSearch(author_request)) = state.request_author_members(&[user])
+		else {
+			panic!("visible author lookup should be permitted");
+		};
+		assert!(state.request_author_members(&[user]).is_none());
+		let guild = author_request.guild;
+		let mut event = discord_gateway::debug_member_search_check(author_request);
+		let role = model::Id(987654322);
+		state.apply(Envelope {
+			generation: state.generation,
+			event: Event::Permissions(client_core::permissions::Event::Role {
+				guild,
+				role: model::permissions::Role {
+					id: role,
+					name: "Verified".into(),
+					color: 0x00ff00,
+					position: 1,
+					hoist: false,
+					bits: 0,
+				},
+			}),
+		});
+		if let Event::MemberSearch {
+			result: Ok(rows), ..
+		} = &mut event
+		{
+			rows[0].roles = vec![role];
+		}
+		let mut message = test_support::message(987654323, channel);
+		message.author.id = user;
+		message.author_roles.clear();
+		state.members = None;
+		assert_eq!(state.message_author_color(&message), None);
+		state.apply(Envelope {
+			generation: state.generation,
+			event,
+		});
+		assert_eq!(state.message_author_color(&message), Some(0x00ff00));
+		assert!(state.request_author_members(&[user]).is_none());
+		assert_eq!(
+			state.member_search[0].request.as_ref().unwrap().query,
+			"Replacement"
+		);
+
 		println!(
-			"Member search debug check passed: Gateway query, remote nickname mention, nonce matching, bounded results, and stale-result rejection."
+			"Member search debug check passed: remote mentions and visible-author role colors use bounded, independent Gateway lookups."
 		);
 		return Ok(());
 	}
@@ -219,10 +265,9 @@ fn main() -> eframe::Result {
 		renderer: eframe::Renderer::Glow,
 		#[cfg(target_os = "windows")]
 		window_builder: Some(Box::new(|builder| {
-			use winit::platform::windows::WindowAttributesExtWindows as _;
 			// winit's shadow hack offsets the restored client area by one pixel.
 			// Keep the undecorated client aligned with the DX12 presentation area.
-			builder.with_undecorated_shadow(false)
+			builder.with_has_shadow(false)
 		})),
 		persist_window: false,
 		persistence_path: None,

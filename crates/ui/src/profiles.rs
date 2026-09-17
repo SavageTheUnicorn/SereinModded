@@ -651,27 +651,74 @@ fn creation_date(id: Id) -> Option<String> {
 		.map(|date| crate::local_time::local(date).date().to_string())
 }
 
-fn role_chips(ui: &mut egui::Ui, theme: &Theme, state: &State, guild: &model::GuildProfile) {
+fn role_chips(
+	ui: &mut egui::Ui,
+	theme: &Theme,
+	state: &State,
+	user: Id,
+	guild: &model::GuildProfile,
+) {
 	let Some(roles) = state.guild_roles(guild.guild) else {
 		return;
 	};
+	let roles: Vec<_> = roles
+		.iter()
+		.rev()
+		.filter(|role| role.id != guild.guild && guild.roles.contains(&role.id))
+		.collect();
 	let max_width = ui.available_width();
+	let widths: Vec<_> = roles
+		.iter()
+		.map(|role| {
+			(ui.painter()
+				.layout_no_wrap(
+					role.name.clone(),
+					egui::FontId::proportional(12.0),
+					theme.text,
+				)
+				.size()
+				.x + 25.0)
+				.min(max_width)
+		})
+		.collect();
+	let expanded_id = ui.make_persistent_id(("profile-roles-expanded", guild.guild, user));
+	let expanded = ui.data(|data| data.get_temp::<bool>(expanded_id).unwrap_or(false));
+	let fits = |widths: &[f32]| {
+		let mut rows = 1;
+		let mut used = 0.0;
+		for width in widths {
+			if used > 0.0 && used + 4.0 + width > max_width {
+				rows += 1;
+				used = 0.0;
+			}
+			used += if used == 0.0 { *width } else { 4.0 + width };
+		}
+		rows <= 2
+	};
+	let visible = if expanded {
+		roles.len()
+	} else {
+		(0..=roles.len())
+			.rev()
+			.find(|&count| {
+				let hidden = roles.len() - count;
+				let mut row = widths[..count].to_vec();
+				if hidden > 0 {
+					row.push(25.0 + hidden.to_string().len() as f32 * 7.0);
+				}
+				fits(&row)
+			})
+			.unwrap_or(0)
+	};
 	ui.horizontal_wrapped(|ui| {
 		ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
-		for role in roles
-			.iter()
-			.rev()
-			.filter(|role| role.id != guild.guild && guild.roles.contains(&role.id))
-		{
+		for (role, width) in roles.iter().zip(&widths).take(visible) {
 			let galley = ui.painter().layout_no_wrap(
 				role.name.clone(),
 				egui::FontId::proportional(12.0),
 				theme.text,
 			);
-			let size = vec2(
-				(galley.size().x + 25.0).min(max_width),
-				galley.size().y + 6.0,
-			);
+			let size = vec2(*width, galley.size().y + 6.0);
 			let (rect, response) = ui.allocate_exact_size(size, egui::Sense::hover());
 			ui.painter().rect_filled(rect, 6, theme.chip);
 			let color = if role.color == 0 {
@@ -687,6 +734,34 @@ fn role_chips(ui: &mut egui::Ui, theme: &Theme, state: &State, guild: &model::Gu
 				theme.text,
 			);
 			response.on_hover_text(&role.name);
+		}
+		let hidden = roles.len() - visible;
+		if hidden > 0 {
+			let label = format!("+{hidden}");
+			let galley = ui.painter().layout_no_wrap(
+				label.clone(),
+				egui::FontId::proportional(12.0),
+				theme.text,
+			);
+			let (rect, response) = ui.allocate_exact_size(
+				vec2(galley.size().x + 16.0, galley.size().y + 6.0),
+				egui::Sense::click(),
+			);
+			ui.painter().rect_filled(rect, 6, theme.chip);
+			ui.painter().galley(
+				pos2(
+					rect.center().x - galley.size().x * 0.5,
+					rect.center().y - galley.size().y * 0.5,
+				),
+				galley,
+				theme.text,
+			);
+			response.widget_info(|| {
+				egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label.clone())
+			});
+			if response.on_hover_text("Show remaining roles").clicked() {
+				ui.data_mut(|data| data.insert_temp(expanded_id, true));
+			}
 		}
 	});
 }
@@ -1064,7 +1139,7 @@ pub fn show(
 													},
 												) {
 												section(ui, &theme, &mut sections, "ROLES");
-												role_chips(ui, &theme, state, guild);
+												role_chips(ui, &theme, state, data.user.id, guild);
 											}
 											section(ui, &theme, &mut sections, "MEMBER SINCE");
 											ui.horizontal_wrapped(|ui| {
@@ -1882,7 +1957,7 @@ mod tests {
 	}
 
 	#[test]
-	fn role_chips_wrap_complete_items_onto_new_rows() {
+	fn role_chips_collapse_after_two_rows() {
 		let mut state = test_support::demo_state();
 		let roles = [
 			(Id(101), "Maintainer"),
@@ -1923,8 +1998,12 @@ mod tests {
 		let output = ctx.run_ui(input(vec2(180.0, 300.0), vec![]), |ui| {
 			ui.set_width(180.0);
 			let theme = Theme::new(&design::palette(ui), None);
-			role_chips(ui, &theme, &state, &guild);
+			role_chips(ui, &theme, &state, Id(1), &guild);
 		});
+		let mut painted = String::new();
+		for shape in &output.shapes {
+			text(&shape.shape, &mut painted);
+		}
 		let chips: Vec<_> = output
 			.shapes
 			.iter()
@@ -1935,10 +2014,26 @@ mod tests {
 				_ => None,
 			})
 			.collect();
-		assert_eq!(chips.len(), roles.len());
+		assert!(
+			chips.len() < roles.len(),
+			"roles should collapse: {chips:?}"
+		);
+		assert!(
+			painted.contains('+'),
+			"remaining role count missing: {painted}"
+		);
 		assert!(
 			chips.iter().skip(1).any(|chip| chip.top() > chips[0].top()),
 			"roles should occupy more than one row: {chips:?}"
+		);
+		assert_eq!(
+			chips
+				.iter()
+				.map(|chip| chip.center().y.round() as i32)
+				.collect::<std::collections::BTreeSet<_>>()
+				.len(),
+			2,
+			"roles should occupy exactly two rows: {chips:?}"
 		);
 		for (index, chip) in chips.iter().enumerate() {
 			for other in chips.iter().skip(index + 1) {
