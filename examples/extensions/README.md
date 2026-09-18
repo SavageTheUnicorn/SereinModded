@@ -19,8 +19,8 @@ Build `rgb-cycle` the same way; its packaged output goes to
 `appearance` capability, which the host re-invokes on its own schedule (see
 "Tick" below) to sweep enabled theme tokens through the color wheel, and a
 `settings` panel action (`storage` capability) letting you check or uncheck
-every individual token — surfaces, text, accent, status colors, mentions,
-and the background gradient — from Settings > Extensions > RGB Cycle >
+every individual token - surfaces, text, accent, status colors, mentions,
+and the background gradient - from Settings > Extensions > RGB Cycle >
 Open tool. Choices persist across restarts via plugin storage.
 `positive`/`warning`/`danger` default off, since a rotating hue can make a
 destructive action briefly read as safe; every other token defaults on.
@@ -64,7 +64,7 @@ A plugin may declare at most one action with `"surface": "tick"`, and it
 requires the `appearance` capability (enforced at manifest validation, not
 just at runtime). Unlike every other surface, the host invokes a `tick`
 action itself, repeatedly, for as long as the plugin stays enabled and the
-app is in the foreground — the user never clicks anything to trigger it.
+app is in the foreground - the user never clicks anything to trigger it.
 Each call still runs in its own fresh, fuel-bounded Wasm instance, exactly
 like every other invocation; nothing is retained between calls, no WASI or
 host imports are added, and execution never happens inside the UI's render
@@ -75,7 +75,7 @@ can't flood the shared, single-worker extension queue that every other
 action -- Import, Refresh, a plugin's own settings panel -- goes through
 too. The invocation carries
 `tick_ms`, milliseconds elapsed since the plugin was enabled this session,
-and the plugin must derive its output solely from that value — there is no
+and the plugin must derive its output solely from that value - there is no
 selected message, composer, or stored state on a tick call, and any output
 field other than `appearance` (and, implicitly, an empty `panel`) is
 rejected the same as it would be from any other capability mismatch. This
