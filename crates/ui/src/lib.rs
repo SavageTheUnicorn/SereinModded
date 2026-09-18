@@ -324,6 +324,43 @@ fn composer_cap(
 		.response
 		.rect
 }
+
+fn mention_switch(ui: &mut egui::Ui, colors: &design::Palette, on: &mut bool) {
+	let font = egui::FontId::new(12.0, design::semibold_family(ui.ctx()));
+	let padding = egui::vec2(6.0, 3.0);
+	let hit =
+		ui.painter()
+			.layout_no_wrap("@ OFF".to_owned(), font.clone(), colors.muted)
+			.size() + 2.0 * padding;
+	let (rect, mut response) = ui.allocate_exact_size(hit, egui::Sense::click());
+	if response.clicked() {
+		*on = !*on;
+		response.mark_changed();
+	}
+	let label = if *on { "@ ON" } else { "@ OFF" };
+	let color = if *on { colors.link } else { colors.muted };
+	let hover = if *on {
+		"Click to disable pinging the original author."
+	} else {
+		"Click to enable pinging the original author."
+	};
+	if response.hovered() || response.has_focus() {
+		ui.painter().rect_filled(rect, 6, colors.hover);
+	}
+	let galley = ui.painter().layout_no_wrap(label.to_owned(), font, color);
+	ui.painter()
+		.galley(rect.center() - galley.size() / 2.0, galley, color);
+	response.widget_info(|| {
+		egui::WidgetInfo::selected(
+			egui::WidgetType::Checkbox,
+			ui.is_enabled(),
+			*on,
+			"Ping the original author",
+		)
+	});
+	response.on_hover_text(hover);
+}
+
 impl MessagingUi {
 	/// Feed the frame's middle button before `show`. Never fed means never pressed.
 	pub fn middle_button(&mut self, middle: scroll::Middle) {
@@ -1986,7 +2023,7 @@ impl MessagingUi {
 		} else if let Some(reply) = state.reply {
 			let author = state
 				.timeline
-				.get(reply)
+				.get(reply.target())
 				.map_or("an earlier message", |message| message.author.name.as_str())
 				.to_owned();
 			let cap = composer_cap(ui, &colors, |ui| {
@@ -1998,9 +2035,12 @@ impl MessagingUi {
 					if icons::button(ui, icons::Icon::Close, 22.0, "Cancel reply").clicked() {
 						state.reply = None;
 					}
+					if let Some(reply) = state.reply.as_mut() {
+						mention_switch(ui, &colors, &mut reply.mention);
+					}
 					if ui
 						.add_enabled(
-							state.can_open_reply_target(reply),
+							state.can_open_reply_target(reply.target()),
 							egui::Button::new(
 								RichText::new("View original")
 									.size(12.0)
@@ -2008,14 +2048,14 @@ impl MessagingUi {
 							)
 							.frame(false),
 						)
-						.on_disabled_hover_text(if state.timeline.is_deleted(reply) {
+						.on_disabled_hover_text(if state.timeline.is_deleted(reply.target()) {
 							"The original message was deleted"
 						} else {
 							"Wait for readable, current message history"
 						})
 						.clicked()
 					{
-						self.timeline.reply_target = Some(reply);
+						self.timeline.reply_target = Some(reply.target());
 					}
 				});
 			});
@@ -2358,9 +2398,26 @@ impl MessagingUi {
                         let edit = ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                             ui.vertical(|ui| {
                                 ui.set_width(ui.available_width());
-                        cancel_edit |= keyboard_enabled && editing_here && !self.ime_active && !ime_this_frame
-                            && ctx.memory(|m| m.has_focus(composer_id) || m.had_focus_last_frame(composer_id))
-                            && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+                        let composer_escape = keyboard_enabled
+                            && !self.ime_active
+                            && !ime_this_frame
+                            && ctx.memory(|m| {
+                                m.has_focus(composer_id) || m.had_focus_last_frame(composer_id)
+                            });
+                        cancel_edit |= editing_here
+                            && composer_escape
+                            && ctx.input_mut(|i| {
+                                i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
+                            });
+                        if !editing_here
+                            && state.reply.is_some()
+                            && composer_escape
+                            && ctx.input_mut(|i| {
+                                i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
+                            })
+                        {
+                            state.reply = None;
+                        }
                         let remaining = if editing_here { MAX_CONTENT * 4 } else { MAX_DRAFT_BYTES.saturating_sub(state.draft_bytes()) };
                         // Temporarily own the buffer so suggestions can borrow the current
                         // permission state without cloning the draft or server catalogs.
@@ -4841,7 +4898,7 @@ mod composer_tests {
 			source.reply_deleted = blocked == 0;
 			source.kind = 19;
 			state.timeline.insert(source.clone(), true, false).unwrap();
-			state.reply = Some(Id(19));
+			state.reply = Some(client_core::Reply::to(Id(19)));
 			match blocked {
 				0 => {}
 				1 => {
@@ -4926,7 +4983,7 @@ mod composer_tests {
 			assert_eq!(state.request, request);
 			assert!(state.search_target.is_none());
 			assert_eq!(state.drafts, draft);
-			assert_eq!(state.reply, Some(Id(19)));
+			assert_eq!(state.reply_target(), Some(Id(19)));
 		}
 	}
 
@@ -4965,7 +5022,7 @@ mod composer_tests {
 				source.content = "||Hidden original||".into();
 				state.timeline.insert(source, false, false).unwrap();
 			}
-			state.reply = Some(Id(19));
+			state.reply = Some(client_core::Reply::to(Id(19)));
 			let draft = state.drafts.clone();
 			let frame = |view: &mut MessagingUi, state: &mut State, events| {
 				let mut commands = vec![];
@@ -5085,7 +5142,7 @@ mod composer_tests {
 				}
 				activated
 			};
-			assert_eq!(state.reply, Some(Id(19)));
+			assert_eq!(state.reply_target(), Some(Id(19)));
 			assert_eq!(state.drafts, draft);
 			assert!(view.draft_changes.is_empty());
 			assert_eq!(state.search_target, Some(Id(19)));
