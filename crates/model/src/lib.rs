@@ -231,9 +231,9 @@ pub struct Message {
 	pub id: Id,
 	pub channel: Id,
 	pub author: User,
-	/// Session-only role membership supplied with this message; refreshed by live member rows.
+	/// Role membership supplied with this message.
 	pub author_roles: Vec<Id>,
-	/// Session-only guild nickname; current member rows take precedence.
+	/// Guild nickname supplied with this message.
 	pub author_nick: Option<String>,
 	pub content: String,
 	pub mentions: Vec<User>,

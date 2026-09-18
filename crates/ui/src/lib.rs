@@ -3242,6 +3242,19 @@ impl MessagingUi {
 						design::paint_chat_background(ui, ui.available_rect_before_wrap());
 						self.timeline.hide_media_links = self.reading_preferences.hide_media_links;
 						self.timeline.extension_actions = self.extensions.message_actions();
+						let mut seen = std::collections::BTreeSet::new();
+						let author_lookup: Vec<_> = state
+							.timeline
+							.iter()
+							.rev()
+							.filter(|message| !message.author.webhook)
+							.map(|message| message.author.id)
+							.filter(|id| seen.insert(*id))
+							.take(client_core::member_search::LIMIT)
+							.collect();
+						if let Some(command) = state.request_author_members(&author_lookup) {
+							commands.push(command);
+						}
 						self.timeline.show_with_scroll(
 							ui,
 							state,
