@@ -6,9 +6,9 @@
 fetched through the jsDelivr npm mirror on September 10, 2026. The unmodified license is
 `LICENSE` and is staged in both packages as `licenses/Phosphor-Icons-MIT.txt`.
 
-Ninety unmodified Phosphor `assets/fill/*.svg` and `assets/bold/*.svg` files are scaled
+Ninety-four unmodified Phosphor `assets/fill/*.svg` and `assets/bold/*.svg` files are scaled
 to 56×56 pixels, filled white, and rasterized by `resvg` 0.45.1 into one transparent PNG atlas
-with 64×64 cells (8 columns, 13 rows). `headphones-slash` is derived from `headphones-fill.svg`
+with 64×64 cells (8 columns, 14 rows). `headphones-slash` is derived from `headphones-fill.svg`
 by masking a diagonal knockout and adding a 16-unit round-capped stroke, matching the style of
 Phosphor's own `*-slash` icons. The application tints glyphs at draw time; no icon font,
 JavaScript or per-icon file is bundled.
@@ -23,10 +23,13 @@ to match Phosphor's visual weight. Brand marks remain trademarks of their owners
 legal disclaimer applies. The license file is staged in both packages as
 `licenses/Simple-Icons-CC0.txt`.
 
-- `atlas.png`: 512×832 RGBA, 111,559 bytes; decoded 1,703,936 bytes.
-  SHA-256 `dc767b257410f587d5048a8c25358415a23ee1f78e12d13409c8934ef676fe03`.
+One repository-drawn glyph, `thread.svg` (four slanted round-capped bars on the same 256-unit
+grid), marks threads; it is rasterized with the Phosphor set and carries no upstream license.
+
+- `atlas.png`: 512×896 RGBA, 26,267 bytes after lossless `oxipng -o max --strip all`.
+  SHA-256 `eb0553105dd745e67b1c1e2249cdf0f037c56ea2f1d7b5af45ebbf38f240a8f2`.
 - `index.tsv`: icon name, tab, zero-based cell; SHA-256
-  `4e04607f98c4f08de49781df983171c6141bd41a8e32092a4c66f428153b3e9b`.
+  `cc8a5f5cebe0bcb916e6a12c4dae58c6feabee0487b2ca3e8bb1a3f1c6f378de`.
 
 Every upstream SVG's SHA-256 is pinned in `tools/generate-icons.py`, which refuses to build
 from mismatching files. Regenerate from the repository root:
@@ -45,6 +48,9 @@ The folder and open-folder glyphs are unmodified Phosphor `folder-fill.svg` and
 
 The media-viewer caret and download glyphs are unmodified Phosphor `caret-left-bold.svg` and
 `download-simple-bold.svg`, fetched from the same pinned 2.1.1 package on September 11, 2026.
+
+The screen-share fullscreen glyph is unmodified Phosphor `corners-out-bold.svg`, fetched from the
+same pinned 2.1.1 package on September 27, 2026.
 
 The `serein-mark` cell is our own artwork, not an upstream icon: it is the solid silhouette of
 the Serein chat-wave from `assets/brand/serein-mark.svg`, trimmed to its bounding box so it

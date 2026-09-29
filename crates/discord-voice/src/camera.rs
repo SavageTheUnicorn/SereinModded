@@ -1,4 +1,4 @@
-//! User-started, ephemeral camera capture. No device is opened before `start`.
+//! User-started, ephemeral camera capture. No capture stream starts before `start`.
 
 use openh264::{
 	OpenH264API,
@@ -57,14 +57,22 @@ pub fn devices() -> Result<DeviceList, &'static str> {
 	{
 		windows::devices()
 	}
-	#[cfg(not(target_os = "windows"))]
+	#[cfg(target_os = "macos")]
 	{
-		Err("Camera selection is currently available on Windows only")
+		objc2::rc::autoreleasepool(|_| macos::devices())
+	}
+	#[cfg(target_os = "linux")]
+	{
+		linux::devices()
+	}
+	#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+	{
+		Err("Camera selection is unavailable on this platform")
 	}
 }
 
 impl Camera {
-	/// Call only after an explicit camera-on gesture in a connected call.
+	/// Call only after an explicit camera-on gesture in a call or settings preview.
 	pub fn start(
 		device: Option<String>,
 		on_frame: Arc<dyn Fn(Frame) + Send + Sync>,
@@ -78,10 +86,6 @@ impl Camera {
 			.is_some_and(|id| id.len() > 4096 || id.contains('\0'))
 		{
 			return Err("Invalid camera device selection");
-		}
-		#[cfg(not(target_os = "windows"))]
-		if device.is_some() {
-			return Err("Camera selection is currently available on Windows only");
 		}
 		if RUNNING
 			.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -97,7 +101,9 @@ impl Camera {
 				let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
 					#[cfg(target_os = "macos")]
 					{
-						objc2::rc::autoreleasepool(|_| macos::run(&worker, &on_frame, &wake))
+						objc2::rc::autoreleasepool(|_| {
+							macos::run(&worker, device.as_deref(), &on_frame, &wake)
+						})
 					}
 					#[cfg(any(target_os = "windows", target_os = "linux"))]
 					{
@@ -153,6 +159,7 @@ impl Camera {
 /// to openh264 when it is unavailable or fails mid-stream. Baseline profile and one IDR per
 /// picture either way, so the wire format does not change.
 struct CameraEncoder {
+	diagnostics: crate::diagnostics::EncoderRegistration,
 	software: Option<Encoder>,
 	yuv: YUVBuffer,
 	#[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -183,13 +190,15 @@ impl CameraEncoder {
 		#[cfg(target_os = "linux")]
 		let hardware = encode_linux::Encoder::new(config).ok();
 		#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
-		let software = match hardware {
-			Some(_) => None,
-			None => Some(encoder()?),
+		let software = if hardware.is_some() {
+			None
+		} else {
+			Some(encoder()?)
 		};
 		#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 		let software = Some(encoder()?);
 		Ok(Self {
+			diagnostics: crate::diagnostics::EncoderRegistration::new(false, software.is_none()),
 			software,
 			yuv: YUVBuffer::new(WIDTH, HEIGHT),
 			#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
@@ -217,7 +226,9 @@ impl CameraEncoder {
 				Ok(None) => return Ok(None),
 				Err(_) => {
 					self.hardware = None;
+					self.diagnostics.set(None);
 					self.software = Some(encoder()?);
+					self.diagnostics.set(Some(false));
 				}
 			}
 		}
@@ -243,7 +254,9 @@ impl CameraEncoder {
 				}
 				Err(_) => {
 					self.hardware = None;
+					self.diagnostics.set(None);
 					self.software = Some(encoder()?);
+					self.diagnostics.set(Some(false));
 				}
 			}
 		}
@@ -317,8 +330,7 @@ fn run(
 	}
 	#[cfg(target_os = "linux")]
 	{
-		let _ = device;
-		linux::run(shared, &mut emit)
+		linux::run(shared, device, &mut emit)
 	}
 }
 
@@ -343,13 +355,46 @@ mod macos {
 	use objc2_av_foundation::*;
 	use objc2_core_media::CMSampleBuffer;
 	use objc2_core_video::*;
-	use objc2_foundation::{NSDictionary, NSNumber, NSString};
+	use objc2_foundation::{NSArray, NSDictionary, NSNumber, NSString};
 	use std::{
 		sync::mpsc::{self, Receiver, SyncSender},
 		time::{Duration, Instant},
 	};
 
 	const DENIED: &str = "Camera access denied. Allow Serein (or your terminal) in System Settings > Privacy & Security > Camera, then try again.";
+
+	pub(super) fn devices() -> Result<DeviceList, &'static str> {
+		// SAFETY: Framework-owned device types and discovery only; no stream or permission request.
+		unsafe {
+			let types = NSArray::from_slice(&[
+				AVCaptureDeviceTypeBuiltInWideAngleCamera,
+				AVCaptureDeviceTypeExternal,
+				AVCaptureDeviceTypeContinuityCamera,
+				AVCaptureDeviceTypeDeskViewCamera,
+			]);
+			let discovery =
+				AVCaptureDeviceDiscoverySession::discoverySessionWithDeviceTypes_mediaType_position(
+					&types,
+					Some(AVMediaTypeVideo.ok_or("Camera media type unavailable")?),
+					AVCaptureDevicePosition::Unspecified,
+				);
+			Ok(discovery
+				.devices()
+				.iter()
+				.take(32)
+				.filter_map(|device| {
+					let id = device.uniqueID();
+					let name = device.localizedName();
+					if id.length() > 4096 || name.length() > 256 {
+						return None;
+					}
+					let (id, name) = (id.to_string(), name.to_string());
+					(id.len() <= 4096 && name.len() <= 256 && !id.contains('\0'))
+						.then_some((id, name))
+				})
+				.collect())
+		}
+	}
 
 	struct DelegateState {
 		send: SyncSender<Result<Vec<u8>, &'static str>>,
@@ -479,6 +524,7 @@ mod macos {
 
 	pub(super) fn run(
 		shared: &Arc<Shared>,
+		selected: Option<&str>,
 		on_frame: &Arc<dyn Fn(Frame) + Send + Sync>,
 		wake: &Arc<dyn Fn() + Send + Sync>,
 	) -> Result<(), &'static str> {
@@ -492,10 +538,16 @@ mod macos {
 		// SAFETY: Only this worker configures/owns the session. Delegate lives until
 		// capture is stopped and the serial callback queue has drained.
 		let capture = unsafe {
-			let device = AVCaptureDevice::defaultDeviceWithMediaType(
-				AVMediaTypeVideo.ok_or("Camera media type unavailable")?,
-			)
-			.ok_or("No camera is available")?;
+			let media = AVMediaTypeVideo.ok_or("Camera media type unavailable")?;
+			let device = match selected {
+				Some(id) => AVCaptureDevice::deviceWithUniqueID(&NSString::from_str(id))
+					.filter(|device| device.hasMediaType(media))
+					.ok_or(
+						"Selected camera is disconnected or unavailable. Refresh cameras and choose another device.",
+					)?,
+				None => AVCaptureDevice::defaultDeviceWithMediaType(media)
+					.ok_or("No camera is available")?,
+			};
 			let input = AVCaptureDeviceInput::deviceInputWithDevice_error(&device)
 				.map_err(|_| "Camera is busy or unavailable")?;
 			let session = AVCaptureSession::new();
@@ -615,41 +667,6 @@ mod tests {
 	use openh264::formats::YUVSource;
 
 	#[test]
-	fn hardware_camera_frames_decode_and_stay_independently_decodable() {
-		let mut encoder = CameraEncoder::new().unwrap();
-		// Exactly one encoder is live: hardware when the machine offers it, openh264 otherwise.
-		#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
-		assert_eq!(encoder.hardware.is_some(), encoder.software.is_none());
-		for length in [0, WIDTH * HEIGHT * 3 - 1, WIDTH * HEIGHT * 3 + 1] {
-			assert!(encoder.encode(vec![0; length]).is_err());
-		}
-		let mut decoder = openh264::decoder::Decoder::new().unwrap();
-		for value in [0, 96, 255] {
-			let mut rgb = vec![value; WIDTH * HEIGHT * 3];
-			// Flat pictures compress to almost nothing; vary one row so the size check bites.
-			for (index, pixel) in rgb
-				.as_chunks_mut::<3>()
-				.0
-				.iter_mut()
-				.take(WIDTH)
-				.enumerate()
-			{
-				*pixel = [(index % 251) as u8, value, (index % 97) as u8];
-			}
-			let Some(frame) = encoder.encode(rgb).unwrap() else {
-				continue;
-			};
-			assert_eq!(frame.rgb.len(), WIDTH * HEIGHT * 3);
-			assert!(frame.h264.len() <= MAX_ENCODED_BYTES);
-			// The sender drops to the latest frame, so each picture must stand alone.
-			assert!(crate::video_receive::is_keyframe(&frame.h264));
-			assert!(crate::video_receive::has_parameter_sets(&frame.h264));
-			let decoded = decoder.decode(&frame.h264).unwrap().unwrap();
-			assert_eq!(decoded.dimensions(), (WIDTH, HEIGHT));
-		}
-	}
-
-	#[test]
 	fn camera_frames_are_bounded_independently_decodable_and_stop_is_immediate() {
 		let mut encoder = encoder().unwrap();
 		let mut yuv = YUVBuffer::new(WIDTH, HEIGHT);
@@ -677,5 +694,39 @@ mod tests {
 		assert!(!camera.stopped());
 		camera.shared.finished.store(true, Ordering::Release);
 		assert!(camera.stopped());
+
+		{
+			let mut encoder = CameraEncoder::new().unwrap();
+			// Exactly one encoder is live: hardware when the machine offers it, openh264 otherwise.
+			#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+			assert_eq!(encoder.hardware.is_some(), encoder.software.is_none());
+			for length in [0, WIDTH * HEIGHT * 3 - 1, WIDTH * HEIGHT * 3 + 1] {
+				assert!(encoder.encode(vec![0; length]).is_err());
+			}
+			let mut decoder = openh264::decoder::Decoder::new().unwrap();
+			for value in [0, 96, 255] {
+				let mut rgb = vec![value; WIDTH * HEIGHT * 3];
+				// Flat pictures compress to almost nothing; vary one row so the size check bites.
+				for (index, pixel) in rgb
+					.as_chunks_mut::<3>()
+					.0
+					.iter_mut()
+					.take(WIDTH)
+					.enumerate()
+				{
+					*pixel = [(index % 251) as u8, value, (index % 97) as u8];
+				}
+				let Some(frame) = encoder.encode(rgb).unwrap() else {
+					continue;
+				};
+				assert_eq!(frame.rgb.len(), WIDTH * HEIGHT * 3);
+				assert!(frame.h264.len() <= MAX_ENCODED_BYTES);
+				// The sender drops to the latest frame, so each picture must stand alone.
+				assert!(crate::video_receive::is_keyframe(&frame.h264));
+				assert!(crate::video_receive::has_parameter_sets(&frame.h264));
+				let decoded = decoder.decode(&frame.h264).unwrap().unwrap();
+				assert_eq!(decoded.dimensions(), (WIDTH, HEIGHT));
+			}
+		}
 	}
 }

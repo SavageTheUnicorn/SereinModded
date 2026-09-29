@@ -9,7 +9,7 @@ use std::{
 };
 use tokio::{fs::File, io::AsyncReadExt, sync::watch};
 
-pub const MAX_BYTES: u64 = 20_000_000;
+pub const MAX_BYTES: u64 = 500_000_000;
 pub const MAX_FILES: usize = 10;
 pub const MAX_TOTAL_BYTES: u64 = MAX_BYTES;
 const CHUNK_BYTES: usize = 64 * 1024;
@@ -51,7 +51,7 @@ impl Source {
 			return Err("Choose a regular file");
 		}
 		if metadata.len() == 0 || metadata.len() > MAX_BYTES {
-			return Err("Choose a nonempty file up to 20 MB");
+			return Err("Choose a nonempty file up to Discord's 500 MB maximum");
 		}
 		Ok(Self {
 			bytes: None,
@@ -66,11 +66,33 @@ impl Source {
 	/// A pasted PNG stays in bounded session memory, never in a temporary file.
 	pub fn pasted_png(bytes: Vec<u8>) -> Result<Self, &'static str> {
 		if bytes.is_empty() || bytes.len() as u64 > MAX_BYTES {
-			return Err("Choose a nonempty image up to 20 MB");
+			return Err("Choose a nonempty image up to Discord's 500 MB maximum");
 		}
 		Ok(Self {
 			path: PathBuf::new(),
 			filename: "pasted-image.png".into(),
+			size: bytes.len() as u64,
+			modified: SystemTime::UNIX_EPOCH,
+			bytes: Some(bytes.into()),
+		})
+	}
+	/// Public artwork already decoded and validated by the host image worker.
+	pub fn image_bytes(filename: String, bytes: Vec<u8>) -> Result<Self, &'static str> {
+		let valid_name = filename
+			.strip_prefix("emoji-")
+			.or_else(|| filename.strip_prefix("sticker-"))
+			.and_then(|name| name.rsplit_once('.'))
+			.is_some_and(|(id, extension)| {
+				matches!(extension, "png" | "gif")
+					&& id.bytes().all(|b| b.is_ascii_digit())
+					&& id.parse::<model::Id>().is_ok_and(|id| id.0 != 0)
+			});
+		if !valid_name || filename.len() > 40 || bytes.is_empty() || bytes.len() > 8 * 1024 * 1024 {
+			return Err("Choose valid emoji or sticker artwork up to 8 MiB");
+		}
+		Ok(Self {
+			path: PathBuf::new(),
+			filename,
 			size: bytes.len() as u64,
 			modified: SystemTime::UNIX_EPOCH,
 			bytes: Some(bytes.into()),
@@ -141,6 +163,50 @@ struct Target {
 	upload_filename: String,
 }
 
+/// What the staged files belong to: a message in an existing channel, or a new forum post.
+enum Destination {
+	Interaction(client_core::interactions::Request),
+	Send {
+		nonce: String,
+		reply: Option<client_core::Reply>,
+	},
+	Post {
+		guild: model::Id,
+		title: String,
+		tags: Vec<model::Id>,
+		request: u64,
+	},
+}
+impl Destination {
+	/// Report a failure as the event the caller's flow expects; no write was accepted.
+	fn failed(self, channel: model::Id, failure: Failure) -> Event {
+		match self {
+			Self::Interaction(request) => {
+				Event::Interaction(client_core::interactions::Event::Submitted {
+					nonce: request.nonce,
+					result: Err(failure),
+				})
+			}
+			Self::Send { nonce, .. } => Event::SendResult {
+				nonce,
+				result: Err(failure),
+			},
+			Self::Post { request, .. } => Event::PostCreated {
+				parent: channel,
+				request,
+				result: Err(failure),
+			},
+		}
+	}
+}
+fn status<T>(result: &Result<T, Failure>) -> Status {
+	match result {
+		Ok(_) => Status::Finished,
+		Err(Failure::ProtocolAt(CANCELLED)) => Status::Cancelled,
+		Err(failure) => Status::Failed(failure.label()),
+	}
+}
+
 impl DiscordApi {
 	pub async fn upload_message(
 		&self,
@@ -160,34 +226,73 @@ impl DiscordApi {
 		progress: watch::Sender<Status>,
 		mut cancel: watch::Receiver<bool>,
 	) -> Event {
-		let Command::Send {
-			channel,
-			content,
-			nonce,
-			reply,
-		} = command
-		else {
-			progress.send_replace(Status::Failed("Invalid upload request"));
-			return Event::Failure(Failure::ProtocolAt("Invalid upload request"));
+		let (channel, content, target) = match command {
+			Command::Interaction(request) => {
+				if !request.valid()
+					|| !crate::interactions::valid_uploads(&request, sources.len())
+					|| !crate::interactions::valid_file_types(&request, &sources)
+					|| !matches!(&request.data, client_core::interactions::Data::Modal { .. })
+				{
+					progress
+						.send_replace(Status::Failed("Invalid modal upload; reselect the files"));
+					return Event::Interaction(client_core::interactions::Event::Submitted {
+						nonce: request.nonce,
+						result: Err(Failure::ProtocolAt(
+							"Invalid modal upload; reselect the files",
+						)),
+					});
+				}
+				(
+					request.channel_id,
+					String::new(),
+					Destination::Interaction(request),
+				)
+			}
+			Command::Send {
+				channel,
+				content,
+				nonce,
+				reply,
+				sticker: None,
+			} => (channel, content, Destination::Send { nonce, reply }),
+			// A forum post is one request: its files are staged before the thread exists.
+			Command::CreatePost {
+				parent,
+				guild,
+				title,
+				content,
+				tags,
+				request,
+				..
+			} => (
+				parent,
+				content,
+				Destination::Post {
+					guild,
+					title,
+					tags,
+					request,
+				},
+			),
+			_ => {
+				progress.send_replace(Status::Failed("Invalid upload request"));
+				return Event::Failure(Failure::ProtocolAt("Invalid upload request"));
+			}
 		};
 		if content.chars().count() > client_core::MAX_CONTENT {
 			let failure = Failure::ProtocolAt("Message is too long; no file was uploaded");
 			progress.send_replace(Status::Failed(failure.label()));
-			return Event::SendResult {
-				nonce,
-				result: Err(failure),
-			};
+			return target.failed(channel, failure);
 		}
 		if sources.is_empty()
 			|| sources.len() > MAX_FILES
 			|| sources.iter().map(Source::size).sum::<u64>() > MAX_TOTAL_BYTES
 		{
-			let failure = Failure::ProtocolAt("Choose up to 10 files totaling at most 20 MB");
+			let failure = Failure::ProtocolAt(
+				"Choose up to 10 files totaling at most 500 MB; account limits may be lower",
+			);
 			progress.send_replace(Status::Failed(failure.label()));
-			return Event::SendResult {
-				nonce,
-				result: Err(failure),
-			};
+			return target.failed(channel, failure);
 		}
 		let total = sources.iter().map(Source::size).sum::<u64>();
 		progress.send_replace(Status::Preparing);
@@ -211,29 +316,63 @@ impl DiscordApi {
 			_ = cancelled(&mut cancel) => Err(Failure::ProtocolAt(CANCELLED)),
 			result = prepare => result,
 		};
-		let result = match prepared {
-			Ok(attachment) => {
-				// Past this boundary cancellation may race Discord's message acceptance.
-				// Never claim cancellation deleted a message, and never retry the POST.
-				if *cancel.borrow() || cancel.has_changed().is_err() {
-					Err(Failure::ProtocolAt(CANCELLED))
-				} else {
-					progress.send_replace(Status::Sending);
-					tokio::select! {
-						biased;
-						_ = cancelled(&mut cancel) => Err(Failure::Ambiguous),
-						result = self.send_message(channel, &content, &nonce, reply, Some(attachment)) => result,
-					}
+		// Past this boundary cancellation may race Discord's acceptance. Never claim
+		// cancellation deleted a message or a post, and never retry the POST.
+		let attachment = match prepared {
+			Ok(attachment) if !*cancel.borrow() && cancel.has_changed().is_ok() => Some(attachment),
+			Ok(_) => None,
+			Err(failure) => {
+				progress.send_replace(status(&Err::<(), _>(failure)));
+				return target.failed(channel, failure);
+			}
+		};
+		let Some(attachment) = attachment else {
+			let failure = Failure::ProtocolAt(CANCELLED);
+			progress.send_replace(Status::Cancelled);
+			return target.failed(channel, failure);
+		};
+		progress.send_replace(Status::Sending);
+		match target {
+			Destination::Interaction(request) => {
+				let result = tokio::select! {
+					biased;
+					_ = cancelled(&mut cancel) => Err(Failure::Ambiguous),
+					result = self.interaction(&request,Some(attachment)) => result,
+				};
+				progress.send_replace(status(&result));
+				Event::Interaction(client_core::interactions::Event::Submitted {
+					nonce: request.nonce,
+					result,
+				})
+			}
+			Destination::Send { nonce, reply } => {
+				let result = tokio::select! {
+					biased;
+					_ = cancelled(&mut cancel) => Err(Failure::Ambiguous),
+					result = self.send_message(channel, &content, &nonce, reply, Some(attachment), None) => result,
+				};
+				progress.send_replace(status(&result));
+				Event::SendResult { nonce, result }
+			}
+			Destination::Post {
+				guild,
+				title,
+				tags,
+				request,
+			} => {
+				let result = tokio::select! {
+					biased;
+					_ = cancelled(&mut cancel) => Err(Failure::Ambiguous),
+					result = self.create_post(channel, guild, (&title, &tags), &content, Some(attachment)) => result,
+				};
+				progress.send_replace(status(&result));
+				Event::PostCreated {
+					parent: channel,
+					request,
+					result,
 				}
 			}
-			Err(failure) => Err(failure),
-		};
-		progress.send_replace(match &result {
-			Ok(_) => Status::Finished,
-			Err(Failure::ProtocolAt(CANCELLED)) => Status::Cancelled,
-			Err(failure) => Status::Failed(failure.label()),
-		});
-		Event::SendResult { nonce, result }
+		}
 	}
 
 	async fn upload_file(
@@ -465,6 +604,27 @@ async fn cancelled(cancel: &mut watch::Receiver<bool>) {
 
 #[cfg(test)]
 mod tests {
+	#[test]
+	fn image_sources_only_accept_bounded_generated_raster_names() {
+		for name in ["emoji-7.gif", "sticker-8.png"] {
+			let source = super::Source::image_bytes(name.into(), vec![1]).unwrap();
+			assert_eq!(source.filename(), name);
+			assert_eq!(source.size(), 1);
+		}
+		for name in [
+			"emoji-0.png",
+			"emoji-+7.png",
+			"sticker-7.json",
+			"../emoji-7.png",
+			"sticker-7.png?x=1",
+		] {
+			assert!(super::Source::image_bytes(name.into(), vec![1]).is_err());
+		}
+		assert!(super::Source::image_bytes("emoji-7.png".into(), vec![]).is_err());
+		assert!(
+			super::Source::image_bytes("emoji-7.png".into(), vec![0; 8 * 1024 * 1024 + 1]).is_err()
+		);
+	}
 	use super::*;
 	use client_core::{Reply, auth::SessionSecret};
 	use std::sync::{
@@ -513,6 +673,7 @@ mod tests {
 	}
 	fn command() -> Command {
 		Command::Send {
+			sticker: None,
 			channel: model::Id(1),
 			content: String::new(),
 			nonce: "synthetic-upload".into(),
@@ -571,198 +732,198 @@ mod tests {
 
 	#[tokio::test]
 	async fn staged_upload_streams_without_credentials_and_reconciles_message() {
-		tokio::time::timeout(Duration::from_secs(10), async {
-            let fixture = Fixture::new(&vec![b'x'; CHUNK_BYTES * 2 + 9]).await;
-            let source = Source::inspect(fixture.0.clone()).await.unwrap();
-            let filename = source.filename().to_owned();
-            let api_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let storage = TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let mut api = api();
-            api.base = format!("http://{}", api_listener.local_addr().unwrap());
-            api.upload_origin = Some(storage.local_addr().unwrap());
-            let upload_url = format!("http://{}/signed?upload_id=synthetic", storage.local_addr().unwrap());
-            let server = tokio::spawn(async move {
-                for id in 0..2 {
-                let (mut socket, _) = api_listener.accept().await.unwrap();
-                let (head, bytes) = request(&mut socket).await;
-                assert!(head.starts_with("POST /channels/1/attachments HTTP/1.1"));
-                assert!(head.contains("SYNTHETIC_UPLOAD_TOKEN"));
-                assert!(head.to_ascii_lowercase().contains("x-super-properties: "));
-                assert!(head.contains(&format!("user-agent: {}", client_core::fingerprint::user_agent())));
-                assert_eq!(serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(), serde_json::json!({"files":[{"id":id.to_string(),"filename":filename,"file_size":CHUNK_BYTES*2+9,"is_clip":false}]}));
-                respond(&mut socket, "200 OK", &serde_json::json!({"attachments":[{"id":id,"upload_url":upload_url,"upload_filename":format!("synthetic-upload/{id}/file.txt")}]}).to_string()).await;
-                let (mut socket, _) = storage.accept().await.unwrap();
-                let (head, bytes) = request(&mut socket).await;
-                assert!(head.starts_with("PUT /signed?upload_id=synthetic HTTP/1.1"));
-                assert!(!head.to_ascii_lowercase().contains("authorization"));
-                assert!(!head.to_ascii_lowercase().contains("cookie"));
-                assert!(!head.contains("SYNTHETIC_UPLOAD_TOKEN"));
-                assert!(!head.to_ascii_lowercase().contains("x-super-properties"));
-                assert!(head.to_ascii_lowercase().contains("content-type: text/plain"));
-                assert_eq!(bytes, vec![b'x'; CHUNK_BYTES*2+9]);
-                respond(&mut socket, "200 OK", "").await;
-                }
-                let (mut socket, _) = api_listener.accept().await.unwrap();
-                let (head, bytes) = request(&mut socket).await;
-                assert!(head.starts_with("POST /channels/1/messages HTTP/1.1"));
-                assert!(head.contains("SYNTHETIC_UPLOAD_TOKEN"));
-                let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-                assert_eq!(body["content"], "");
-                assert_eq!(body["nonce"], "synthetic-upload");
-                assert_eq!(body["attachments"], serde_json::json!([{"id":"0","filename":filename,"uploaded_filename":"synthetic-upload/0/file.txt"},{"id":"1","filename":filename,"uploaded_filename":"synthetic-upload/1/file.txt"}]));
-                assert_eq!(body["allowed_mentions"], serde_json::json!({"parse":[],"users":[],"roles":[],"replied_user":true}));
-                assert_eq!(body["message_reference"], serde_json::json!({"message_id":"2","channel_id":"1"}));
-                respond(&mut socket, "200 OK", r#"{"id":"3","channel_id":"1","author":{"id":"4","username":"Synthetic"},"nonce":"synthetic-upload"}"#).await;
-            });
-            let (progress, status) = watch::channel(Status::Preparing);
-            let (_cancel, cancelled) = watch::channel(false);
-            assert!(matches!(api.upload_messages(command(), vec![source.clone(), source], progress, cancelled).await, Event::SendResult { result: Ok(message), .. } if message.id == model::Id(3)));
-            assert_eq!(*status.borrow(), Status::Finished);
-            server.await.unwrap();
-        }).await.unwrap();
-	}
-
-	#[tokio::test]
-	async fn upload_rejects_changed_missing_oversized_sources_and_untrusted_targets() {
-		let fixture = Fixture::new(b"synthetic").await;
-		let source = Source::inspect(fixture.0.clone()).await.unwrap();
-		tokio::fs::write(&fixture.0, b"changed").await.unwrap();
-		assert_eq!(source.validate().await, Err(Failure::ProtocolAt(CHANGED)));
-		tokio::fs::remove_file(&fixture.0).await.unwrap();
-		assert!(Source::inspect(fixture.0.clone()).await.is_err());
-		let empty = Fixture::new(&[]).await;
-		assert!(Source::inspect(empty.0.clone()).await.is_err());
-		let large = tokio::fs::OpenOptions::new()
-			.write(true)
-			.open(&empty.0)
-			.await
-			.unwrap();
-		large.set_len(MAX_BYTES + 1).await.unwrap();
-		assert!(Source::inspect(empty.0.clone()).await.is_err());
-		drop(large);
-		let api = api();
-		let host = "discord-attachments-uploads-prd.storage.googleapis.com";
-		assert!(
-			api.upload_url(&format!("https://{host}/opaque?upload_id=synthetic"))
-				.is_ok()
-		);
-		for url in [
-			format!("http://{host}/x"),
-			format!("https://{host}.evil.test/x"),
-			format!("https://user@{host}/x"),
-			format!("https://{host}:444/x"),
-			format!("https://{host}/x#fragment"),
-			"http://127.0.0.1:1234/x".into(),
-			format!("https://{host}/{}", "x".repeat(4096)),
-		] {
-			assert!(api.upload_url(&url).is_err());
+		{
+			tokio::time::timeout(Duration::from_secs(10), async {
+	            let fixture = Fixture::new(&vec![b'x'; CHUNK_BYTES * 2 + 9]).await;
+	            let source = Source::inspect(fixture.0.clone()).await.unwrap();
+	            let filename = source.filename().to_owned();
+	            let api_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+	            let storage = TcpListener::bind("127.0.0.1:0").await.unwrap();
+	            let mut api = api();
+	            api.base = format!("http://{}", api_listener.local_addr().unwrap());
+	            api.upload_origin = Some(storage.local_addr().unwrap());
+	            let upload_url = format!("http://{}/signed?upload_id=synthetic", storage.local_addr().unwrap());
+	            let server = tokio::spawn(async move {
+	                for id in 0..2 {
+	                let (mut socket, _) = api_listener.accept().await.unwrap();
+	                let (head, bytes) = request(&mut socket).await;
+	                assert!(head.starts_with("POST /channels/1/attachments HTTP/1.1"));
+	                assert!(head.contains("SYNTHETIC_UPLOAD_TOKEN"));
+	                assert!(head.to_ascii_lowercase().contains("x-super-properties: "));
+	                assert!(head.contains(&format!("user-agent: {}", client_core::fingerprint::user_agent())));
+	                assert_eq!(serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(), serde_json::json!({"files":[{"id":id.to_string(),"filename":filename,"file_size":CHUNK_BYTES*2+9,"is_clip":false}]}));
+	                respond(&mut socket, "200 OK", &serde_json::json!({"attachments":[{"id":id,"upload_url":upload_url,"upload_filename":format!("synthetic-upload/{id}/file.txt")}]}).to_string()).await;
+	                let (mut socket, _) = storage.accept().await.unwrap();
+	                let (head, bytes) = request(&mut socket).await;
+	                assert!(head.starts_with("PUT /signed?upload_id=synthetic HTTP/1.1"));
+	                assert!(!head.to_ascii_lowercase().contains("authorization"));
+	                assert!(!head.to_ascii_lowercase().contains("cookie"));
+	                assert!(!head.contains("SYNTHETIC_UPLOAD_TOKEN"));
+	                assert!(!head.to_ascii_lowercase().contains("x-super-properties"));
+	                assert!(head.to_ascii_lowercase().contains("content-type: text/plain"));
+	                assert_eq!(bytes, vec![b'x'; CHUNK_BYTES*2+9]);
+	                respond(&mut socket, "200 OK", "").await;
+	                }
+	                let (mut socket, _) = api_listener.accept().await.unwrap();
+	                let (head, bytes) = request(&mut socket).await;
+	                assert!(head.starts_with("POST /channels/1/messages HTTP/1.1"));
+	                assert!(head.contains("SYNTHETIC_UPLOAD_TOKEN"));
+	                let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+	                assert_eq!(body["content"], "");
+	                assert_eq!(body["nonce"], "synthetic-upload");
+	                assert_eq!(body["attachments"], serde_json::json!([{"id":"0","filename":filename,"uploaded_filename":"synthetic-upload/0/file.txt"},{"id":"1","filename":filename,"uploaded_filename":"synthetic-upload/1/file.txt"}]));
+	                assert_eq!(body["allowed_mentions"], serde_json::json!({"parse":[],"users":[],"roles":[],"replied_user":true}));
+	                assert_eq!(body["message_reference"], serde_json::json!({"message_id":"2","channel_id":"1"}));
+	                respond(&mut socket, "200 OK", r#"{"id":"3","channel_id":"1","author":{"id":"4","username":"Synthetic"},"nonce":"synthetic-upload"}"#).await;
+	            });
+	            let (progress, status) = watch::channel(Status::Preparing);
+	            let (_cancel, cancelled) = watch::channel(false);
+	            assert!(matches!(api.upload_messages(command(), vec![source.clone(), source], progress, cancelled).await, Event::SendResult { result: Ok(message), .. } if message.id == model::Id(3)));
+	            assert_eq!(*status.borrow(), Status::Finished);
+	            server.await.unwrap();
+	        }).await.unwrap();
+		}
+		{
+			let fixture = Fixture::new(b"synthetic").await;
+			let source = Source::inspect(fixture.0.clone()).await.unwrap();
+			tokio::fs::write(&fixture.0, b"changed").await.unwrap();
+			assert_eq!(source.validate().await, Err(Failure::ProtocolAt(CHANGED)));
+			tokio::fs::remove_file(&fixture.0).await.unwrap();
+			assert!(Source::inspect(fixture.0.clone()).await.is_err());
+			let empty = Fixture::new(&[]).await;
+			assert!(Source::inspect(empty.0.clone()).await.is_err());
+			let large = tokio::fs::OpenOptions::new()
+				.write(true)
+				.open(&empty.0)
+				.await
+				.unwrap();
+			large.set_len(20_000_001).await.unwrap();
+			assert!(Source::inspect(empty.0.clone()).await.is_ok());
+			large.set_len(MAX_BYTES + 1).await.unwrap();
+			assert!(Source::inspect(empty.0.clone()).await.is_err());
+			drop(large);
+			let api = api();
+			let host = "discord-attachments-uploads-prd.storage.googleapis.com";
+			assert!(
+				api.upload_url(&format!("https://{host}/opaque?upload_id=synthetic"))
+					.is_ok()
+			);
+			for url in [
+				format!("http://{host}/x"),
+				format!("https://{host}.evil.test/x"),
+				format!("https://user@{host}/x"),
+				format!("https://{host}:444/x"),
+				format!("https://{host}/x#fragment"),
+				"http://127.0.0.1:1234/x".into(),
+				format!("https://{host}/{}", "x".repeat(4096)),
+			] {
+				assert!(api.upload_url(&url).is_err());
+			}
 		}
 	}
 
 	#[tokio::test]
 	async fn upload_cancel_before_write_and_redirect_never_send_message() {
-		tokio::time::timeout(Duration::from_secs(10), async {
-            let fixture = Fixture::new(b"synthetic").await;
-            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let mut api = api();
-            api.base = format!("http://{}", listener.local_addr().unwrap());
-            let (progress, status) = watch::channel(Status::Preparing);
-            let (_cancel, cancelled) = watch::channel(true);
-            assert_eq!(failed(api.upload_message(command(), Source::inspect(fixture.0.clone()).await.unwrap(), progress, cancelled).await), Failure::ProtocolAt(CANCELLED));
-            assert_eq!(*status.borrow(), Status::Cancelled);
-            assert!(tokio::time::timeout(Duration::from_millis(30), listener.accept()).await.is_err());
+		{
+			tokio::time::timeout(Duration::from_secs(10), async {
+	            let fixture = Fixture::new(b"synthetic").await;
+	            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+	            let mut api = api();
+	            api.base = format!("http://{}", listener.local_addr().unwrap());
+	            let (progress, status) = watch::channel(Status::Preparing);
+	            let (_cancel, cancelled) = watch::channel(true);
+	            assert_eq!(failed(api.upload_message(command(), Source::inspect(fixture.0.clone()).await.unwrap(), progress, cancelled).await), Failure::ProtocolAt(CANCELLED));
+	            assert_eq!(*status.borrow(), Status::Cancelled);
+	            assert!(tokio::time::timeout(Duration::from_millis(30), listener.accept()).await.is_err());
 
-            let storage = TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let redirected = TcpListener::bind("127.0.0.1:0").await.unwrap();
-            api.upload_origin = Some(storage.local_addr().unwrap());
-            let target = format!("http://{}/signed", storage.local_addr().unwrap());
-            let redirect = format!("http://{}/must-not-open", redirected.local_addr().unwrap());
-            let server = tokio::spawn(async move {
-                let (mut socket, _) = listener.accept().await.unwrap();
-                request(&mut socket).await;
-                respond(&mut socket, "200 OK", &serde_json::json!({"attachments":[{"upload_url":target,"upload_filename":"synthetic/file"}]}).to_string()).await;
-                let (mut socket, _) = storage.accept().await.unwrap();
-                request(&mut socket).await;
-                socket.write_all(format!("HTTP/1.1 307 Temporary Redirect\r\nLocation: {redirect}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
-                assert!(tokio::time::timeout(Duration::from_millis(50), listener.accept()).await.is_err());
-                assert!(tokio::time::timeout(Duration::from_millis(50), redirected.accept()).await.is_err());
-            });
-            let (progress, _) = watch::channel(Status::Preparing);
-            let (_cancel, cancelled) = watch::channel(false);
-            assert_eq!(failed(api.upload_message(command(), Source::inspect(fixture.0.clone()).await.unwrap(), progress, cancelled).await), Failure::ProtocolAt("File upload rejected; no message was sent"));
-            server.await.unwrap();
-        }).await.unwrap();
-	}
-
-	#[tokio::test]
-	async fn cancellation_during_message_post_keeps_outcome_unknown() {
-		tokio::time::timeout(Duration::from_secs(10), async {
-            let fixture = Fixture::new(b"synthetic").await;
-            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let storage = TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let mut api = api();
-            api.base = format!("http://{}", listener.local_addr().unwrap());
-            api.upload_origin = Some(storage.local_addr().unwrap());
-            let target = format!("http://{}/signed", storage.local_addr().unwrap());
-            let (cancel, cancelled) = watch::channel(false);
-            let server = tokio::spawn(async move {
-                let (mut socket, _) = listener.accept().await.unwrap();
-                request(&mut socket).await;
-                respond(&mut socket, "200 OK", &serde_json::json!({"attachments":[{"upload_url":target,"upload_filename":"synthetic/file"}]}).to_string()).await;
-                let (mut socket, _) = storage.accept().await.unwrap();
-                request(&mut socket).await;
-                respond(&mut socket, "200 OK", "").await;
-                let (mut socket, _) = listener.accept().await.unwrap();
-                let (head, _) = request(&mut socket).await;
-                assert!(head.starts_with("POST /channels/1/messages HTTP/1.1"));
-                cancel.send_replace(true);
-                // Keep the cancellation sender and unanswered POST alive until its receiver ends.
-                cancel.closed().await;
-                assert!(tokio::time::timeout(Duration::from_millis(50), listener.accept()).await.is_err());
-            });
-            let (progress, status) = watch::channel(Status::Preparing);
-            assert_eq!(failed(api.upload_message(command(), Source::inspect(fixture.0.clone()).await.unwrap(), progress, cancelled).await), Failure::Ambiguous);
-            assert_eq!(*status.borrow(), Status::Failed(Failure::Ambiguous.label()));
-            server.await.unwrap();
-        }).await.unwrap();
-	}
-
-	#[tokio::test]
-	async fn cancelling_put_or_changing_its_source_never_creates_message() {
-		tokio::time::timeout(Duration::from_secs(10), async {
-            for cancel_put in [true, false] {
-                let fixture = Fixture::new(&vec![b'x'; CHUNK_BYTES * 2 + 9]).await;
-                let source = Source::inspect(fixture.0.clone()).await.unwrap();
-                let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-                let storage = TcpListener::bind("127.0.0.1:0").await.unwrap();
-                let mut api = api();
-                api.base = format!("http://{}", listener.local_addr().unwrap());
-                api.upload_origin = Some(storage.local_addr().unwrap());
-                let target = format!("http://{}/signed", storage.local_addr().unwrap());
-                let path = fixture.0.clone();
-                let (cancel, cancelled) = watch::channel(false);
-                let server = tokio::spawn(async move {
-                    let (mut socket, _) = listener.accept().await.unwrap();
-                    request(&mut socket).await;
-                    respond(&mut socket, "200 OK", &serde_json::json!({"attachments":[{"upload_url":target,"upload_filename":"synthetic/file"}]}).to_string()).await;
-                    let (mut socket, _) = storage.accept().await.unwrap();
-                    if cancel_put {
-                        let mut first_bytes = [0; 1024];
-                        assert!(socket.read(&mut first_bytes).await.unwrap() > 0);
-                        cancel.send_replace(true);
-                        cancel.closed().await;
-                    } else {
-                        request(&mut socket).await;
-                        tokio::fs::write(path, b"changed during upload").await.unwrap();
-                        respond(&mut socket, "200 OK", "").await;
-                        cancel.closed().await;
-                    }
-                    assert!(tokio::time::timeout(Duration::from_millis(50), listener.accept()).await.is_err());
-                });
-                let (progress, _) = watch::channel(Status::Preparing);
-                assert_eq!(failed(api.upload_message(command(), source, progress, cancelled).await), Failure::ProtocolAt(if cancel_put { CANCELLED } else { CHANGED }));
-                server.await.unwrap();
-            }
-        }).await.unwrap();
+	            let storage = TcpListener::bind("127.0.0.1:0").await.unwrap();
+	            let redirected = TcpListener::bind("127.0.0.1:0").await.unwrap();
+	            api.upload_origin = Some(storage.local_addr().unwrap());
+	            let target = format!("http://{}/signed", storage.local_addr().unwrap());
+	            let redirect = format!("http://{}/must-not-open", redirected.local_addr().unwrap());
+	            let server = tokio::spawn(async move {
+	                let (mut socket, _) = listener.accept().await.unwrap();
+	                request(&mut socket).await;
+	                respond(&mut socket, "200 OK", &serde_json::json!({"attachments":[{"upload_url":target,"upload_filename":"synthetic/file"}]}).to_string()).await;
+	                let (mut socket, _) = storage.accept().await.unwrap();
+	                request(&mut socket).await;
+	                socket.write_all(format!("HTTP/1.1 307 Temporary Redirect\r\nLocation: {redirect}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
+	                assert!(tokio::time::timeout(Duration::from_millis(50), listener.accept()).await.is_err());
+	                assert!(tokio::time::timeout(Duration::from_millis(50), redirected.accept()).await.is_err());
+	            });
+	            let (progress, _) = watch::channel(Status::Preparing);
+	            let (_cancel, cancelled) = watch::channel(false);
+	            assert_eq!(failed(api.upload_message(command(), Source::inspect(fixture.0.clone()).await.unwrap(), progress, cancelled).await), Failure::ProtocolAt("File upload rejected; no message was sent"));
+	            server.await.unwrap();
+	        }).await.unwrap();
+		}
+		{
+			tokio::time::timeout(Duration::from_secs(10), async {
+	            let fixture = Fixture::new(b"synthetic").await;
+	            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+	            let storage = TcpListener::bind("127.0.0.1:0").await.unwrap();
+	            let mut api = api();
+	            api.base = format!("http://{}", listener.local_addr().unwrap());
+	            api.upload_origin = Some(storage.local_addr().unwrap());
+	            let target = format!("http://{}/signed", storage.local_addr().unwrap());
+	            let (cancel, cancelled) = watch::channel(false);
+	            let server = tokio::spawn(async move {
+	                let (mut socket, _) = listener.accept().await.unwrap();
+	                request(&mut socket).await;
+	                respond(&mut socket, "200 OK", &serde_json::json!({"attachments":[{"upload_url":target,"upload_filename":"synthetic/file"}]}).to_string()).await;
+	                let (mut socket, _) = storage.accept().await.unwrap();
+	                request(&mut socket).await;
+	                respond(&mut socket, "200 OK", "").await;
+	                let (mut socket, _) = listener.accept().await.unwrap();
+	                let (head, _) = request(&mut socket).await;
+	                assert!(head.starts_with("POST /channels/1/messages HTTP/1.1"));
+	                cancel.send_replace(true);
+	                // Keep the cancellation sender and unanswered POST alive until its receiver ends.
+	                cancel.closed().await;
+	                assert!(tokio::time::timeout(Duration::from_millis(50), listener.accept()).await.is_err());
+	            });
+	            let (progress, status) = watch::channel(Status::Preparing);
+	            assert_eq!(failed(api.upload_message(command(), Source::inspect(fixture.0.clone()).await.unwrap(), progress, cancelled).await), Failure::Ambiguous);
+	            assert_eq!(*status.borrow(), Status::Failed(Failure::Ambiguous.label()));
+	            server.await.unwrap();
+	        }).await.unwrap();
+		}
+		{
+			tokio::time::timeout(Duration::from_secs(10), async {
+	            for cancel_put in [true, false] {
+	                let fixture = Fixture::new(&vec![b'x'; CHUNK_BYTES * 2 + 9]).await;
+	                let source = Source::inspect(fixture.0.clone()).await.unwrap();
+	                let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+	                let storage = TcpListener::bind("127.0.0.1:0").await.unwrap();
+	                let mut api = api();
+	                api.base = format!("http://{}", listener.local_addr().unwrap());
+	                api.upload_origin = Some(storage.local_addr().unwrap());
+	                let target = format!("http://{}/signed", storage.local_addr().unwrap());
+	                let path = fixture.0.clone();
+	                let (cancel, cancelled) = watch::channel(false);
+	                let server = tokio::spawn(async move {
+	                    let (mut socket, _) = listener.accept().await.unwrap();
+	                    request(&mut socket).await;
+	                    respond(&mut socket, "200 OK", &serde_json::json!({"attachments":[{"upload_url":target,"upload_filename":"synthetic/file"}]}).to_string()).await;
+	                    let (mut socket, _) = storage.accept().await.unwrap();
+	                    if cancel_put {
+	                        let mut first_bytes = [0; 1024];
+	                        assert!(socket.read(&mut first_bytes).await.unwrap() > 0);
+	                        cancel.send_replace(true);
+	                        cancel.closed().await;
+	                    } else {
+	                        request(&mut socket).await;
+	                        tokio::fs::write(path, b"changed during upload").await.unwrap();
+	                        respond(&mut socket, "200 OK", "").await;
+	                        cancel.closed().await;
+	                    }
+	                    assert!(tokio::time::timeout(Duration::from_millis(50), listener.accept()).await.is_err());
+	                });
+	                let (progress, _) = watch::channel(Status::Preparing);
+	                assert_eq!(failed(api.upload_message(command(), source, progress, cancelled).await), Failure::ProtocolAt(if cancel_put { CANCELLED } else { CHANGED }));
+	                server.await.unwrap();
+	            }
+	        }).await.unwrap();
+		}
 	}
 }

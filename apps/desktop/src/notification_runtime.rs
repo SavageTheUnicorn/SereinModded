@@ -1,4 +1,4 @@
-//! Applies notification device choices to the existing filtered message and incoming-call state.
+//! Applies notification device choices to filtered messages and explicit call ringing state.
 use client_core::{State, auth::AuthState};
 use model::{
 	Id, PresenceStatus,
@@ -7,8 +7,8 @@ use model::{
 use std::time::{Duration, Instant};
 
 pub enum Alert {
-	Generic(platform::notifications::Kind),
 	Message {
+		channel: Id,
 		title: String,
 		body: String,
 		avatar_key: String,
@@ -20,12 +20,33 @@ pub struct Runtime {
 	sounds: crate::notification_sounds::Sounds,
 	options: Device,
 	was_audible: bool,
-	ring: Option<(Id, Instant)>,
+	ring: Option<((Id, Sound), Instant)>,
 	badge: Option<u32>,
 	badge_check: Option<Instant>,
 	badge_status: &'static str,
 }
 impl Runtime {
+	fn ring_cue(&mut self, ringing: Option<(Id, Sound)>, now: Instant) -> Option<Sound> {
+		if self.ring.map(|(key, _)| key) != ringing {
+			if self.ring.is_some() {
+				self.sounds.stop();
+			}
+			self.ring = ringing.map(|key| (key, now));
+			return ringing.map(|(_, cue)| cue);
+		}
+		if let Some(((_, cue), played)) = &mut self.ring {
+			let interval = if *cue == Sound::OutgoingRing {
+				crate::notification_sounds::OUTGOING_RING_INTERVAL
+			} else {
+				crate::notification_sounds::RING_INTERVAL
+			};
+			if now.duration_since(*played) >= interval {
+				*played = now;
+				return Some(*cue);
+			}
+		}
+		None
+	}
 	pub fn clear(&mut self, window: &winit::window::Window) {
 		self.sounds.stop();
 		self.ring = None;
@@ -72,6 +93,7 @@ impl Runtime {
 						crate::avatars::notification_image_path(user.id, &notification.avatar_key)
 					});
 					alert = Some(Alert::Message {
+						channel: notification.channel,
 						title: notification.sender,
 						body: notification.preview,
 						avatar_key: notification.avatar_key,
@@ -83,48 +105,18 @@ impl Runtime {
 				}
 			}
 		}
-		while let Some(notification) = state.take_social_notification() {
-			if audible {
-				if ui.notifications_enabled {
-					alert = Some(Alert::Generic(match notification.kind {
-						model::notification_settings::SocialKind::Streaming => {
-							platform::notifications::Kind::Streaming
-						}
-						model::notification_settings::SocialKind::UpcomingEvent => {
-							platform::notifications::Kind::UpcomingEvent
-						}
-						model::notification_settings::SocialKind::Reaction => {
-							platform::notifications::Kind::Reaction
-						}
-						model::notification_settings::SocialKind::FriendsOnline => {
-							platform::notifications::Kind::FriendsOnline
-						}
-						model::notification_settings::SocialKind::ProfileUpdates => {
-							platform::notifications::Kind::ProfileUpdates
-						}
-					}));
-				}
-				if options.allows(Sound::Message) {
-					sound = Some(Sound::Message);
-				}
-			}
-		}
 		let incoming = state.voice.incoming.filter(|id| {
 			audible && state.notification_allowed(*id) && options.allows(Sound::IncomingRing)
 		});
-		if self.ring.map(|(id, _)| id) != incoming {
-			if self.ring.is_some() {
-				self.sounds.stop();
-			}
-			self.ring = incoming.map(|id| (id, Instant::now()));
-			if incoming.is_some() {
-				sound = Some(Sound::IncomingRing);
-			}
-		} else if let Some((_, played)) = &mut self.ring
-			&& played.elapsed() >= crate::notification_sounds::RING_INTERVAL
-		{
-			*played = Instant::now();
-			sound = Some(Sound::IncomingRing);
+		// Dialing is explicit local feedback, like mute/camera cues; DND only silences alerts.
+		let outgoing = state
+			.outgoing_ring()
+			.filter(|_| live && options.allows(Sound::OutgoingRing));
+		let ringing = incoming
+			.map(|id| (id, Sound::IncomingRing))
+			.or_else(|| outgoing.map(|id| (id, Sound::OutgoingRing)));
+		if let Some(cue) = self.ring_cue(ringing, Instant::now()) {
+			sound = Some(cue);
 		}
 		if self.ring.is_some() {
 			ctx.request_repaint_after(Duration::from_millis(250));
@@ -134,14 +126,12 @@ impl Runtime {
 			sound = Some(preview);
 		}
 		if let Some(sound) = sound {
-			self.sounds.play(sound, ctx);
+			self.sounds.play(sound, options.volume, ctx);
 		}
-		if self
-			.badge_check
-			.is_none_or(|time| time.elapsed() >= Duration::from_secs(1))
-			|| !badges
-			|| !live
-		{
+		// Counts only change while frames run, so an idle window needs no badge timer: a
+		// throttled frame schedules one follow-up recount, and then the window can sleep.
+		let since = self.badge_check.map(|time| time.elapsed());
+		if since.is_none_or(|since| since >= Duration::from_secs(1)) || !badges || !live {
 			self.badge_check = Some(Instant::now());
 			let pings = if live && badges {
 				state
@@ -165,9 +155,8 @@ impl Runtime {
 				self.badge_status = platform::badge::set(window, pings).err().unwrap_or("");
 				self.badge = Some(pings);
 			}
-		}
-		if live && badges {
-			ctx.request_repaint_after(Duration::from_secs(1));
+		} else if let Some(since) = since {
+			ctx.request_repaint_after(Duration::from_secs(1).saturating_sub(since));
 		}
 		ui.notification_sound_status = if self.sounds.status().is_empty() {
 			self.badge_status
@@ -175,5 +164,42 @@ impl Runtime {
 			self.sounds.status()
 		};
 		alert
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn ringtone_timer_repeats_each_cue_and_stops_on_clear() {
+		let mut runtime = Runtime::default();
+		let now = Instant::now();
+		let outgoing = Some((Id(2), Sound::OutgoingRing));
+		assert_eq!(runtime.ring_cue(outgoing, now), Some(Sound::OutgoingRing));
+		assert_eq!(
+			runtime.ring_cue(outgoing, now + Duration::from_secs(2)),
+			None
+		);
+		assert_eq!(
+			runtime.ring_cue(outgoing, now + Duration::from_secs(3)),
+			Some(Sound::OutgoingRing)
+		);
+		let incoming = Some((Id(2), Sound::IncomingRing));
+		assert_eq!(
+			runtime.ring_cue(incoming, now + Duration::from_secs(3)),
+			Some(Sound::IncomingRing)
+		);
+		assert_eq!(
+			runtime.ring_cue(incoming, now + Duration::from_secs(6)),
+			None
+		);
+		assert_eq!(
+			runtime.ring_cue(incoming, now + Duration::from_secs(9)),
+			Some(Sound::IncomingRing)
+		);
+		assert_eq!(runtime.ring_cue(None, now + Duration::from_secs(9)), None);
+		assert!(runtime.ring.is_none());
+		assert_eq!(runtime.ring_cue(None, now + Duration::from_secs(15)), None);
 	}
 }

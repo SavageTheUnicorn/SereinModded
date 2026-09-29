@@ -7,10 +7,15 @@ use std::{
 };
 
 pub const MAX_BYTES: usize = model::account::MAX_PERMISSION_BYTES;
-const MAX_DECISIONS: usize = 4000;
+// Admission always reserves room for the minimum; larger accounts may cache up to the
+// maximum from whatever permission budget their metadata leaves free.
+const MIN_DECISIONS: usize = 4000;
+const MAX_DECISIONS: usize = 32768;
+const DECISION_BYTES: usize = 128;
 #[derive(Default)]
 pub struct Permissions {
 	cache: RefCell<BTreeMap<(Id, Id, Id), Decision>>,
+	decision_limit: usize,
 	pub guilds: BTreeMap<Id, p::Guild>,
 	pub channels: BTreeMap<Id, p::Channel>,
 }
@@ -26,6 +31,7 @@ impl Clone for Permissions {
 			guilds: self.guilds.clone(),
 			channels: self.channels.clone(),
 			cache: RefCell::default(),
+			decision_limit: self.decision_limit,
 		}
 	}
 }
@@ -113,8 +119,12 @@ impl Permissions {
 			.filter(|until| *until > now)
 			.unwrap_or(i64::MAX);
 		let mut cache = self.cache.borrow_mut();
-		if cache.len() >= MAX_DECISIONS && !cache.contains_key(&key) {
-			cache.clear();
+		// Evict single entries: a scan larger than the cache then keeps most of its decisions
+		// warm instead of clearing them all on every miss.
+		if !cache.contains_key(&key) {
+			while cache.len() >= self.decision_limit.max(MIN_DECISIONS) {
+				cache.pop_last();
+			}
 		}
 		cache.insert(
 			key,
@@ -133,7 +143,7 @@ impl Permissions {
 	}
 	fn valid(&self) -> bool {
 		self.guilds.len() + self.channels.len() <= crate::MAX_NAV
-			&& self.bytes() + MAX_DECISIONS * 128 <= MAX_BYTES
+			&& self.bytes() + MIN_DECISIONS * DECISION_BYTES <= MAX_BYTES
 			&& self
 				.guilds
 				.values()
@@ -172,6 +182,9 @@ impl Permissions {
 		Ok(())
 	}
 	pub fn update(&mut self, event: Event) -> Result<(), &'static str> {
+		self.update_changed(event).map(|_| ())
+	}
+	fn update_changed(&mut self, event: Event) -> Result<bool, &'static str> {
 		let guild_ids: BTreeSet<Id> = match &event {
 			Event::Snapshot(snapshot) => snapshot.guilds.iter().map(|guild| guild.id).collect(),
 			Event::Guild(guild) => [guild.id].into(),
@@ -230,10 +243,22 @@ impl Permissions {
 			}
 			return Err(error);
 		}
-		self.cache.get_mut().retain(|(guild, channel, _), _| {
+		let changed = guilds
+			.iter()
+			.any(|(id, old)| self.guilds.get(id) != old.as_ref())
+			|| channels
+				.iter()
+				.any(|(id, old)| self.channels.get(id) != old.as_ref());
+		let limit = self.decision_limit.max(MIN_DECISIONS);
+		let cache = self.cache.get_mut();
+		cache.retain(|(guild, channel, _), _| {
 			!guild_ids.contains(guild) && !channel_ids.contains(channel)
 		});
-		Ok(())
+		// Larger metadata can shrink the budget; drop only the decisions it no longer covers.
+		while cache.len() > limit {
+			cache.pop_last();
+		}
+		Ok(changed)
 	}
 	fn update_in_place(&mut self, event: Event) -> Result<(), &'static str> {
 		let next = self;
@@ -351,6 +376,8 @@ impl Permissions {
 		if !next.valid() {
 			return Err("Permission metadata exceeds safe capacity");
 		}
+		next.decision_limit = (MAX_BYTES.saturating_sub(next.bytes()) / DECISION_BYTES)
+			.clamp(MIN_DECISIONS, MAX_DECISIONS);
 		Ok(())
 	}
 	fn update_member(&mut self, guild: Id, roles: Patch<Vec<Id>>, timeout_until: Patch<i64>) {
@@ -382,7 +409,12 @@ impl Permissions {
 
 impl State {
 	pub(crate) fn update_permissions(&mut self, event: Event) -> Result<(), &'static str> {
-		let result = self.permissions.update(event).and_then(|()| {
+		let update = self.permissions.update_changed(event);
+		if update.is_err() {
+			self.clear_profile();
+			self.profile_cache.clear();
+		}
+		let result = update.and_then(|_| {
 			if self.navigation_bytes() + self.permissions.bytes() > model::account::MAX_BYTES {
 				Err("Account navigation exceeds safe capacity")
 			} else {
@@ -419,15 +451,36 @@ impl State {
 			.unwrap_or(message.author_roles.as_slice());
 		self.display_roles(guild, roles).1.map(|role| role.color)
 	}
+	pub fn forum_author_color(
+		&self,
+		channel: Id,
+		author: Id,
+		webhook: bool,
+		roles: &[Id],
+	) -> Option<u32> {
+		if webhook {
+			return None;
+		}
+		let guild = self.channel(channel)?.guild?;
+		let roles = self
+			.selected
+			.and_then(|selected| self.live_author_roles(guild, selected, author))
+			.unwrap_or(roles);
+		self.display_roles(guild, roles).1.map(|role| role.color)
+	}
 	fn live_author_roles(&self, guild: Id, channel: Id, user: Id) -> Option<&[Id]> {
 		let member = self
 			.members
 			.as_ref()
 			.filter(|list| list.guild == Some(guild) && list.channel == channel)
 			.and_then(|list| {
-				list.rows
+				list.slots
 					.iter()
 					.flatten()
+					.filter_map(|slot| match slot {
+						model::MemberSlot::Person(m) => Some(m),
+						_ => None,
+					})
 					.find(|member| member.user.id == user)
 			})
 			.or_else(|| {
@@ -553,7 +606,7 @@ impl State {
 	pub fn can_view(&self, channel: Id) -> bool {
 		self.permission(channel, p::VIEW_CHANNEL) == Some(true)
 	}
-	fn overwrite_target(&self, channel: &model::Channel) -> Option<Id> {
+	pub(crate) fn overwrite_target(&self, channel: &model::Channel) -> Option<Id> {
 		if matches!(channel.kind, 10..=12) {
 			let parent = channel.parent_id?;
 			self.channel(parent)
@@ -610,7 +663,7 @@ impl State {
 		self.auth == AuthState::Authenticated
 			&& self.gateway_connected
 			&& self.selected == Some(channel)
-			&& matches!(self.freshness, Freshness::Fresh | Freshness::Loading)
+			&& self.freshness != Freshness::Unavailable
 			&& self.can_compose(channel)
 	}
 	/// Permission-only composer availability, including while drafting offline.
@@ -647,6 +700,12 @@ impl State {
 				.find(|emoji| emoji.id == id)
 				.map(|emoji| (guild, emoji))
 		})
+	}
+	pub fn can_send_custom_emoji(&self, channel: Id, source: Id, emoji: &CustomEmoji) -> bool {
+		self.custom_emoji_unavailable_reason(channel, source, emoji)
+			.is_none()
+			&& (self.stickers.external_allowed
+				|| self.channel(channel).and_then(|target| target.guild) == Some(source))
 	}
 	/// Local eligibility for an emoji borrowed from `source`'s catalog. Discord still
 	/// decides account entitlements, including Nitro; this is not a send guarantee.
@@ -906,6 +965,14 @@ impl State {
 		let mut roster = std::mem::take(&mut self.voice.roster);
 		roster.retain(|entry| self.can_view(entry.channel));
 		self.voice.roster = roster;
+		if self
+			.voice
+			.preview
+			.as_ref()
+			.is_some_and(|preview| !self.has_voice_access(preview.channel))
+		{
+			self.voice.preview = None;
+		}
 		if let Some(channel) = self.voice.active.as_ref().map(|call| call.channel)
 			&& !self.has_voice_access(channel)
 		{

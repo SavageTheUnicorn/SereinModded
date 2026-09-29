@@ -3,10 +3,17 @@ use crate::{Command, MAX_CONTENT, MAX_NAV, State, auth::AuthState, auth::Failure
 use model::{Channel, Id, permissions as p};
 
 pub const MAX_TITLE: usize = 100;
+pub const SUMMARY_BATCH: usize = 4;
 
 /// The on-demand active-post list of one forum; the gateway only delivers joined posts.
 #[derive(Default)]
 pub struct Posts {
+	// At most 200 summaries of at most 4 KiB each across the current session.
+	summaries: std::collections::BTreeMap<Id, (Option<Id>, Option<model::forum::Summary>)>,
+	summary_request: u64,
+	summary_pending: Option<u64>,
+	// At most 200 starter previews, bounded like the summaries they sit beside.
+	previews: std::collections::BTreeMap<Id, model::forum::Starter>,
 	pub parent: Option<Id>,
 	pub request: u64,
 	pub loading: bool,
@@ -14,6 +21,24 @@ pub struct Posts {
 	pub loaded: usize,
 	pub more: bool,
 	pub error: Option<&'static str>,
+}
+
+impl Posts {
+	pub(crate) fn clear_summaries(&mut self) {
+		self.summaries.clear();
+		self.summary_pending = None;
+		self.previews.clear();
+	}
+
+	/// Remember what a post card shows of its starter; fixtures seed theirs the same way.
+	pub fn remember_preview(&mut self, post: Id, starter: model::forum::Starter) {
+		if post.0 > 0
+			&& starter.valid()
+			&& (self.previews.contains_key(&post) || self.previews.len() < model::forum::MAX_POSTS)
+		{
+			self.previews.insert(post, starter);
+		}
+	}
 }
 
 #[derive(Default)]
@@ -26,6 +51,173 @@ pub struct Posting {
 }
 
 impl State {
+	pub(crate) fn prune_post_summaries(&mut self) {
+		let mut summaries = std::mem::take(&mut self.posts.summaries);
+		summaries.retain(|channel, _| self.can_read_history(*channel));
+		self.posts.summaries = summaries;
+	}
+
+	/// The starter message's first image, shown beside the post card.
+	pub fn post_preview(&self, post: Id) -> Option<&model::EmbedMedia> {
+		self.can_view(post)
+			.then(|| self.posts.previews.get(&post))
+			.flatten()
+			.and_then(|starter| starter.image.as_ref())
+	}
+
+	/// The reaction a post card shows: the forum's default one when used, else the most used.
+	pub fn post_reaction(&self, post: &Channel) -> Option<&model::Reaction> {
+		let reactions = &self.posts.previews.get(&post.id)?.reactions;
+		let default = post
+			.parent_id
+			.and_then(|forum| self.channel(forum))
+			.and_then(|forum| forum.tags.as_deref())
+			.and_then(|tags| tags.reaction.as_ref());
+		self.can_view(post.id)
+			.then(|| {
+				default
+					.and_then(|emoji| reactions.iter().find(|r| r.emoji.same(emoji)))
+					.or_else(|| reactions.first())
+			})
+			.flatten()
+	}
+
+	/// The forum's post defaults, for the list's initial sort, layout and tag matching.
+	pub fn forum_defaults(&self, forum: Id) -> Option<&model::forum::Tags> {
+		self.channel(forum)
+			.filter(|channel| matches!(channel.kind, 15 | 16))
+			.and_then(|channel| channel.tags.as_deref())
+	}
+
+	/// Tags a forum offers, in the order its moderators arranged them.
+	pub fn forum_tags(&self, forum: Id) -> &[model::forum::Tag] {
+		self.channel(forum)
+			.filter(|channel| matches!(channel.kind, 15 | 16))
+			.and_then(|channel| channel.tags.as_deref())
+			.map_or(&[], |tags| &tags.available)
+	}
+
+	pub fn forum_requires_tag(&self, forum: Id) -> bool {
+		self.channel(forum)
+			.and_then(|channel| channel.tags.as_deref())
+			.is_some_and(|tags| tags.required)
+	}
+
+	/// Tags applied to a post that its forum still offers, in the forum's order.
+	pub fn post_tags(&self, post: &Channel) -> Vec<&model::forum::Tag> {
+		let Some(applied) = post.tags.as_deref().map(|tags| &tags.applied) else {
+			return Vec::new();
+		};
+		post.parent_id
+			.map(|forum| self.forum_tags(forum))
+			.unwrap_or_default()
+			.iter()
+			.filter(|tag| applied.contains(&tag.id))
+			.collect()
+	}
+
+	/// Moderated tags need thread management; everyone else may apply the rest.
+	pub fn can_apply_tag(&self, forum: Id, tag: &model::forum::Tag) -> bool {
+		!tag.moderated || self.permission(forum, p::MANAGE_THREADS) == Some(true)
+	}
+
+	pub fn post_summary(&self, channel: Id) -> Option<&model::forum::Summary> {
+		if !self.gateway_connected || !self.can_read_history(channel) {
+			return None;
+		}
+		let (latest, summary) = self.posts.summaries.get(&channel)?;
+		(*latest == self.channel(channel)?.last_message)
+			.then_some(summary.as_ref())
+			.flatten()
+	}
+
+	pub fn needs_post_summary(&self, channel: Id) -> bool {
+		!self.demo
+			&& self.auth == AuthState::Authenticated
+			&& self.gateway_connected
+			&& (self.posts.summaries.contains_key(&channel)
+				|| self.posts.summaries.len() < model::forum::MAX_POSTS)
+			&& self.can_read_history(channel)
+			&& self.channel(channel).is_some_and(|post| {
+				post.parent_id == self.posts.parent
+					&& self.selected == self.posts.parent
+					&& matches!(post.kind, 11 | 12)
+					&& self
+						.posts
+						.summaries
+						.get(&channel)
+						.is_none_or(|(latest, _)| *latest != post.last_message)
+			})
+	}
+
+	pub fn request_post_summaries(&mut self, channels: Vec<Id>) -> Option<Command> {
+		if self.posts.summary_pending.is_some()
+			|| channels.is_empty()
+			|| channels.len() > SUMMARY_BATCH
+			|| channels.iter().enumerate().any(|(i, channel)| {
+				channels[..i].contains(channel) || !self.needs_post_summary(*channel)
+			}) {
+			return None;
+		}
+		self.posts.summary_request = self.posts.summary_request.wrapping_add(1);
+		let request = self.posts.summary_request;
+		self.posts.summary_pending = Some(request);
+		for channel in &channels {
+			let latest = self.channel(*channel).and_then(|post| post.last_message);
+			// A failure stays unavailable until Refresh or new activity, without a retry loop.
+			self.posts.summaries.insert(*channel, (latest, None));
+		}
+		Some(Command::ForumSummaries { channels, request })
+	}
+
+	pub fn apply_forum_summaries(
+		&mut self,
+		request: u64,
+		results: Vec<(Id, Result<model::forum::Summary, Failure>)>,
+	) {
+		if self.posts.summary_pending != Some(request) {
+			return;
+		}
+		self.posts.summary_pending = None;
+		for (channel, result) in results {
+			let current = self.channel(channel).and_then(|post| post.last_message);
+			match result {
+				Ok(summary)
+					if summary.valid(channel)
+						&& self.can_read_history(channel)
+						&& self.gateway_connected =>
+				{
+					if let Some((latest, value)) = self.posts.summaries.get_mut(&channel)
+						&& *latest == current
+					{
+						*value = Some(summary);
+					}
+				}
+				Err(failure) if failure.ends_session() && failure != Failure::Capacity => {
+					self.fail(failure);
+					break;
+				}
+				_ => {}
+			}
+		}
+	}
+
+	pub fn post_new_count(&self, post: &Channel) -> Option<(usize, bool)> {
+		if !self.post_unread(post) {
+			return Some((0, true));
+		}
+		let marker = self.read_marker(post.id)?;
+		let summary = self.post_summary(post.id)?;
+		let count = summary
+			.messages
+			.iter()
+			.filter(|id| marker.is_none_or(|read| **id > read))
+			.count();
+		let exact = summary.complete
+			|| marker.is_some_and(|read| summary.messages.last().is_some_and(|id| *id <= read));
+		Some((count, exact))
+	}
+
 	pub fn is_forum(&self, channel: Id) -> bool {
 		self.channels
 			.iter()
@@ -41,6 +233,50 @@ impl State {
 			.collect();
 		posts.sort_by_key(|c| std::cmp::Reverse(c.last_message.unwrap_or(c.id)));
 		posts
+	}
+
+	/// Is one post unread? Posts arrive through the on-demand list as well as the gateway, so
+	/// a post the service never sent a read row for counts as unread once the snapshot is
+	/// complete and the service reports a message in it.
+	pub fn post_unread(&self, post: &Channel) -> bool {
+		if let Some(unread) = self.channel_unread(post) {
+			return unread || self.unread_count(post.id) > 0;
+		}
+		self.gateway_connected
+			&& self.read_state.known()
+			&& self.can_view(post.id)
+			&& post.last_message.is_some()
+	}
+
+	/// Forum containers carry no messages themselves; Discord marks them unread when one of
+	/// their posts is, so the sidebar row needs the same aggregate.
+	pub fn forum_unread(&self, forum: Id) -> bool {
+		self.is_forum(forum)
+			&& self
+				.channels
+				.iter()
+				.any(|post| self.is_post_of(post, forum) && self.post_unread(post))
+	}
+
+	/// Loaded posts whose starter has not been read; replies do not make a post new again.
+	pub fn forum_new_count(&self, forum: Id) -> u32 {
+		if !self.is_forum(forum) {
+			return 0;
+		}
+		self.channels
+			.iter()
+			.filter(|post| {
+				self.is_post_of(post, forum)
+					&& self.post_unread(post)
+					&& self
+						.read_marker(post.id)
+						.is_some_and(|read| read.is_none_or(|id| id < post.id))
+			})
+			.count() as u32
+	}
+
+	fn is_post_of(&self, post: &Channel, forum: Id) -> bool {
+		post.parent_id == Some(forum) && matches!(post.kind, 11 | 12)
 	}
 
 	pub fn can_load_posts(&self, parent: Id) -> bool {
@@ -92,6 +328,7 @@ impl State {
 			// Keep the request counter monotonic so a late reply cannot match a fresh load.
 			self.posts = Posts {
 				request: self.posts.request,
+				summary_request: self.posts.summary_request,
 				..Posts::default()
 			};
 		}
@@ -130,14 +367,21 @@ impl State {
 			self.posts.error = Some("The service returned unexpected posts");
 			return;
 		};
+		for (post, starter) in page.previews {
+			self.posts.remember_preview(post, starter);
+		}
 		// Every returned row advances the offset, even one this state already knew.
 		let returned = page.threads.len();
 		for post in page.threads {
 			if let Some(index) = self.channel_index(post.id) {
 				let existing = &self.channels[index];
 				if existing.parent_id == Some(parent) && existing.guild == Some(guild) {
+					let tag_bytes =
+						|channel: &Channel| channel.tags.as_ref().map_or(0, |tags| tags.bytes());
 					let bytes =
-						self.navigation_bytes() - existing.name.capacity() + post.name.capacity();
+						self.navigation_bytes() - existing.name.capacity() - tag_bytes(existing)
+							+ post.name.capacity()
+							+ tag_bytes(&post);
 					if bytes + self.permissions.bytes() > model::account::MAX_BYTES {
 						self.posts.error = Some("Posts exceed the navigation budget");
 						self.posts.more = false;
@@ -147,6 +391,7 @@ impl State {
 					existing.last_message = existing.last_message.max(post.last_message);
 					existing.message_count = post.message_count.or(existing.message_count);
 					existing.name = post.name;
+					existing.tags = post.tags;
 					self.set_navigation_bytes(bytes);
 				}
 				continue;
@@ -168,23 +413,74 @@ impl State {
 	}
 
 	pub fn can_create_post(&self, parent: Id) -> bool {
+		self.posting.pending.is_none() && self.can_post(parent)
+	}
+
+	fn can_post(&self, parent: Id) -> bool {
 		self.auth == AuthState::Authenticated
 			&& self.gateway_connected
 			&& self.is_forum(parent)
-			&& self.posting.pending.is_none()
 			&& self.can_view(parent)
 			&& self.permission(parent, p::SEND_MESSAGES) == Some(true)
 	}
 
+	/// A forum container is not a text channel, so `can_attach` never covers it; the starter
+	/// message still needs the container's own attachment permission, including while pending.
+	pub fn can_attach_post(&self, parent: Id) -> bool {
+		self.can_post(parent) && self.permission(parent, p::ATTACH_FILES) == Some(true)
+	}
+
 	pub fn create_post(&mut self, parent: Id, title: &str, content: &str) -> Option<Command> {
+		self.create_post_with_attachments(parent, title, content, &[], &[])
+	}
+
+	/// Create one post, optionally with files staged for its starter message.
+	pub fn create_post_with_attachments(
+		&mut self,
+		parent: Id,
+		title: &str,
+		content: &str,
+		filenames: &[&str],
+		tags: &[Id],
+	) -> Option<Command> {
 		let title = title.trim();
 		let content = content.trim();
 		if !self.can_create_post(parent)
 			|| title.is_empty()
 			|| title.chars().count() > MAX_TITLE
-			|| content.is_empty()
+			|| (content.is_empty() && filenames.is_empty())
 			|| content.chars().count() > MAX_CONTENT
 		{
+			return None;
+		}
+		if !filenames.is_empty() && !self.can_attach_post(parent) {
+			return None;
+		}
+		if filenames.len() > crate::MAX_ATTACHMENTS
+			|| filenames.iter().any(|name| {
+				name.trim().is_empty()
+					|| name.len() > 256
+					|| matches!(*name, "." | "..")
+					|| name
+						.chars()
+						.any(|c| c.is_control() || matches!(c, '/' | '\\' | ':'))
+			}) {
+			self.posting.error = Some("Attachment filename is invalid or too long");
+			return None;
+		}
+		let offered = self.forum_tags(parent);
+		if tags.len() > model::forum::MAX_APPLIED_TAGS
+			|| tags.iter().enumerate().any(|(i, id)| {
+				tags[..i].contains(id)
+					|| !offered
+						.iter()
+						.any(|tag| tag.id == *id && self.can_apply_tag(parent, tag))
+			}) {
+			self.posting.error = Some("Choose up to 5 tags this forum offers");
+			return None;
+		}
+		if tags.is_empty() && self.forum_requires_tag(parent) {
+			self.posting.error = Some("This forum requires at least one tag");
 			return None;
 		}
 		let guild = self.channel(parent)?.guild?;
@@ -196,6 +492,8 @@ impl State {
 			guild,
 			title: title.to_owned(),
 			content: content.to_owned(),
+			attachments: filenames.iter().map(|name| (*name).to_owned()).collect(),
+			tags: tags.to_vec(),
 			request: self.posting.request,
 		})
 	}
@@ -237,6 +535,7 @@ impl State {
 				return;
 			}
 			existing.message_count = post.message_count.or(existing.message_count);
+			existing.tags = post.tags.clone();
 		} else {
 			let bytes = self.navigation_bytes();
 			if self.channels.len() + self.guilds.len() >= MAX_NAV
@@ -270,6 +569,7 @@ mod tests {
 			last_message: None,
 			icon: None,
 			member_list_id: None,
+			tags: None,
 			message_count: Some(3),
 		}
 	}
@@ -278,6 +578,7 @@ mod tests {
 			auth: AuthState::Authenticated,
 			gateway_connected: true,
 			user: Some(model::User {
+				primary_guild: None,
 				id: Id(2),
 				name: "Synthetic".into(),
 				avatar: None,
@@ -286,6 +587,7 @@ mod tests {
 				discriminator: 0,
 			}),
 			guilds: vec![model::Guild {
+				stickers: None,
 				emojis: None,
 				id: Id(1),
 				name: "Synthetic".into(),
@@ -319,6 +621,7 @@ mod tests {
 			Ok(model::forum::Page {
 				threads: vec![post],
 				more: false,
+				previews: Vec::new(),
 			}),
 		);
 		assert_eq!(state.navigation_bytes(), expected);
@@ -340,6 +643,7 @@ mod tests {
 			Ok(model::forum::Page {
 				threads: vec![post],
 				more: true,
+				previews: Vec::new(),
 			}),
 		);
 		assert!(state.channel(Id(21)) == Some(&original));
@@ -353,121 +657,129 @@ mod tests {
 
 	#[test]
 	fn forum_posts_load_on_demand_page_forward_and_reload_after_a_sync() {
-		let mut state = state();
-		// Only joined posts arrive over the gateway, so the list fetches the rest.
-		let Some(Command::ForumPosts {
-			parent: Id(20),
-			guild: Id(1),
-			offset: 0,
-			request,
-		}) = state.request_forum_posts(Id(20), false)
-		else {
-			panic!("the first page should be requested");
-		};
-		assert!(state.request_forum_posts(Id(20), false).is_none());
-		assert!(state.request_forum_posts(Id(20), true).is_none());
-		let page = |ids: &[u64], more| model::forum::Page {
-			threads: ids
-				.iter()
-				.map(|id| channel(*id, Some(Id(20)), 11))
-				.collect(),
-			more,
-		};
-		// A stale reply for another request is ignored.
-		state.apply_forum_posts(Id(20), request.wrapping_sub(1), Ok(page(&[30], false)));
-		assert!(state.channels.iter().all(|c| c.id != Id(30)));
-		state.apply_forum_posts(Id(20), request, Ok(page(&[23, 21], true)));
-		let posts: Vec<_> = state.forum_posts(Id(20)).iter().map(|c| c.id).collect();
-		assert_eq!(posts, vec![Id(22), Id(23), Id(21)]);
-		assert_eq!(state.posts.loaded, 2);
-		let Some(Command::ForumPosts { offset: 2, .. }) = state.request_forum_posts(Id(20), true)
-		else {
-			panic!("the next page continues from the loaded count");
-		};
-		state.apply_forum_posts(Id(20), state.posts.request, Ok(page(&[], false)));
-		assert!(!state.posts.more && state.posts.error.is_none());
-		assert!(state.request_forum_posts(Id(20), true).is_none());
-		// A page scoped to another parent or guild never reaches navigation.
-		state.reload_forum_posts(Id(20));
-		let request = match state.request_forum_posts(Id(20), false) {
-			Some(Command::ForumPosts { request, .. }) => request,
-			_ => panic!("a reloaded forum fetches again"),
-		};
-		let mut foreign = page(&[31], false);
-		foreign.threads[0].guild = Some(Id(7));
-		state.apply_forum_posts(Id(20), request, Ok(foreign));
-		assert_eq!(
-			state.posts.error,
-			Some("The service returned unexpected posts")
-		);
-		assert!(state.channels.iter().all(|c| c.id != Id(31)));
-		// A failure surfaces once and only a retry clears it.
-		state.reload_forum_posts(Id(20));
-		let request = match state.request_forum_posts(Id(20), false) {
-			Some(Command::ForumPosts { request, .. }) => request,
-			_ => panic!("a reloaded forum fetches again"),
-		};
-		state.apply_forum_posts(Id(20), request, Err(Failure::Capacity));
-		assert!(state.posts.error.is_some() && !state.posts.loading);
-		assert!(state.request_forum_posts(Id(20), false).is_none());
-		// A thread snapshot replaces this scope, so the fetched page must be taken again.
-		state
-			.apply_threads_sync(Id(1), Some(vec![Id(20)]), vec![], vec![])
-			.unwrap();
-		assert!(state.posts.error.is_none() && state.posts.loaded == 0);
-		assert!(matches!(
-			state.request_forum_posts(Id(20), false),
-			Some(Command::ForumPosts { offset: 0, .. })
-		));
-		// A disconnected session asks for nothing.
-		state.gateway_connected = false;
-		state.posts = Posts::default();
-		assert!(!state.can_load_posts(Id(20)));
-		assert!(state.request_forum_posts(Id(20), false).is_none());
-	}
-
-	#[test]
-	fn forum_selection_lists_posts_without_history_and_counts_replies() {
-		let mut state = state();
-		assert!(state.select(Id(20)).is_none());
-		assert_eq!(state.selected, Some(Id(20)));
-		assert!(!state.history_pending);
-		let posts: Vec<_> = state.forum_posts(Id(20)).iter().map(|c| c.id).collect();
-		assert_eq!(posts, vec![Id(22), Id(21)]);
-		let message = model::Message {
-			reactions: Some(vec![]),
-			id: Id(600),
-			channel: Id(21),
-			author: state.user.clone().unwrap(),
-			content: "Synthetic reply".into(),
-			edited: false,
-			edited_at: None,
-			revision: 0,
-			nonce: None,
-			reply_to: None,
-			kind: 0,
-			reply_deleted: false,
-			forwarded: false,
-			unsupported: false,
-			extra_content: Default::default(),
-			embeds: vec![],
-			attachments: vec![],
-			author_nick: None,
-			author_roles: vec![],
-			mention_roles: vec![],
-			mention_everyone: false,
-			suppress_notifications: false,
-			mentions: Vec::new(),
-			embeds_suppressed: false,
-		};
-		state.apply(Envelope {
-			generation: state.generation,
-			event: Event::Message(message),
-		});
-		let post = state.channels.iter().find(|c| c.id == Id(21)).unwrap();
-		assert_eq!(post.message_count, Some(4));
-		assert_eq!(post.last_message, Some(Id(600)));
-		assert_eq!(state.forum_posts(Id(20))[0].id, Id(21));
+		{
+			let mut state = state();
+			// Only joined posts arrive over the gateway, so the list fetches the rest.
+			let Some(Command::ForumPosts {
+				parent: Id(20),
+				guild: Id(1),
+				offset: 0,
+				request,
+			}) = state.request_forum_posts(Id(20), false)
+			else {
+				panic!("the first page should be requested");
+			};
+			assert!(state.request_forum_posts(Id(20), false).is_none());
+			assert!(state.request_forum_posts(Id(20), true).is_none());
+			let page = |ids: &[u64], more| model::forum::Page {
+				threads: ids
+					.iter()
+					.map(|id| channel(*id, Some(Id(20)), 11))
+					.collect(),
+				more,
+				previews: Vec::new(),
+			};
+			// A stale reply for another request is ignored.
+			state.apply_forum_posts(Id(20), request.wrapping_sub(1), Ok(page(&[30], false)));
+			assert!(state.channels.iter().all(|c| c.id != Id(30)));
+			state.apply_forum_posts(Id(20), request, Ok(page(&[23, 21], true)));
+			let posts: Vec<_> = state.forum_posts(Id(20)).iter().map(|c| c.id).collect();
+			assert_eq!(posts, vec![Id(22), Id(23), Id(21)]);
+			assert_eq!(state.posts.loaded, 2);
+			let Some(Command::ForumPosts { offset: 2, .. }) =
+				state.request_forum_posts(Id(20), true)
+			else {
+				panic!("the next page continues from the loaded count");
+			};
+			state.apply_forum_posts(Id(20), state.posts.request, Ok(page(&[], false)));
+			assert!(!state.posts.more && state.posts.error.is_none());
+			assert!(state.request_forum_posts(Id(20), true).is_none());
+			// A page scoped to another parent or guild never reaches navigation.
+			state.reload_forum_posts(Id(20));
+			let request = match state.request_forum_posts(Id(20), false) {
+				Some(Command::ForumPosts { request, .. }) => request,
+				_ => panic!("a reloaded forum fetches again"),
+			};
+			let mut foreign = page(&[31], false);
+			foreign.threads[0].guild = Some(Id(7));
+			state.apply_forum_posts(Id(20), request, Ok(foreign));
+			assert_eq!(
+				state.posts.error,
+				Some("The service returned unexpected posts")
+			);
+			assert!(state.channels.iter().all(|c| c.id != Id(31)));
+			// A failure surfaces once and only a retry clears it.
+			state.reload_forum_posts(Id(20));
+			let request = match state.request_forum_posts(Id(20), false) {
+				Some(Command::ForumPosts { request, .. }) => request,
+				_ => panic!("a reloaded forum fetches again"),
+			};
+			state.apply_forum_posts(Id(20), request, Err(Failure::Capacity));
+			assert!(state.posts.error.is_some() && !state.posts.loading);
+			assert!(state.request_forum_posts(Id(20), false).is_none());
+			// A thread snapshot replaces this scope, so the fetched page must be taken again.
+			state
+				.apply_threads_sync(Id(1), Some(vec![Id(20)]), vec![], vec![])
+				.unwrap();
+			assert!(state.posts.error.is_none() && state.posts.loaded == 0);
+			assert!(matches!(
+				state.request_forum_posts(Id(20), false),
+				Some(Command::ForumPosts { offset: 0, .. })
+			));
+			// A disconnected session asks for nothing.
+			state.gateway_connected = false;
+			state.posts = Posts::default();
+			assert!(!state.can_load_posts(Id(20)));
+			assert!(state.request_forum_posts(Id(20), false).is_none());
+		}
+		{
+			let mut state = state();
+			assert!(state.select(Id(20)).is_none());
+			assert_eq!(state.selected, Some(Id(20)));
+			assert!(!state.history_pending);
+			let posts: Vec<_> = state.forum_posts(Id(20)).iter().map(|c| c.id).collect();
+			assert_eq!(posts, vec![Id(22), Id(21)]);
+			let message = model::Message {
+				sticker_items: Vec::new(),
+				reactions: Some(vec![]),
+				id: Id(600),
+				channel: Id(21),
+				author: state.user.clone().unwrap(),
+				content: "Synthetic reply".into(),
+				edited: false,
+				edited_at: None,
+				revision: 0,
+				nonce: None,
+				reply_to: None,
+				kind: 0,
+				reply_deleted: false,
+				interaction: None,
+				forwarded: false,
+				unsupported: false,
+				components: vec![],
+				application_id: None,
+				flags: 0,
+				ephemeral: false,
+				extra_content: Default::default(),
+				embeds: vec![],
+				attachments: vec![],
+				author_nick: None,
+				author_roles: vec![],
+				mention_roles: vec![],
+				mention_everyone: false,
+				suppress_notifications: false,
+				mentions: Vec::new(),
+				embeds_suppressed: false,
+			};
+			state.apply(Envelope {
+				generation: state.generation,
+				event: Event::Message(message),
+			});
+			let post = state.channels.iter().find(|c| c.id == Id(21)).unwrap();
+			assert_eq!(post.message_count, Some(4));
+			assert_eq!(post.last_message, Some(Id(600)));
+			assert_eq!(state.forum_posts(Id(20))[0].id, Id(21));
+		}
 	}
 
 	#[test]

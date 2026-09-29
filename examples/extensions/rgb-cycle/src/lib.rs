@@ -1,4 +1,4 @@
-use serein_extension_sdk::{Element, Invocation, Output, Theme, ThemePalette};
+use serein_extension_sdk::{Element, Invocation, Output, Theme, ThemePalette, TickInvocation};
 use std::collections::BTreeMap;
 
 /// Full hue rotation period. The host invokes `tick` at roughly
@@ -16,8 +16,12 @@ const CYCLE_MS: u64 = 6_000;
 /// comes from a fixed brightness gap, never from hue difference alone.
 #[derive(Clone, Copy)]
 enum Role {
-	Surface { value: f64 },
-	Text { value: f64 },
+	Surface {
+		value: f64,
+	},
+	Text {
+		value: f64,
+	},
 	Accent,
 	/// `positive` / `warning` / `danger` carry meaning (success, caution,
 	/// destructive) that a rotating hue can actively undermine -- a
@@ -41,35 +45,137 @@ struct Token {
 /// separately below since it isn't a `colors` entry.
 const TOKENS: &[Token] = &[
 	// Surfaces
-	Token { key: "base", label: "Base background", group: "Surfaces", role: Role::Surface { value: 0.12 }, default_on: true },
-	Token { key: "sidebar", label: "Sidebar", group: "Surfaces", role: Role::Surface { value: 0.14 }, default_on: true },
-	Token { key: "chat", label: "Chat area", group: "Surfaces", role: Role::Surface { value: 0.17 }, default_on: true },
-	Token { key: "raised", label: "Raised panels", group: "Surfaces", role: Role::Surface { value: 0.21 }, default_on: true },
-	Token { key: "hover", label: "Hover highlight", group: "Surfaces", role: Role::Surface { value: 0.27 }, default_on: true },
-	Token { key: "selected", label: "Selected item", group: "Surfaces", role: Role::Surface { value: 0.31 }, default_on: true },
-	Token { key: "border", label: "Borders", group: "Surfaces", role: Role::Surface { value: 0.36 }, default_on: true },
+	Token {
+		key: "base",
+		label: "Base background",
+		group: "Surfaces",
+		role: Role::Surface { value: 0.12 },
+		default_on: true,
+	},
+	Token {
+		key: "sidebar",
+		label: "Sidebar",
+		group: "Surfaces",
+		role: Role::Surface { value: 0.14 },
+		default_on: true,
+	},
+	Token {
+		key: "chat",
+		label: "Chat area",
+		group: "Surfaces",
+		role: Role::Surface { value: 0.17 },
+		default_on: true,
+	},
+	Token {
+		key: "raised",
+		label: "Raised panels",
+		group: "Surfaces",
+		role: Role::Surface { value: 0.21 },
+		default_on: true,
+	},
+	Token {
+		key: "hover",
+		label: "Hover highlight",
+		group: "Surfaces",
+		role: Role::Surface { value: 0.27 },
+		default_on: true,
+	},
+	Token {
+		key: "selected",
+		label: "Selected item",
+		group: "Surfaces",
+		role: Role::Surface { value: 0.31 },
+		default_on: true,
+	},
+	Token {
+		key: "border",
+		label: "Borders",
+		group: "Surfaces",
+		role: Role::Surface { value: 0.36 },
+		default_on: true,
+	},
 	// Text
-	Token { key: "text_strong", label: "Strong text", group: "Text", role: Role::Text { value: 0.98 }, default_on: true },
-	Token { key: "text", label: "Body text", group: "Text", role: Role::Text { value: 0.90 }, default_on: true },
-	Token { key: "muted", label: "Muted text", group: "Text", role: Role::Text { value: 0.66 }, default_on: true },
-	Token { key: "link", label: "Links", group: "Text", role: Role::Text { value: 0.95 }, default_on: true },
+	Token {
+		key: "text_strong",
+		label: "Strong text",
+		group: "Text",
+		role: Role::Text { value: 0.98 },
+		default_on: true,
+	},
+	Token {
+		key: "text",
+		label: "Body text",
+		group: "Text",
+		role: Role::Text { value: 0.90 },
+		default_on: true,
+	},
+	Token {
+		key: "muted",
+		label: "Muted text",
+		group: "Text",
+		role: Role::Text { value: 0.66 },
+		default_on: true,
+	},
+	Token {
+		key: "link",
+		label: "Links",
+		group: "Text",
+		role: Role::Text { value: 0.95 },
+		default_on: true,
+	},
 	// Actions and states
-	Token { key: "accent", label: "Accent (includes accent text)", group: "Actions and states", role: Role::Accent, default_on: true },
-	Token { key: "positive", label: "Positive / success -- recommended off", group: "Actions and states", role: Role::Status, default_on: false },
-	Token { key: "warning", label: "Warning -- recommended off", group: "Actions and states", role: Role::Status, default_on: false },
-	Token { key: "danger", label: "Danger / destructive -- recommended off", group: "Actions and states", role: Role::Status, default_on: false },
+	Token {
+		key: "accent",
+		label: "Accent (includes accent text)",
+		group: "Actions and states",
+		role: Role::Accent,
+		default_on: true,
+	},
+	Token {
+		key: "positive",
+		label: "Positive / success -- recommended off",
+		group: "Actions and states",
+		role: Role::Status,
+		default_on: false,
+	},
+	Token {
+		key: "warning",
+		label: "Warning -- recommended off",
+		group: "Actions and states",
+		role: Role::Status,
+		default_on: false,
+	},
+	Token {
+		key: "danger",
+		label: "Danger / destructive -- recommended off",
+		group: "Actions and states",
+		role: Role::Status,
+		default_on: false,
+	},
 	// Mentions
-	Token { key: "mention_bg", label: "Mention background", group: "Mentions", role: Role::Surface { value: 0.25 }, default_on: true },
-	Token { key: "mention_text", label: "Mention text", group: "Mentions", role: Role::Text { value: 0.95 }, default_on: true },
+	Token {
+		key: "mention_bg",
+		label: "Mention background",
+		group: "Mentions",
+		role: Role::Surface { value: 0.25 },
+		default_on: true,
+	},
+	Token {
+		key: "mention_text",
+		label: "Mention text",
+		group: "Mentions",
+		role: Role::Text { value: 0.95 },
+		default_on: true,
+	},
 ];
 
 const BACKDROP_KEY: &str = "backdrop";
 const BACKDROP_LABEL: &str = "Window background gradient";
 
-fn handle(input: Invocation) -> Output {
-	match input.action.as_str() {
+fn handle(input: TickInvocation) -> Output {
+	match input.invocation.action.as_str() {
 		"tick" => tick(input),
-		"settings" => settings_panel(input),
+		"settings" => settings_panel(input.invocation),
 		_ => Output::default(),
 	}
 }
@@ -77,8 +183,8 @@ fn handle(input: Invocation) -> Output {
 // The host re-invokes this on its own schedule (see the `tick` surface in
 // examples/extensions/README.md). There is no state between calls; every
 // frame's color comes from `tick_ms` and the persisted settings alone.
-fn tick(input: Invocation) -> Output {
-	let settings = load_settings(input.storage.as_deref());
+fn tick(input: TickInvocation) -> Output {
+	let settings = load_settings(input.invocation.storage.as_deref());
 	let ms = input.tick_ms.unwrap_or(0);
 	let phase = (ms % CYCLE_MS) as f64 / CYCLE_MS as f64;
 

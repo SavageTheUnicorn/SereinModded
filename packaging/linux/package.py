@@ -55,7 +55,7 @@ def stage_payload(root, stage, prefix="usr"):
     copy(Path("packaging/linux/hicolor"), stage / prefix / "share/icons/hicolor")
     for name in ["README.md", "LICENSE-MIT", "LICENSE-APACHE", "THIRD_PARTY_NOTICES.md"]:
         copy(root / name, doc / name)
-    for name in ["NotoSansCJK-LICENSE.txt", "NotoSansArabic-OFL.txt", "Inter-OFL.txt",
+    for name in ["NotoSansCJK-LICENSE.txt", "NotoSansArabic-OFL.txt", "NotoSansMath-OFL.txt", "Inter-OFL.txt",
                  "Twemoji-CC-BY-4.0.txt", "Unicode-LICENSE.txt", "Phosphor-Icons-MIT.txt",
                  "Simple-Icons-CC0.txt"]:
         copy(root / "licenses" / name, doc / "licenses" / name)
@@ -204,9 +204,11 @@ def native_package(root, application_version, format):
         stage_payload(root, destination)
         print(f"Linux installation tree: {destination}")
         return
-    distro = platform.freedesktop_os_release()["ID"]
+    os_release = platform.freedesktop_os_release()
+    distro = os_release["ID"]
     if (format == "rpm" and distro not in {"fedora", "opensuse-tumbleweed"}
-            or format == "arch" and distro != "arch"):
+            or format == "arch" and distro != "arch"
+            and "arch" not in os_release.get("ID_LIKE", "").split()):
         raise ValueError(f"Build {format} natively on its supported distribution, not {distro}")
     if format == "arch" and os.getuid() == 0:
         raise ValueError("Run Arch builds as an unprivileged user; makepkg refuses root")

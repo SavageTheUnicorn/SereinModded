@@ -11,7 +11,9 @@ rasterizes it with the `resvg` command-line tool. Requires `resvg` 0.45.1 on PAT
 import argparse
 import hashlib
 from pathlib import Path
+import shutil
 import subprocess
+import sys
 import urllib.request
 
 VERSION = "2.1.1"  # @phosphor-icons/core on npm, MIT
@@ -20,6 +22,7 @@ COLUMNS, CELL, PAD = 8, 64, 4
 GLYPH = CELL - 2 * PAD
 
 # Repository-local artwork, rasterized from the repository instead of an upstream package.
+# `assets/icons/thread.svg` is the thread glyph; it is listed inline below.
 BRAND_MARK = "repo:assets/brand/serein-mark.svg"
 
 # name, upstream asset, SHA-256 of the unmodified SVG file.
@@ -82,7 +85,7 @@ ICONS = [
     ("copy", "bold/copy-bold.svg", "204e84365593c418c71d9ce0674be3dd3e5ff13d0dc13e1f728249ef9571bf9e"),
     ("seal-check", "fill/seal-check-fill.svg", "27702a62622ac4156d2a18b10fc7c526b3b2b9f782741e2cb07aea6964d71132"),
     ("calendar-blank", "fill/calendar-blank-fill.svg", "405596825bf3705baa7d289ed1242106fded80e34967927549a0413f4303a0ac"),
-    ("serein-mark", BRAND_MARK, "2e30d20eda97e051fb4f82e5c27a47aca05155d3efd8e9f99088bbc5cb406beb"),
+    ("serein-mark", BRAND_MARK, "131359276c0f4abe7f97f99f0ad73cad88fec4d9845ad01bcdece940a089dc3e"),
     ("file", "fill/file-fill.svg", "d6fe00691e45b5e9b87ccc5a8fc9022485935408167ab1234817915df4fd1ca4"),
     ("file-image", "fill/file-image-fill.svg", "0266eb983ed5cec9152d76691152123b92b2cb84d8c139c37793d0870df3f601"),
     ("file-pdf", "fill/file-pdf-fill.svg", "12622b293b9a1efa1f56969ca74ab88085d388c4be926f81cfcb49406a8da05d"),
@@ -115,6 +118,12 @@ ICONS = [
     ("shopping-cart-simple", "fill/shopping-cart-simple-fill.svg", "679456c02afec984a2ab635443724baca8b891a1bc4f245469f9bcbbf6a13fdb"),
     ("lock-simple", "fill/lock-simple-fill.svg", "54b137caf94b8082e63a2831e5b726bbc9cd32ad40938bf5656ff4d44b442d95"),
     ("eye-slash", "fill/eye-slash-fill.svg", "fc34ad807da63ae5f99a235618cddc1b2bef8d98d7c95004d38b61312540b90d"),
+    ("sliders-horizontal", "bold/sliders-horizontal-bold.svg", "e409a5fb3c2c134e46d51e48ac395e392223e04535c5ec664253f3e7e78cd7a9"),
+    ("arrows-down-up", "bold/arrows-down-up-bold.svg", "174464c54af7273e46a6fc204ebd0fc1da75906573880687836b314e3fbdb85e"),
+    ("thread", "repo:assets/icons/thread.svg", "dfd7daf80375504a5af37b95bee1773af55a9eabe7c802e7f4152905f123c72c"),
+    ("device-mobile", "bold/device-mobile-bold.svg", "77a4a5ebcba16e37637e700381bc3858b92c9350730ecf1e207f5f40d524de03"),
+    ("hard-drives", "fill/hard-drives-fill.svg", "16f26a807a05ded561ff3322879e698b70d77f07df5dabda451825ddd8f5ba28"),
+    ("corners-out", "bold/corners-out-bold.svg", "df74ba3c2a496a344f98e80c0782f43aa3760ed4b8b6103a4c621bfc59575e16"),
 ]
 LICENSE_SHA256 = "ddbe6082ec3cf979db47e5af549d2849c5d6182b3e005ef91ce1dbb9eb122f11"
 
@@ -227,6 +236,11 @@ def main():
     atlas_svg.write_text("".join(parts), encoding="utf-8")
     subprocess.run([args.resvg, str(atlas_svg), str(destination / "atlas.png")], check=True)
     atlas_svg.unlink()
+    # Lossless; resvg writes an unoptimized PNG about 4x larger. Install with `cargo install oxipng`.
+    if shutil.which("oxipng"):
+        subprocess.run(["oxipng", "-o", "max", "--strip", "all", "-q", destination / "atlas.png"], check=True)
+    else:
+        print("oxipng not found; atlas.png left at resvg compression", file=sys.stderr)
     (destination / "index.tsv").write_text("".join(f"{name}\t{cell}\n" for name, cell in index), encoding="utf-8")
     (destination / "LICENSE").write_bytes(license_text)
     (destination / "LICENSE-SIMPLE-ICONS").write_bytes(simple_license)

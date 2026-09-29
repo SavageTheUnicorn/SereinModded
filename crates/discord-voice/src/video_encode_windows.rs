@@ -60,6 +60,7 @@ pub(crate) struct Encoder {
 	have_output: usize,
 	provides_samples: bool,
 	max_bytes: usize,
+	max_buffer_bytes: usize,
 }
 
 struct Activated(IMFActivate);
@@ -130,15 +131,21 @@ impl Encoder {
 				.map_err(|_| UNAVAILABLE)?;
 
 			let info = transform.GetOutputStreamInfo(0).map_err(|_| UNAVAILABLE)?;
-			if info.cbSize as usize > config.max_bytes {
-				return Err(UNAVAILABLE);
-			}
+			// cbSize is minimum output-buffer capacity, not the encoded sample length.
+			// Permit a bounded raw-picture-sized allocation while keeping the transport's
+			// compressed frame cap enforced by sample_bytes after ProcessOutput.
+			let max_buffer_bytes = (config.width as usize)
+				.checked_mul(config.height as usize)
+				.and_then(|pixels| pixels.checked_mul(4))
+				.filter(|bytes| *bytes <= crate::screen::MAX_RAW_BYTES)
+				.ok_or(UNAVAILABLE)?
+				.max(config.max_bytes);
 			let provides_samples = info.dwFlags
 				& (MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 as u32
 					| MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES.0 as u32)
 				!= 0;
-			if !provides_samples && info.cbSize == 0 {
-				return Err(UNAVAILABLE);
+			if !provides_samples {
+				output_buffer_size(&info, max_buffer_bytes)?;
 			}
 			let events = transform.cast().map_err(|_| UNAVAILABLE)?;
 			transform
@@ -156,10 +163,20 @@ impl Encoder {
 				frame: 0,
 				duration: 10_000_000 / i64::from(config.fps),
 				max_bytes: config.max_bytes,
+				max_buffer_bytes,
 				need_input: 0,
 				have_output: 0,
 				provides_samples,
 			})
+		}
+	}
+
+	pub(crate) fn set_bitrate(&mut self, bitrate: u32) -> Result<(), &'static str> {
+		// SAFETY: Dynamic codec control stays on the encoder's owning worker.
+		unsafe {
+			self.codec
+				.SetValue(&CODECAPI_AVEncCommonMeanBitRate, &VARIANT::from(bitrate))
+				.map_err(|_| FAILED)
 		}
 	}
 
@@ -176,12 +193,26 @@ impl Encoder {
 			.and_then(|length| length.checked_add(v.len()))
 			.filter(|_| u.len() == v.len() && y.len() == u.len() * 4)
 			.ok_or(FAILED)?;
+		self.encode_with(length, force_keyframe, |picture| {
+			i420_to_nv12(y, u, v, picture)
+		})
+	}
+
+	/// Encode one `length`-byte NV12 picture that `fill` writes into the native buffer.
+	pub(crate) fn encode_with(
+		&mut self,
+		length: usize,
+		force_keyframe: bool,
+		fill: impl FnOnce(&mut [u8]) -> Result<(), &'static str>,
+	) -> Result<(Vec<u8>, bool), &'static str> {
 		self.wait_for_input()?;
 		if force_keyframe {
 			// SAFETY: Codec control is called on the owning worker before this input sample.
 			unsafe {
 				self.codec
-					.SetValue(&CODECAPI_AVEncVideoForceKeyFrame, &VARIANT::from(true))
+					// Microsoft specifies ULONG (VT_UI4), not VARIANT_BOOL. A rejected
+					// command otherwise silently sends camera and screen share to software.
+					.SetValue(&CODECAPI_AVEncVideoForceKeyFrame, &force_keyframe_value())
 					.map_err(|_| FAILED)?;
 			}
 		}
@@ -199,7 +230,7 @@ impl Encoder {
 				return Err(FAILED);
 			}
 			let destination = std::slice::from_raw_parts_mut(data, length);
-			if i420_to_nv12(y, u, v, destination).is_err() {
+			if fill(destination).is_err() {
 				let _ = buffer.Unlock();
 				return Err(FAILED);
 			}
@@ -270,14 +301,8 @@ impl Encoder {
 			let own = if self.provides_samples {
 				None
 			} else {
-				let size = self
-					.transform
-					.GetOutputStreamInfo(0)
-					.map_err(|_| FAILED)?
-					.cbSize;
-				if size == 0 || size as usize > self.max_bytes {
-					return Err(FAILED);
-				}
+				let info = self.transform.GetOutputStreamInfo(0).map_err(|_| FAILED)?;
+				let size = output_buffer_size(&info, self.max_buffer_bytes)?;
 				let buffer = MFCreateMemoryBuffer(size).map_err(|_| FAILED)?;
 				let sample = MFCreateSample().map_err(|_| FAILED)?;
 				sample.AddBuffer(&buffer).map_err(|_| FAILED)?;
@@ -303,6 +328,17 @@ impl Encoder {
 			Ok((data, keyframe))
 		}
 	}
+}
+
+fn force_keyframe_value() -> VARIANT {
+	VARIANT::from(1_u32)
+}
+
+fn output_buffer_size(info: &MFT_OUTPUT_STREAM_INFO, limit: usize) -> Result<u32, &'static str> {
+	if info.cbSize == 0 || info.cbSize as usize > limit {
+		return Err(FAILED);
+	}
+	Ok(info.cbSize)
 }
 
 impl Drop for Encoder {
@@ -406,5 +442,57 @@ fn sample_bytes(sample: &IMFSample, max_bytes: usize) -> Result<Vec<u8>, &'stati
 		};
 		buffer.Unlock().map_err(|_| FAILED)?;
 		result
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	#[test]
+	fn larger_native_buffer_does_not_relax_encoded_sample_limit() {
+		let _runtime = Runtime::open().unwrap();
+		let limit = crate::camera::MAX_ENCODED_BYTES;
+		// Synthetic memory only: no transform, GPU, capture device or transport.
+		unsafe {
+			let capacity = 640 * 480 * 3 / 2;
+			assert!(capacity > limit);
+			let buffer = MFCreateMemoryBuffer(capacity as u32).unwrap();
+			let mut data = std::ptr::null_mut();
+			buffer.Lock(&mut data, None, None).unwrap();
+			std::ptr::write_bytes(data, 0x2a, capacity);
+			buffer.Unlock().unwrap();
+			buffer.SetCurrentLength(limit as u32).unwrap();
+			let sample = MFCreateSample().unwrap();
+			sample.AddBuffer(&buffer).unwrap();
+			let encoded = sample_bytes(&sample, limit).unwrap();
+			assert_eq!(encoded.len(), limit);
+			assert!(encoded.iter().all(|&byte| byte == 0x2a));
+			buffer.SetCurrentLength(limit as u32 + 1).unwrap();
+			assert!(sample_bytes(&sample, limit).is_err());
+		}
+
+		{
+			let mut info = MFT_OUTPUT_STREAM_INFO {
+				dwFlags: 0,
+				cbSize: 1280 * 720 * 3 / 2,
+				cbAlignment: 0,
+			};
+			assert!(info.cbSize as usize > crate::camera::MAX_ENCODED_BYTES);
+			assert_eq!(
+				output_buffer_size(&info, 1280 * 720 * 4).unwrap(),
+				info.cbSize
+			);
+			assert!(output_buffer_size(&info, 1024).is_err());
+			info.cbSize = 0;
+			assert!(output_buffer_size(&info, 1280 * 720 * 4).is_err());
+			info.cbSize = u32::MAX;
+			assert!(output_buffer_size(&info, 1280 * 720 * 4).is_err());
+		}
+
+		{
+			let value = force_keyframe_value();
+			assert_eq!(value.vt(), windows::Win32::System::Variant::VT_UI4);
+			assert_eq!(u32::try_from(&value).unwrap(), 1);
+		}
 	}
 }

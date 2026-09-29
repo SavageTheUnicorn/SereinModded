@@ -10,16 +10,18 @@ pub(super) const RAIL_WIDTH: f32 = 68.0;
 pub(super) struct RailCache {
 	key: Option<(u64, u64, bool, Option<Id>)>,
 	// Fixed-size records only: at most MAX_NAV * size_of::<(Id, (bool, u32))>() bytes
-	// for badges and 15 * size_of::<Id>() bytes for direct-message rows.
+	// for badges, 15 * size_of::<Id>() bytes for direct-message rows and at most
+	// voice::MAX_ROSTER * size_of::<Id>() bytes for servers with someone in voice.
 	guild_badges: Box<[(Id, (bool, u32))]>,
 	direct: Box<[Id]>,
+	voice_guilds: Box<[Id]>,
 }
 impl RailCache {
 	fn sync(&mut self, state: &State) -> bool {
 		let call = direct_call(state);
 		let key = (
 			state.generation,
-			state.revision,
+			state.rail_revision(),
 			state.gateway_connected,
 			call,
 		);
@@ -35,6 +37,11 @@ impl RailCache {
 			}
 		}
 		self.guild_badges = badges.into_iter().collect();
+		// Voice states advance the rail revision, so this runs per roster change, not per frame.
+		let mut voice: Vec<Id> = state.voice.roster.iter().map(|r| r.guild).collect();
+		voice.sort_unstable();
+		voice.dedup();
+		self.voice_guilds = voice.into_boxed_slice();
 		self.direct = state.unread_directs(call).into_boxed_slice();
 		self.key = Some(key);
 		true
@@ -44,6 +51,9 @@ impl RailCache {
 			.binary_search_by_key(&guild, |(id, _)| *id)
 			.map(|index| self.guild_badges[index].1)
 			.unwrap_or_default()
+	}
+	pub(super) fn guild_voice(&self, guild: Id) -> bool {
+		self.voice_guilds.binary_search(&guild).is_ok()
 	}
 }
 fn direct_call(state: &State) -> Option<Id> {
@@ -81,21 +91,21 @@ pub(super) fn badge(ui: &egui::Ui, center: egui::Pos2, count: u32, ring: Color32
 		count.to_string()
 	};
 	let width = if count > 99 {
-		30.0
+		29.0
 	} else if count > 9 {
-		24.0
+		23.0
 	} else {
-		19.0
+		18.0
 	};
-	let rect = egui::Rect::from_center_size(center, egui::vec2(width, 19.0));
+	let rect = egui::Rect::from_center_size(center, egui::vec2(width, 18.0));
 	let colors = design::palette(ui);
-	ui.painter().rect_filled(rect.expand(3.0), 12, ring);
-	ui.painter().rect_filled(rect, 10, colors.danger);
+	ui.painter().rect_filled(rect.expand(2.0), 11, ring);
+	ui.painter().rect_filled(rect, 9, colors.danger);
 	ui.painter().text(
 		center,
 		Align2::CENTER_CENTER,
 		label,
-		FontId::new(12.0, crate::design::semibold_family(ui.ctx())),
+		FontId::new(11.5, crate::design::semibold_family(ui.ctx())),
 		Color32::WHITE,
 	);
 }
@@ -125,17 +135,31 @@ pub(super) fn rail_indicator(
 }
 /// Green speaker badge on the rail avatar of the conversation you are calling in.
 fn call_badge(ui: &egui::Ui, rect: egui::Rect) {
+	speaker_badge(ui, rect, design::palette(ui).positive, Color32::WHITE);
+}
+/// Speaker badge on a server icon: green for your own call, neutral when others are in voice.
+pub(super) fn voice_badge(ui: &egui::Ui, rect: egui::Rect, own_call: bool) {
+	if !ui.is_rect_visible(rect) {
+		return;
+	}
 	let colors = design::palette(ui);
-	// Inset from the corner so neither the ring nor the glyph meets the list's clip rect.
-	let center = rect.right_top() + egui::vec2(-10.0, 10.0);
+	if own_call {
+		call_badge(ui, rect);
+	} else {
+		speaker_badge(ui, rect, colors.raised, colors.text_strong);
+	}
+}
+fn speaker_badge(ui: &egui::Ui, rect: egui::Rect, fill: Color32, glyph: Color32) {
+	// Mirrors the mention badge's geometry at the top corner so the two line up.
+	let center = rect.right_top() + egui::vec2(-8.0, 8.0);
 	ui.painter()
-		.circle_filled(center, 13.0, design::window_palette(ui).base);
-	ui.painter().circle_filled(center, 11.0, colors.positive);
+		.circle_filled(center, 11.0, design::window_palette(ui).base);
+	ui.painter().circle_filled(center, 9.0, fill);
 	crate::icons::paint(
 		ui.painter(),
 		crate::icons::Icon::Speaker,
-		egui::Rect::from_center_size(center, egui::Vec2::splat(12.0)),
-		egui::Color32::WHITE,
+		egui::Rect::from_center_size(center, egui::Vec2::splat(11.0)),
+		glyph,
 	);
 }
 fn indicator(ui: &egui::Ui, rect: egui::Rect, unread: bool, count: u32) {
@@ -215,16 +239,15 @@ impl MessagingUi {
 				}
 				let label = home_request_label(friends, messages);
 				response.widget_info(|| {
-					egui::WidgetInfo::selected(
-						egui::WidgetType::SelectableLabel,
-						true,
-						home,
-						label.clone(),
-					)
+					egui::WidgetInfo::selected(egui::Role::Button, true, home, label.clone())
 				});
 				design::rail_name(&response, &label);
 				if response.clicked() {
 					self.guild = None;
+					if let Some(command) = state.open_messages() {
+						commands.push(command);
+					}
+					self.search.open = false;
 				}
 				self.scroll
 					.attach(
@@ -275,19 +298,29 @@ impl MessagingUi {
 							}
 							response.widget_info(|| {
 								egui::WidgetInfo::labeled(
-									egui::WidgetType::Button,
+									egui::Role::Button,
 									true,
 									format!(
-										"Open {}{}, {} notifications",
+										"{} {}{}, {} {}",
+										crate::i18n::translate(
+											"notifications-notification-rail-open"
+										),
 										channel.name,
 										if in_call {
-											", in a call"
+											crate::i18n::translate(
+												"notifications-notification-rail-in-a-call",
+											)
 										} else if unread {
-											", unread"
+											crate::i18n::translate(
+												"notifications-notification-rail-unread",
+											)
 										} else {
-											""
+											String::new()
 										},
-										count
+										count,
+										crate::i18n::translate(
+											"notifications-notification-rail-notifications"
+										)
 									),
 								)
 							});
@@ -329,14 +362,19 @@ impl MessagingUi {
 						);
 						response.widget_info(|| {
 							egui::WidgetInfo::labeled(
-								egui::WidgetType::Button,
+								egui::Role::Button,
 								true,
-								"Join a Server",
+								crate::i18n::translate(
+									"notifications-notification-rail-add-a-server",
+								),
 							)
 						});
-						design::rail_name(&response, "Join a Server");
+						design::rail_name(
+							&response,
+							crate::i18n::translate("notifications-notification-rail-add-a-server"),
+						);
 						if response.clicked() {
-							self.join_server.open(state.generation);
+							self.join_server.open_picker(state.generation);
 						}
 					});
 			});
@@ -361,14 +399,57 @@ mod tests {
 	}
 
 	#[test]
+	fn home_rail_opens_friends_from_a_guild_channel() {
+		let ctx = egui::Context::default();
+		let mut state = test_support::demo_state();
+		let mut view = MessagingUi {
+			guild: state
+				.selected
+				.and_then(|id| state.channel(id))
+				.and_then(|channel| channel.guild),
+			..Default::default()
+		};
+		view.search.open = true;
+		let mut frame = |events| {
+			let output = ctx.run_ui(
+				egui::RawInput {
+					screen_rect: Some(egui::Rect::from_min_size(
+						egui::Pos2::ZERO,
+						egui::vec2(800.0, 700.0),
+					)),
+					events,
+					..Default::default()
+				},
+				|ui| view.notification_rail(ui, &mut state, &mut vec![]),
+			);
+			output.drop_without_applying_deltas();
+		};
+		frame(vec![]);
+		for pressed in [true, false] {
+			frame(vec![
+				egui::Event::PointerMoved(egui::pos2(34.0, 27.0)),
+				egui::Event::PointerButton {
+					pos: egui::pos2(34.0, 27.0),
+					button: egui::PointerButton::Primary,
+					pressed,
+					modifiers: egui::Modifiers::NONE,
+				},
+			]);
+		}
+		assert_eq!(view.guild, None);
+		assert_eq!(state.selected, None);
+		assert!(!view.search.open);
+	}
+
+	#[test]
 	fn rail_cache_reuses_idle_rows_and_tracks_unread_ack_permissions_and_removal() {
 		let mut state = test_support::notification_demo_state();
 		let mut cache = RailCache::default();
 		assert!(cache.sync(&state));
 		assert_eq!(
 			state.channel_unread(state.channel(Id(27)).unwrap()),
-			None,
-			"Threads omitted from read-state stay unknown, not unread"
+			Some(true),
+			"Threads omitted from known read-state start unread"
 		);
 		assert_eq!(&*cache.direct, &[Id(22)]);
 		assert!(!cache.direct.contains(&Id(43)));
@@ -392,6 +473,7 @@ mod tests {
 				last_message: None,
 				icon: None,
 				member_list_id: None,
+				tags: None,
 				message_count: None,
 			}),
 		);
@@ -419,6 +501,7 @@ mod tests {
 				last_message: None,
 				icon: None,
 				member_list_id: None,
+				tags: None,
 				message_count: None,
 			}),
 		);
@@ -437,6 +520,19 @@ mod tests {
 		for _ in 0..10 {
 			assert!(!cache.sync(&state));
 		}
+		let badges = cache.guild_badges.as_ptr();
+		apply(
+			&mut state,
+			Event::Reactions(client_core::reactions::Event::Cleared {
+				channel: Id(22),
+				message: Id(1003),
+				emoji: None,
+			}),
+		);
+		assert!(!cache.sync(&state));
+		assert_eq!(cache.guild_badges.as_ptr(), badges);
+		state.revision += 1;
+		assert!(cache.sync(&state));
 		apply(
 			&mut state,
 			Event::ReadState(read_state::Event::Ack {
@@ -467,62 +563,61 @@ mod tests {
 		state.logout();
 		assert!(cache.sync(&state));
 		assert!(cache.guild_badges.is_empty());
-	}
 
-	#[test]
-	fn rail_cache_preserves_the_first_fifteen_chats_and_local_call_changes() {
-		let mut state = test_support::demo_state();
-		let template = state.channel(Id(22)).unwrap().clone();
-		for id in 100..116 {
+		{
+			let mut state = test_support::demo_state();
+			let template = state.channel(Id(22)).unwrap().clone();
+			for id in 100..116 {
+				apply(
+					&mut state,
+					Event::ChannelCreated(model::Channel {
+						id: Id(id),
+						last_message: Some(Id(200)),
+						..template.clone()
+					}),
+				);
+			}
 			apply(
 				&mut state,
-				Event::ChannelCreated(model::Channel {
-					id: Id(id),
-					last_message: Some(Id(200)),
-					..template.clone()
+				Event::ReadState(read_state::Event::Snapshot {
+					partial: false,
+					entries: Some(
+						std::iter::once((Id(20), Some(Id(495)), 0))
+							.chain((100..=115).map(|id| (Id(id), Some(Id(1)), 0)))
+							.collect(),
+					),
+					version: Some(1),
 				}),
 			);
+			let mut cache = RailCache::default();
+			assert!(cache.sync(&state));
+			assert!(!cache.direct.contains(&Id(43)));
+			assert_eq!(
+				&*cache.direct,
+				&(101..=115).rev().map(Id).collect::<Vec<_>>()
+			);
+			// Exercise the local command preparation gate; no command is dispatched by this test.
+			state.demo = false;
+			let revision = state.revision;
+			assert!(state.start_call(Id(22), false).is_some());
+			assert_eq!(state.revision, revision);
+			assert!(cache.sync(&state));
+			assert_eq!(cache.direct.len(), 15);
+			assert_eq!(cache.direct[0], Id(22));
+			assert_eq!(cache.direct[14], Id(102));
+			assert!(state.leave_call().is_some());
+			assert_eq!(state.revision, revision);
+			assert!(cache.sync(&state));
+			assert_eq!(cache.direct[0], Id(115));
+			assert_eq!(cache.direct[14], Id(101));
+			// Session failure through a local completion must also retire unread visibility.
+			state.folders_pending = true;
+			state.apply_guild_folders(Err(client_core::auth::Failure::Expired));
+			assert!(cache.sync(&state));
+			assert!(cache.direct.is_empty());
+			apply(&mut state, Event::Resumed);
+			assert!(cache.sync(&state));
+			assert_eq!(cache.direct.len(), 15);
 		}
-		apply(
-			&mut state,
-			Event::ReadState(read_state::Event::Snapshot {
-				partial: false,
-				entries: Some(
-					std::iter::once((Id(20), Some(Id(495)), 0))
-						.chain((100..=115).map(|id| (Id(id), Some(Id(1)), 0)))
-						.collect(),
-				),
-				version: Some(1),
-			}),
-		);
-		let mut cache = RailCache::default();
-		assert!(cache.sync(&state));
-		assert!(!cache.direct.contains(&Id(43)));
-		assert_eq!(
-			&*cache.direct,
-			&(101..=115).rev().map(Id).collect::<Vec<_>>()
-		);
-		// Exercise the local command preparation gate; no command is dispatched by this test.
-		state.demo = false;
-		let revision = state.revision;
-		assert!(state.start_call(Id(22), false).is_some());
-		assert_eq!(state.revision, revision);
-		assert!(cache.sync(&state));
-		assert_eq!(cache.direct.len(), 15);
-		assert_eq!(cache.direct[0], Id(22));
-		assert_eq!(cache.direct[14], Id(102));
-		assert!(state.leave_call().is_some());
-		assert_eq!(state.revision, revision);
-		assert!(cache.sync(&state));
-		assert_eq!(cache.direct[0], Id(115));
-		assert_eq!(cache.direct[14], Id(101));
-		// Session failure through a local completion must also retire unread visibility.
-		state.folders_pending = true;
-		state.apply_guild_folders(Err(client_core::auth::Failure::Expired));
-		assert!(cache.sync(&state));
-		assert!(cache.direct.is_empty());
-		apply(&mut state, Event::Resumed);
-		assert!(cache.sync(&state));
-		assert_eq!(cache.direct.len(), 15);
 	}
 }

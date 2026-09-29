@@ -14,6 +14,8 @@ adds one pixel to `WM_NCCALCSIZE` top and bottom. Maximizing skips the shift, wh
 only that state looked sharp. `ViewportBuilder::with_has_shadow` is macOS-only and does not
 disable the Windows hack. Native DPI and eframe's physical surface sizing remain unchanged.
 macOS/Linux window creation is unchanged.
+The custom Windows frame requests DWM's rounded-corner treatment on Windows 11. Windows keeps
+maximized windows square, and older releases ignore the unsupported preference.
 For offline inspection, run `cargo run --locked -p serein --features demo -- --demo --demo-rendering`.
 The diagnostic shows the physical client size, logical viewport, native/egui scale and WGPU
 surface dimensions sampled by a render callback, plus alternating one-pixel stripes.
@@ -28,13 +30,16 @@ including over its nonselectable context title. It does not wait for egui's text
 Caption buttons and other clickable title-strip controls keep their own actions; Windows
 double-click maximize/restore remains available. Synthetic egui input tests check command
 dispatch, not native OS window movement, which still requires a desktop interaction check.
-On Windows and macOS, Appearance settings can hide this 36 px strip and use the native title bar
+On Windows and macOS, General settings can hide this 36 px strip and use the native title bar
 and window buttons instead. The device preference defaults to showing the custom strip and
 is saved with other app preferences; older saved settings keep that default. macOS switches
 without restarting and keeps its native traffic lights. Linux always omits the app strip and
-requests system decorations; on Wayland compositors without server decorations, including GNOME,
+defaults to system decorations; on Wayland compositors without server decorations, including GNOME,
 winit uses its Adwaita frame instead of the basic fallback. GNOME rendering remains unverified
-in this macOS fast local pass.
+in this macOS fast local pass. Linux General → Window includes **Hide window decorations**,
+which requests a borderless window immediately and persists across restarts. Moving, resizing
+and closing then use the window manager's controls. The compositor controls whether decoration
+requests are honored; native X11/Wayland verification of this toggle remains pending.
 
 | Platform | Build/runtime requirements | Status |
 |---|---|---|
@@ -50,18 +55,33 @@ Linux packaging uses the target distribution's native tools: `dpkg-dev` for Debi
 dependencies, installation commands and supported distribution versions.
 
 `cargo xtask package --format appimage` creates a Linux x86_64 Type 2 AppImage
-including voice. The Ubuntu 26.04 release job publishes it alongside the native
-packages and release checksums. It uses host GTK4/WebKitGTK 6.0, audio and graphics
-libraries, rather than bundling a separate browser runtime. See [AppImage setup and
-builds](../packaging/appimage/README.md) for installation requirements, pinned tooling
-and package inspection. Native AppImage startup and upgrading remain unverified in
+including voice. A separate Ubuntu 24.04 (glibc 2.39) release job publishes it
+alongside the native packages and release checksums. It uses host GTK4/WebKitGTK 6.0,
+audio and graphics libraries, rather than bundling a separate browser runtime. See
+[AppImage setup and builds](../packaging/appimage/README.md) for installation
+requirements, pinned tooling and package inspection. Native AppImage startup and
+upgrading remain unverified in
 the initial fast local pass.
 
 `cargo xtask package` builds the locked default release configuration. macOS gets `dist/Serein.app`; Windows gets an executable plus license files; Debian/Ubuntu Linux additionally produces a `.deb` with desktop integration and dependency metadata. On macOS, packaging replaces the executable through a fresh sibling file and rename, then seals the completed bundle with `codesign --force --sign -` and runs `codesign --verify --strict`. This is a **local ad-hoc signature**, with no signing identity, Developer ID certificate, or notarization. It verifies the staged bundle's integrity and does not certify Gatekeeper acceptance or a trusted publisher. The distinction between signature validity and trust is described in [Apple's code-signing guidance](https://developer.apple.com/library/archive/technotes/tn2206/_index.html).
 
-Windows/Linux local staging artifacts remain unsigned. These are not certified installers. Use `ditto -c -k --keepParent dist/Serein.app dist/Serein-macos.zip` on macOS; normal archive tools may package Windows staging output. Do not modify bundle resources after sealing; rerun packaging when source documentation changes. Linux additionally supports `--format rpm`, `--format arch` and `--format dir`; release jobs target Ubuntu 26.04, Fedora 43/44, openSUSE Tumbleweed and Arch independently. Fedora 43 packaging was added in a local fast pass; its build and installation remain unverified until Linux CI and desktop validation. [Flatpak](../packaging/flatpak/README.md) builds offline against GNOME SDK 49 with the pinned Rust compiler and locked vendored sources. Its sandbox currently excludes direct V4L2 camera access and host game IPC; desktop login/keyring/audio still need Linux runtime validation. [Signed repository preparation](../packaging/repositories/README.md) supports apt, dnf/zypper and pacman, but requires configured signing credentials and an HTTPS host; preparing artifacts does not publish repositories. Windows installer/signing and release reproducibility remain open work.
+Windows/Linux local staging artifacts remain unsigned. These are not certified installers. Use `ditto -c -k --keepParent dist/Serein.app dist/Serein-macos.zip` on macOS; normal archive tools may package Windows staging output. Do not modify bundle resources after sealing; rerun packaging when source documentation changes. Linux additionally supports `--format rpm`, `--format arch` and `--format dir`; release jobs target Ubuntu 26.04, Fedora 43/44, openSUSE Tumbleweed and Arch independently. Fedora 43 packaging was added in a local fast pass; its build and installation remain unverified until Linux CI and desktop validation. [Flatpak](../packaging/flatpak/README.md) builds offline against GNOME SDK 49 with the pinned Rust compiler and locked vendored sources. Its sandbox currently excludes direct V4L2 camera access, and host game IPC needs the documented socket link; desktop login/keyring/audio still need Linux runtime validation. [Signed repository preparation](../packaging/repositories/README.md) supports apt, dnf/zypper and pacman, but requires configured signing credentials and an HTTPS host; preparing artifacts does not publish repositories. Windows installer/signing and release reproducibility remain open work.
 
 The webview lives only during login: WKWebView on macOS, WebView2 on Windows, GTK/WebKitGTK on Linux. Linux uses a separate GTK authentication window and pumps it only while login is active. Voice is built in. Audio devices open only for explicit playback, device testing, or a call reaching required encrypted readiness. Popup-dependent authentication and third-party embedded challenges may not work; do not claim all Discord login methods without live tests.
+
+## Window transparency and blur
+
+Enable Transparency & blur in Appearance and restart to create an alpha-capable
+rendering surface. Transparency works where the OS/compositor supports alpha windows.
+Blur is requested through macOS winit support, Windows 11 22H2+ desktop Acrylic,
+Wayland [`ext-background-effect-v1`](https://isaacfreund.com/docs/wayland/ext-background-effect-v1/)
+(including compatible Mutter/GNOME), with the
+existing KDE Wayland protocol as fallback, and the KDE blur property on X11.
+Unsupported compositors/older Windows retain transparency without native blur;
+system accessibility and appearance preferences can also suppress effects.
+The compositor determines blur strength; zero disables it. Standard Wayland blur
+capability changes are processed without blocking the rendering loop. Linux and
+Windows native appearance remains unverified in this macOS local pass.
 
 ## Built-in voice
 
@@ -92,8 +112,10 @@ server negotiates H264; capture starts only after an explicit click in a connect
 call. All adapters send 640×480 video at most 15 encoded frames/s.
 Windows needs desktop camera permission; Linux needs an accessible streaming
 `/dev/videoN` node supporting progressive YUYV or MJPEG. Linux portal-only camera
-access is not implemented. Windows has a device picker in settings and call controls,
-including DirectShow virtual cameras; macOS/Linux still use their default selection.
+access is not implemented. All three platforms have a device picker in settings and call controls,
+including DirectShow virtual cameras on Windows, AVFoundation discovery on macOS,
+and single-plane streaming V4L2 devices on Linux. Settings also provide an explicit
+local camera preview outside calls. Physical selection/preview remains unverified.
 See [camera limits and validation](voice.md#camera-in-calls-macos-windows-and-linux).
 Windows compilation and isolated Linux adapter tests do not establish working
 physical capture or delivery to an official Discord client; these remain unverified.
@@ -111,17 +133,47 @@ provider rejection and missing native webview runtimes fail visibly. macOS/Linux
 live CAPTCHA acceptance remains unverified. Widget
 loading and synthetic checks do not establish live Discord challenge acceptance.
 
-## Opt-in tray icon (September 13, 2026)
+## Opt-out tray icon (September 13, 2026)
 
-Windows General settings offer Show Serein in System Tray, off by default. Minimizing
+Windows General settings offer Show Serein in System Tray, on by default; turning it off
+falls back to ordinary window minimize/close. Minimizing
 keeps the window in the taskbar, including taskbar clicks and automatic startup. The icon supports
 keyboard/mouse restore and a Show Serein / Quit menu. Quit uses the normal unsaved
-work/download exit checks; the window Close button retains normal exit behavior.
-Disabling removes the tray icon without changing the window's minimized state.
+work/download exit checks; while the icon is live, the window Close button hides the
+window instead of exiting, and Serein keeps running with its logic ticking so
+notifications and calls continue. Show restores the window. Disabling the setting,
+or a tray that reports itself unavailable, restores a hidden window immediately, so
+Close can never strand the application without a way back.
 The adapter uses existing user32/Shell APIs and dependencies, with no background
 polling. A synthetic native Windows test verifies registration,
-minimize/restore, own-window taskbar recovery, Quit event and cleanup. macOS uses a native menu bar icon with Show Serein / Quit actions; minimized windows
-remain in the Dock. Linux retains an explicitly disabled control.
+minimize/restore, own-window taskbar recovery, Quit event and cleanup. macOS uses a native menu bar icon with Show Serein / Quit actions; it draws Serein's own
+mark (`assets/brand/serein-tray.png`, rendered from the brand SVG) as an 18-point template
+image, so the system tints it for light, dark and highlighted menu bars. Minimized windows
+remain in the Dock.
+
+Linux now uses ksni's StatusNotifierItem on the session bus with Show Serein,
+Minimize Serein and Quit actions. Enable a StatusNotifier host (for example a panel's
+tray module). Until registration succeeds, or after host loss, Close retains normal
+exit behavior. Start/restart the host and toggle the tray off/on to retry registration.
+The existing on-by-default tray preference is reused; demo changes are session-only.
+
+**Hyprland / native Wayland:** winit cannot hide, unhide, focus or unminimize a native
+Wayland window. On Hyprland, Close and tray Minimize instead park Serein on
+`special:serein-tray` through the compositor socket; Show moves it to the active
+workspace. This uses `hl.dsp.window.move` with `follow = false`, accepting the new
+workspace `address` or legacy numeric `id`. Older dispatchers fall back to
+`movetoworkspacesilent`. Workspace names are bounded and escaped before Lua dispatch.
+Other Wayland compositors receive minimize/restore requests and may require their
+own window controls; the KDE tray restoration report remains unresolved. Native Wayland remains the default on Wayland sessions, with no
+application-level XWayland fallback or backend override.
+Quit remains explicit and runs the existing unsaved-work/download/extension checks;
+cancelling Quit restores close-to-tray behavior.
+
+Offline lifecycle check: `cargo run --locked -p tray-debug`. On Linux, use
+`dbus-run-session -- cargo run --locked -p tray-debug` to additionally exercise
+registration, missing/lost host, icon activation and all three menu actions on a private
+synthetic bus. These checks do not establish compositor behavior. This refresh was
+prepared on macOS; NixOS/Hyprland and Flatpak desktop validation remain pending.
 
 ## Opt-in automatic startup
 
@@ -132,12 +184,14 @@ Windows Startup Apps can override this registration. Disable startup before dele
 a portable installation, or re-enable it after moving the executable.
 Minimized launches stay in the taskbar even when the saved tray preference is enabled;
 the tray can attach safely after a minimized launch. Tray failures leave the window
-recoverable. The Close button still exits, and the tray Quit action retains unsaved
+recoverable. Without a tray icon the Close button still exits, and the tray Quit action retains unsaved
 work checks. macOS registers a per-user `~/Library/LaunchAgents/cz.viceverse.serein.startup.plist`
 for the next graphical login, with the same launch flags. Turning it off removes only
 that file. It does not launch a second client when enabled or restart after Quit.
 Re-enable startup after moving the executable; disable it before uninstalling. macOS
-Login Items settings can independently block launch. Linux autostart remains unavailable.
+Login Items settings can independently block launch. Built-in Linux autostart remains
+unavailable; desktop-session entries can launch `serein --start-minimized`, while ordinary
+launches without the flag remain visible.
 Native macOS sign-out/sign-in remains unverified.
 Offline tests cover isolated registry writes/removal, launch flags and settings
 interaction; an actual Windows sign-out/sign-in has not been exercised.
@@ -148,7 +202,7 @@ Settings → Updates provides automatic checking/downloading, Production and Nig
 release channels, a manual check and an explicit restart action. The title strip
 shows an available or downloaded update on macOS, Windows and Linux. Update controls are
 also accessible from the signed-out screen. Automatic checking runs at startup
-once saved preferences are available, then every six hours while running; turning
+once saved preferences are available, then every hour while running; turning
 it off disables automatic downloads while background checks and title-bar notices
 remain active. Nightly is the default channel and automatic downloads are off by
 default. Switching channels never installs an
@@ -161,6 +215,15 @@ only after the application's existing close/unsaved-work gates permit shutdown.
 GitHub HTTPS and repository access are the update trust boundary; release checksums
 alone are not an independent publisher signature. Linux AppImages use this same
 trust boundary; other Linux installations use their package manager.
+
+AppImage downloads first try the selected release's `.zsync` sidecar, verified
+against the same checksum list. The updater scans the installed image for reusable
+blocks and downloads missing HTTPS ranges, then verifies the entire result with
+SHA-256. Missing/incompatible delta metadata or reconstruction failure falls back
+to a full download. The built-in implementation supports the zsync 0.6.2/MD4 format
+produced by the Ubuntu packaging job; it does not run an external updater. Offline
+debug checks cover shifted-block reuse and integrity rejection; real release-to-release
+bandwidth savings and Linux upgrade behavior remain unverified.
 
 The local `--features demo -- --demo --demo-check-updates` debug path exercises
 synthetic update states, preference compatibility and settings rendering without
@@ -186,7 +249,7 @@ available with a visible recovery path on the next update attempt.
 
 ## Linux screen sharing
 
-Screen sharing requires PipeWire, a ScreenCast-capable portal backend for the current
+The system screen-sharing picker requires PipeWire, a ScreenCast-capable portal backend for the current
 desktop (GNOME, KDE or the compositor-specific backend), and GStreamer Base/Good plus
 the PipeWire source plugin. GStreamer 1.24+ is recommended; GPU scaling/encoding also
 needs the applicable VA, NVCodec and OpenGL plugins and working driver support.
@@ -194,6 +257,18 @@ Native packages declare the PipeWire and Base runtime plugins; hardware codec av
 still depends on distribution packaging and drivers. The software fallback reuses bundled
 OpenH264. Flatpak needs compatible plugins/GPU access inside its runtime; no extra sandbox
 permission or host socket access is added. Native Linux validation remains pending.
+
+Screen sharing also tries the legacy `vaapih264enc` element when modern VA encoding
+fails. This optional system plugin uses CPU scaling and hardware H.264 encoding;
+it does not require `vaapipostproc`. Check availability with
+`gst-inspect-1.0 vaapih264enc` in the same runtime as Serein. Installing the modern
+`va` plugin alone does not provide this legacy element. Driver compatibility still
+requires an actual encode test; `vainfo` only advertises capabilities.
+
+Native X11 sessions can instead explicitly select “Entire X11 desktop · all monitors ·
+no portal”. This uses `ximagesrc` from GStreamer Good, already a native package
+dependency, and shares the whole desktop. No direct capture starts after a failed or
+cancelled portal request. X11 capture and live delivery remain unverified.
 
 Optional Linux stream audio uses native `libpulse` per-application monitoring on
 PulseAudio or PipeWire's PulseAudio server. Source builds need the libpulse development
@@ -215,3 +290,5 @@ minutes before playback and is limited to 100 MiB input/output, 1080p and two ho
 Missing FFmpeg or conversion failures appear in the video card. Linux and Windows
 continue to use their installed native codecs. This optional fallback is not bundled
 in release packages; actual codec coverage depends on the local FFmpeg build.
+Windows passes MPEG-4/MOV and WebM/Matroska attachments to Media Foundation; a recognized
+container can still fail when its video or audio codec is not installed.

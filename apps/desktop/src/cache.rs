@@ -52,6 +52,8 @@ fn message_bytes(messages: &Vec<Message>) -> usize {
 }
 #[allow(clippy::large_enum_variant)]
 pub enum Operation {
+	LoadCustomFont,
+	SaveCustomFont(Option<ui::fonts::CustomFont>),
 	LoadAppPreferences,
 	SaveAppPreferences(Box<local_store::AppPreferences>),
 	LoadAppearance,
@@ -68,6 +70,14 @@ pub enum Operation {
 	SaveGifFavorites(Vec<model::Gif>),
 	LoadChannelPreferences,
 	SaveChannelPreferences(model::ChannelPreferences),
+	LoadAccountPresences,
+	SaveAccountPresence(model::OwnPresence),
+	LoadAccounts,
+	SaveAccount(model::SavedAccount),
+	SetAccountToken {
+		account: Id,
+		has_token: bool,
+	},
 	LoadChannel {
 		channel: Id,
 		request: u64,
@@ -94,6 +104,7 @@ pub enum Operation {
 }
 #[allow(clippy::large_enum_variant)]
 pub enum Outcome {
+	CustomFont(Result<Option<ui::fonts::CustomFont>, &'static str>),
 	AppPreferences(Result<Box<local_store::AppPreferences>, StoreError>),
 	AppPreferencesSaved(Result<(), StoreError>),
 	/// Saved appearance plus the saved theme preset key, if any.
@@ -108,6 +119,15 @@ pub enum Outcome {
 	GifFavorites(Vec<model::Gif>),
 	ChannelPreferences(Result<model::ChannelPreferences, StoreError>),
 	ChannelPreferencesSaved(Result<(), StoreError>),
+	AccountPresences(Result<std::collections::BTreeMap<model::Id, model::OwnPresence>, StoreError>),
+	AccountPresenceSaved(Result<(), StoreError>),
+	/// The whole switcher roster, plus any accounts pruned to keep it bounded. Pruning is
+	/// already committed when this is produced, so the IDs travel outside the roster result:
+	/// a failed re-read must not strand their saved secrets and cached data.
+	Accounts {
+		roster: Result<Vec<model::SavedAccount>, StoreError>,
+		pruned: Vec<Id>,
+	},
 	Channel {
 		channel: Id,
 		request: u64,
@@ -216,6 +236,9 @@ impl Cache {
 			return false;
 		}
 		let payload = match &operation {
+			Operation::SaveCustomFont(font) => font
+				.as_ref()
+				.map_or(0, |font| font.bytes().len() + font.name.capacity()),
 			Operation::SaveChannel { messages, .. } | Operation::SaveChanges { messages, .. } => {
 				if messages.len() > 500
 					|| messages.iter().map(Message::bytes).sum::<usize>() > WINDOW_BYTES
@@ -250,6 +273,12 @@ impl Cache {
 						.sum::<usize>()
 			}
 			Operation::SaveThemeVariant(value) => value.as_ref().map_or(0, String::capacity),
+			Operation::SaveAccount(account) => {
+				if !account.is_valid() {
+					return false;
+				}
+				account.heap_bytes()
+			}
 			_ => 0,
 		};
 		let ids = match &operation {
@@ -301,11 +330,22 @@ impl Cache {
 				let outcome = execute(&mut store, &worker_history, account, epoch, operation);
 				drop(reservation);
 				let bytes = match &outcome {
+					Outcome::CustomFont(Ok(Some(font))) => {
+						font.bytes().len() + font.name.capacity()
+					}
 					Outcome::Channel { messages, .. } => message_bytes(messages),
 					Outcome::Drafts(drafts) => drafts.values().map(String::capacity).sum(),
 					Outcome::GifFavorites(favorites) => {
 						favorites.iter().map(model::Gif::bytes).sum::<usize>()
 							+ favorites.capacity() * size_of::<model::Gif>()
+					}
+					Outcome::Accounts { roster, pruned } => {
+						roster.as_ref().map_or(0, |accounts| {
+							accounts
+								.iter()
+								.map(model::SavedAccount::heap_bytes)
+								.sum::<usize>() + accounts.capacity() * size_of::<model::SavedAccount>()
+						}) + pruned.capacity() * size_of::<Id>()
 					}
 					_ => 0,
 				};
@@ -336,6 +376,29 @@ fn execute(
 ) -> Outcome {
 	// Settings completions have their own pending/error state, independent of history.
 	match &operation {
+		Operation::LoadCustomFont => {
+			return Outcome::CustomFont((|| {
+				let store = store
+					.as_ref()
+					.map_err(|_| "Could not load the saved font.")?;
+				store
+					.custom_font()
+					.map_err(|_| "Could not load the saved font.")?
+					.map(|(name, bytes)| ui::fonts::CustomFont::new(name, bytes))
+					.transpose()
+			})());
+		}
+		Operation::SaveCustomFont(font) => {
+			return Outcome::CustomFont((|| {
+				let store = store
+					.as_ref()
+					.map_err(|_| "Could not save the font. Try importing it again.")?;
+				store
+					.save_custom_font(font.as_ref().map(|font| (font.name.as_str(), font.bytes())))
+					.map_err(|_| "Could not save the font. Try again.")?;
+				Ok(font.clone())
+			})());
+		}
 		Operation::LoadChannelPreferences => {
 			return Outcome::ChannelPreferences(match store {
 				Ok(store) => store.channel_preferences(account),
@@ -347,6 +410,52 @@ fn execute(
 				Ok(store) => store.save_channel_preferences(account, value),
 				Err(error) => Err(*error),
 			});
+		}
+		Operation::LoadAccountPresences => {
+			return Outcome::AccountPresences(match store {
+				Ok(store) => store.account_presences(),
+				Err(error) => Err(*error),
+			});
+		}
+		Operation::SaveAccountPresence(presence) => {
+			return Outcome::AccountPresenceSaved(match store {
+				Ok(store) => store.save_account_presence(account, presence),
+				Err(error) => Err(*error),
+			});
+		}
+		Operation::LoadAccounts => {
+			return Outcome::Accounts {
+				roster: match store {
+					Ok(store) => store.accounts(),
+					Err(error) => Err(*error),
+				},
+				pruned: Vec::new(),
+			};
+		}
+		Operation::SaveAccount(account) => {
+			let (roster, pruned) = match store {
+				Ok(store) => match store.save_account(account) {
+					// Report the committed pruning even when the re-read fails.
+					Ok(pruned) => (store.accounts(), pruned),
+					Err(error) => (Err(error), Vec::new()),
+				},
+				Err(error) => (Err(*error), Vec::new()),
+			};
+			return Outcome::Accounts { roster, pruned };
+		}
+		Operation::SetAccountToken {
+			account: id,
+			has_token,
+		} => {
+			return Outcome::Accounts {
+				roster: match store {
+					Ok(store) => store
+						.set_account_token(*id, *has_token)
+						.and(store.accounts()),
+					Err(error) => Err(*error),
+				},
+				pruned: Vec::new(),
+			};
 		}
 		Operation::LoadAppPreferences => {
 			return Outcome::AppPreferences(match store {
@@ -439,7 +548,12 @@ fn execute(
 			"Could not save GIF favorites; the change exists only in this session"
 		}
 		Operation::LoadChannel { .. } => "Could not read cached history",
-		Operation::LoadAppPreferences
+		Operation::LoadCustomFont
+		| Operation::SaveCustomFont(_)
+		| Operation::LoadAppPreferences
+		| Operation::LoadAccounts
+		| Operation::SaveAccount(_)
+		| Operation::SetAccountToken { .. }
 		| Operation::LoadChannelPreferences
 		| Operation::SaveChannelPreferences(_)
 		| Operation::SaveAppPreferences(_)
@@ -448,11 +562,18 @@ fn execute(
 		| Operation::LoadGameActivity
 		| Operation::SaveGameActivity(_)
 		| Operation::LoadMinimizeToTray
-		| Operation::SaveMinimizeToTray(_) => unreachable!(),
+		| Operation::SaveMinimizeToTray(_)
+		| Operation::LoadAccountPresences
+		| Operation::SaveAccountPresence(_) => unreachable!(),
 	};
 	let result = match store {
 		Ok(store) => match operation {
-			Operation::LoadAppPreferences
+			Operation::LoadCustomFont
+			| Operation::SaveCustomFont(_)
+			| Operation::LoadAppPreferences
+			| Operation::LoadAccounts
+			| Operation::SaveAccount(_)
+			| Operation::SetAccountToken { .. }
 			| Operation::LoadChannelPreferences
 			| Operation::SaveChannelPreferences(_)
 			| Operation::SaveAppPreferences(_)
@@ -461,7 +582,9 @@ fn execute(
 			| Operation::LoadGameActivity
 			| Operation::SaveGameActivity(_)
 			| Operation::LoadMinimizeToTray
-			| Operation::SaveMinimizeToTray(_) => {
+			| Operation::SaveMinimizeToTray(_)
+			| Operation::LoadAccountPresences
+			| Operation::SaveAccountPresence(_) => {
 				unreachable!()
 			}
 			Operation::LoadAppearance => store
@@ -581,6 +704,8 @@ mod tests {
 		let preferences = model::ChannelPreferences {
 			favorites: vec![Id(19)],
 			pinned: vec![Id(20)],
+			collapsed_categories: vec![Id(21)],
+			last_channels: vec![(Id(22), Id(23))],
 		};
 		store
 			.as_ref()
@@ -681,7 +806,7 @@ mod tests {
 		let mut store = Ok(LocalStore::open(std::path::Path::new(":memory:")).unwrap());
 		assert!(matches!(
 			execute(&mut store, &safety, Id(0), 0, Operation::LoadMinimizeToTray),
-			Outcome::MinimizeToTray(Ok(false))
+			Outcome::MinimizeToTray(Ok(true))
 		));
 		assert!(matches!(
 			execute(
@@ -689,13 +814,13 @@ mod tests {
 				&safety,
 				Id(0),
 				0,
-				Operation::SaveMinimizeToTray(true)
+				Operation::SaveMinimizeToTray(false)
 			),
 			Outcome::MinimizeToTraySaved(Ok(()))
 		));
 		assert!(matches!(
 			execute(&mut store, &safety, Id(9), 0, Operation::LoadMinimizeToTray),
-			Outcome::MinimizeToTray(Ok(true))
+			Outcome::MinimizeToTray(Ok(false))
 		));
 		let mut unavailable = Err(StoreError::Unavailable);
 		assert!(matches!(
@@ -718,109 +843,111 @@ mod tests {
 			),
 			Outcome::MinimizeToTraySaved(Err(StoreError::Unavailable))
 		));
-	}
 
-	#[test]
-	fn game_activity_operations_keep_their_own_results_even_when_history_is_blocked() {
-		let safety = HistorySafety::default();
-		safety.block();
-		let mut store = Ok(LocalStore::open(std::path::Path::new(":memory:")).unwrap());
-		assert!(matches!(
-			execute(&mut store, &safety, Id(0), 0, Operation::LoadGameActivity),
-			Outcome::GameActivity(Ok(false))
-		));
-		assert!(matches!(
-			execute(
-				&mut store,
-				&safety,
-				Id(0),
-				0,
-				Operation::SaveGameActivity(true)
-			),
-			Outcome::GameActivitySaved(Ok(()))
-		));
-		assert!(matches!(
-			execute(&mut store, &safety, Id(9), 0, Operation::LoadGameActivity),
-			Outcome::GameActivity(Ok(true))
-		));
-		let mut unavailable = Err(StoreError::Unavailable);
-		assert!(matches!(
-			execute(
-				&mut unavailable,
-				&safety,
-				Id(0),
-				0,
-				Operation::LoadGameActivity
-			),
-			Outcome::GameActivity(Err(StoreError::Unavailable))
-		));
-		assert!(matches!(
-			execute(
-				&mut unavailable,
-				&safety,
-				Id(0),
-				0,
-				Operation::SaveGameActivity(false)
-			),
-			Outcome::GameActivitySaved(Err(StoreError::Unavailable))
-		));
-	}
+		{
+			let safety = HistorySafety::default();
+			safety.block();
+			let mut store = Ok(LocalStore::open(std::path::Path::new(":memory:")).unwrap());
+			assert!(matches!(
+				execute(&mut store, &safety, Id(0), 0, Operation::LoadGameActivity),
+				Outcome::GameActivity(Ok(false))
+			));
+			assert!(matches!(
+				execute(
+					&mut store,
+					&safety,
+					Id(0),
+					0,
+					Operation::SaveGameActivity(true)
+				),
+				Outcome::GameActivitySaved(Ok(()))
+			));
+			assert!(matches!(
+				execute(&mut store, &safety, Id(9), 0, Operation::LoadGameActivity),
+				Outcome::GameActivity(Ok(true))
+			));
+			let mut unavailable = Err(StoreError::Unavailable);
+			assert!(matches!(
+				execute(
+					&mut unavailable,
+					&safety,
+					Id(0),
+					0,
+					Operation::LoadGameActivity
+				),
+				Outcome::GameActivity(Err(StoreError::Unavailable))
+			));
+			assert!(matches!(
+				execute(
+					&mut unavailable,
+					&safety,
+					Id(0),
+					0,
+					Operation::SaveGameActivity(false)
+				),
+				Outcome::GameActivitySaved(Err(StoreError::Unavailable))
+			));
+		}
 
-	#[test]
-	fn reading_operations_report_their_own_results_without_touching_account_history() {
-		let safety = HistorySafety::default();
-		let mut store = Ok(LocalStore::open(std::path::Path::new(":memory:")).unwrap());
-		let value = model::ReadingPreferences {
-			zoom_percent: 125,
-			sidebar_width: 300,
-			show_members: false,
-			animate_gifs: false,
-			hide_media_links: true,
-			confirm_external_links: true,
-		};
-		store
-			.as_mut()
-			.unwrap()
-			.save_draft(Id(1), Id(2), "Synthetic draft")
-			.unwrap();
-		safety.block(); // History cleanup does not prohibit application settings.
-		assert!(matches!(
-			execute(
-				&mut store,
-				&safety,
-				Id(0),
-				0,
-				Operation::SaveReadingPreferences(value)
-			),
-			Outcome::ReadingPreferencesSaved(Ok(()))
-		));
-		assert!(matches!(execute(&mut store, &safety, Id(9), 0,
+		{
+			let safety = HistorySafety::default();
+			let mut store = Ok(LocalStore::open(std::path::Path::new(":memory:")).unwrap());
+			let value = model::ReadingPreferences {
+				zoom_percent: 125,
+				sidebar_width: 300,
+				show_members: false,
+				show_members_dms: false,
+				compact_messages: false,
+				animate_gifs: false,
+				smooth_scrolling: true,
+				scroll_speed_percent: 100,
+				hide_media_links: true,
+				confirm_external_links: true,
+			};
+			store
+				.as_mut()
+				.unwrap()
+				.save_draft(Id(1), Id(2), "Synthetic draft")
+				.unwrap();
+			safety.block(); // History cleanup does not prohibit application settings.
+			assert!(matches!(
+				execute(
+					&mut store,
+					&safety,
+					Id(0),
+					0,
+					Operation::SaveReadingPreferences(value)
+				),
+				Outcome::ReadingPreferencesSaved(Ok(()))
+			));
+			assert!(matches!(execute(&mut store, &safety, Id(9), 0,
             Operation::LoadReadingPreferences), Outcome::ReadingPreferences(Ok(stored)) if stored == value));
-		assert_eq!(
-			store.as_ref().unwrap().load_drafts(Id(1)).unwrap()[&Id(2)],
-			"Synthetic draft"
-		);
-		let mut unavailable = Err(StoreError::Unavailable);
-		assert!(matches!(
-			execute(
-				&mut unavailable,
-				&safety,
-				Id(0),
-				0,
-				Operation::LoadReadingPreferences
-			),
-			Outcome::ReadingPreferences(Err(StoreError::Unavailable))
-		));
-		assert!(matches!(
-			execute(
-				&mut unavailable,
-				&safety,
-				Id(0),
-				0,
-				Operation::SaveReadingPreferences(value)
-			),
-			Outcome::ReadingPreferencesSaved(Err(StoreError::Unavailable))
-		));
+			assert_eq!(
+				store.as_ref().unwrap().load_drafts(Id(1)).unwrap()[&Id(2)],
+				"Synthetic draft"
+			);
+			let mut unavailable = Err(StoreError::Unavailable);
+			assert!(matches!(
+				execute(
+					&mut unavailable,
+					&safety,
+					Id(0),
+					0,
+					Operation::LoadReadingPreferences
+				),
+				Outcome::ReadingPreferences(Err(StoreError::Unavailable))
+			));
+			assert!(matches!(
+				execute(
+					&mut unavailable,
+					&safety,
+					Id(0),
+					0,
+					Operation::SaveReadingPreferences(value)
+				),
+				Outcome::ReadingPreferencesSaved(Err(StoreError::Unavailable))
+			));
+		}
 	}
 
 	#[test]
@@ -917,6 +1044,7 @@ mod tests {
 				recipients: vec![],
 				last_message: None,
 				member_list_id: None,
+				tags: None,
 				message_count: None,
 			}],
 			..Default::default()

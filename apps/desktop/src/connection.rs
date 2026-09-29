@@ -5,7 +5,7 @@ use client_core::{
 use discord_api::DiscordApi;
 use eframe::egui;
 use std::{
-	collections::BTreeSet,
+	collections::{BTreeMap, BTreeSet},
 	sync::{
 		Arc, Mutex,
 		atomic::{AtomicU64, Ordering},
@@ -25,8 +25,15 @@ pub struct Connection {
 	pub typing: mpsc::Receiver<Envelope>,
 	pub terminal: watch::Receiver<Option<Failure>>,
 	pub share_activity: watch::Sender<bool>,
+	pub custom_rich_presence: watch::Sender<Option<extensions::CustomRichPresence>>,
 	pub own_presence: watch::Sender<model::OwnPresence>,
+	/// Local edits only. Seeding from Discord does not publish through this watch.
+	pub presence_edits: watch::Sender<Option<model::OwnPresence>>,
+	/// The status chosen for this connection, once Discord or the local fallback is known.
+	pub account_presence: watch::Receiver<Option<model::OwnPresence>>,
+	pub presence_error: watch::Receiver<Option<&'static str>>,
 	pub game_activity: watch::Receiver<crate::game_activity::Detection>,
+	pub spotify_activity: watch::Receiver<Option<discord_protocol::spotify::Activity>>,
 	/// A local Rich Presence client asked the client to show an invite: counter and code.
 	pub rpc_invite: watch::Receiver<Option<(u64, String)>>,
 	pub activity_observation: watch::Receiver<discord_gateway::ActivityObservation>,
@@ -56,6 +63,7 @@ impl Connection {
 		secret: Arc<SessionSecret>,
 		generation: u64,
 		expected_user: Option<model::Id>,
+		cached_presence: BTreeMap<model::Id, model::OwnPresence>,
 		ctx: egui::Context,
 	) -> Self {
 		let (commands, mut receive) = mpsc::channel(COMMAND_SLOTS);
@@ -64,8 +72,15 @@ impl Connection {
 		let (typing_send, typing) = mpsc::channel(8);
 		let (finished, terminal) = watch::channel(None);
 		let (share_activity, share_receive) = watch::channel(false);
+		let (custom_rich_presence, custom_receive) = watch::channel(None);
 		let (own_presence, presence_receive) = watch::channel(model::OwnPresence::default());
+		let (presence_edits, presence_edit_events) = watch::channel(None);
+		let (account_presence_send, account_presence) = watch::channel(None);
+		let (presence_error_send, presence_error) = watch::channel(None);
+		let presence_send = own_presence.clone();
 		let (game_report, game_activity) = watch::channel(Ok(None));
+		let (spotify_send, spotify_activity) = watch::channel(None);
+		let spotify_receive = spotify_activity.clone();
 		let (invite_send, rpc_invite) = watch::channel(None);
 		let (activity_observed, activity_observation) =
 			watch::channel(discord_gateway::ActivityObservation::Unconfirmed);
@@ -75,8 +90,11 @@ impl Connection {
 		let typing_channel = Arc::new(AtomicU64::new(0));
 		let active_typing = typing_channel.clone();
 		let typing_gate = Mutex::new(TypingGate::default());
+		let status_changed = Arc::new(tokio::sync::Notify::new());
+		let status_refresh = status_changed.clone();
 		let task=runtime.spawn(async move {
             let emit=move |event:Event| -> Result<(),Failure> {
+                if let Event::AccountSettings { status: true, .. } = &event { status_changed.notify_one(); }
                 if let Event::Typing(signal) = &event {
                     let active = active_typing.load(Ordering::Relaxed);
                     if !typing_gate.lock().is_ok_and(|mut gate| gate.accept(*signal, active, Instant::now())) { return Ok(()); }
@@ -89,13 +107,31 @@ impl Connection {
                 if expected_user.is_some_and(|id|id!=user.id){return Err(Failure::InvalidCredential);}
                 let gateway=api.gateway_url().await?;
                 let api=Arc::new(api);
+				let cached = cached_presence.get(&user.id).cloned().filter(|presence| presence.valid());
+				let account_presence_send = Arc::new(account_presence_send);
+				let _presence_edits = AbortTask(tokio::spawn(run_presence_sync(PresenceSync {
+					api: api.clone(),
+					edits: presence_edit_events,
+					remote_changed: status_refresh,
+					presence: presence_send.clone(),
+					account: account_presence_send.clone(),
+					note: presence_error_send,
+					finished: finished.clone(),
+					wake: wake.clone(),
+				})));
+				let chosen = resolve_account_presence(&api, &presence_send, cached).await;
+				if chosen.is_some() {
+					wake.request_repaint();
+				}
+				let _ = account_presence_send.send_replace(chosen);
                 let emit=Arc::new(emit);
                 let (member_send,member_receive)=watch::channel(None);
                 let (voice_send,voice_receive)=mpsc::channel(8);
 				let (activity_send,activity_receive)=watch::channel(None);
 				let (member_query_send, member_query_receive) = watch::channel([None, None]);
 				let _sharing_task=AbortTask(tokio::spawn(run_activity_sharing(api.clone(),share_receive.clone(),sharing_requests,sharing_report,finished.clone(),wake.clone())));
-				let _activity_task=AbortTask(tokio::spawn(crate::game_activity::run(share_receive,activity_send,game_report,invite_send,wake.clone(),user.clone(),api.clone())));
+				let _activity_task=AbortTask(tokio::spawn(crate::game_activity::run((share_receive,custom_receive),activity_send,game_report,invite_send,wake.clone(),user.clone(),api.clone())));
+				let _spotify_task=AbortTask(tokio::spawn(crate::spotify::run(api.clone(),user.id,presence_receive.clone(),spotify_send,wake.clone())));
                 let dm_channels=Arc::new(Mutex::new(BTreeSet::new()));
                 let gateway_channels=dm_channels.clone();
                 let (voice_online,mut voice_availability)=watch::channel(false);
@@ -103,10 +139,12 @@ impl Connection {
                 let gateway_wake=wake.clone();
                 let activity_wake=wake.clone();
                 let mut gateway_task=AbortTask(tokio::spawn(async move {
-                    let error=discord_gateway::run_with_activity(secret,gateway,member_receive,voice_receive,(activity_receive,presence_receive,member_query_receive),move |observation| {
+                    let error=discord_gateway::run_with_activity(secret,gateway,member_receive,voice_receive,(activity_receive,presence_receive,member_query_receive,spotify_receive),move |observation| {
                         if activity_observed.send_if_modified(|current| { if *current == observation { false } else { *current = observation; true } }) { activity_wake.request_repaint(); }
                         Ok(())
                     },|event|{
+                        if let Event::Interaction(client_core::interactions::Event::Session(session)) = event { return gateway_api.interaction_session(Some(session)); }
+                        if matches!(&event,Event::Disconnected|Event::Resync) { gateway_api.interaction_session(None)?; }
                         if let Some((ready_user,_,channels))=event.ready_navigation() {
                             if ready_user.id!=user.id {return Err(Failure::InvalidCredential);}
                             *gateway_channels.lock().map_err(|_|Failure::Protocol)?=channels.iter().filter(|c|private_call(c)).map(|c|c.id).collect();
@@ -132,16 +170,20 @@ impl Connection {
                 let mut writes=AbortTask(tokio::spawn(async move {
                     while let Some(command)=write_receive.recv().await {
                         let event=write_api.execute(command).await;
-                        let failure=match &event {Event::MessagingPermissions{result:Err(f),..}=>Some(*f),Event::ChannelAction(client_core::channel_actions::Event::Finished{result:Err(f),..})=>Some(*f),Event::ServerAdmin(client_core::server_admin::Event{result:Err(f),..})=>Some(*f),Event::ServerSettings(client_core::server_settings::Event{result:Err(f),..})=>Some(*f),Event::Failure(f)=>Some(*f),Event::ProfileEdited{result:Err(f),..} if *f != Failure::Capacity =>Some(*f),Event::Edited{result:Err(f),..}|Event::Pinned{result:Err(f),..}=>Some(*f),Event::GuildFolders(Err(f))=>Some(*f),Event::JoinInvite{result:Err(f),..}=>Some(*f),Event::SendResult{result:Err(f),..}=>Some(*f),Event::UserAction(client_core::user_actions::Event::Written{result:Err(f),..})=>Some(*f),Event::UserAction(client_core::user_actions::Event::DmOpened{result:Err(f),..})=>Some(*f),Event::ServerAction(client_core::server_actions::Event::Written{result:Err(f),..})=>Some(*f),Event::ServerAction(client_core::server_actions::Event::InviteSent{result:Err(f),..})=>Some(*f),Event::GroupAction(client_core::group_actions::Event::Written{result:Err(f),..})=>Some(*f),Event::Reactions(client_core::reactions::Event::Written{result:Err(f),..})=>Some(*f),Event::ReadState(client_core::read_state::Event::Result{result:Err(f),..})=>Some(*f),_=>None};
+                        let failure=match &event {Event::Interaction(client_core::interactions::Event::Submitted{result:Err(f),..})=>Some(*f),Event::MessagingPermissions{result:Err(f),..}=>Some(*f),Event::ChannelAction(client_core::channel_actions::Event::Finished{result:Err(f),..})=>Some(*f),Event::ServerAdmin(client_core::server_admin::Event{result:Err(f),..})=>Some(*f),Event::ServerSettings(client_core::server_settings::Event{result:Err(f),..})=>Some(*f),Event::Failure(f)=>Some(*f),Event::ProfileEdited{result:Err(f),..} if *f != Failure::Capacity =>Some(*f),Event::Edited{result:Err(f),..}|Event::Pinned{result:Err(f),..}=>Some(*f),Event::GuildFolders(Err(f))=>Some(*f),Event::JoinInvite{result:Err(f),..}|Event::GuildCreated{result:Err(f),..}=>Some(*f),Event::SendResult{result:Err(f),..}=>Some(*f),Event::UserAction(client_core::user_actions::Event::Written{result:Err(f),..})=>Some(*f),Event::UserAction(client_core::user_actions::Event::DmOpened{result:Err(f),..})=>Some(*f),Event::ServerAction(client_core::server_actions::Event::Written{result:Err(f),..})=>Some(*f),Event::ServerAction(client_core::server_actions::Event::InviteSent{result:Err(f),..})=>Some(*f),Event::GroupAction(client_core::group_actions::Event::Written{result:Err(f),..})=>Some(*f),Event::Reactions(client_core::reactions::Event::Written{result:Err(f),..})=>Some(*f),Event::ReadState(client_core::read_state::Event::Result{result:Err(f),..})=>Some(*f),_=>None};
                         let error=write_emit(event).err().or(failure.filter(|f|f.ends_session()));
                         if let Some(error)=error {write_api.stop();let _=write_finished.send(Some(error));write_wake.request_repaint();break;}
                     }
                 }));
                 let mut history:Option<AbortTask>=None;
                 let mut profile:Option<AbortTask>=None;
+				let mut stream_preview:Option<AbortTask>=None;
                 let mut invite:Option<AbortTask>=None;
                 let mut search:Option<AbortTask>=None;
                 let mut gifs:Option<AbortTask>=None;
+                let mut application_commands:Option<AbortTask>=None;
+                let mut sticker_packs:Option<AbortTask>=None;
+                let mut sticker_detail:Option<AbortTask>=None;
                 let mut reaction_read:Option<AbortTask>=None;
                 let mut ringing:Option<AbortTask>=None;
                 let mut upload:Option<AbortTask>=None;
@@ -152,14 +194,17 @@ impl Connection {
                         _=&mut gateway_task.0=>{break;}
                         _=&mut writes.0=>{break;}
                         changed=voice_availability.changed()=> {
-                            if changed.is_err() {break;}
-                            if !*voice_availability.borrow_and_update() {drop(ringing.take());drop(profile.take());drop(search.take());voice_request=None;if let Some(cancel)=&upload_cancel {let _=cancel.send(true);}}
+							if changed.is_err() {break;}
+							if !*voice_availability.borrow_and_update() {drop(ringing.take());drop(profile.take());drop(stream_preview.take());drop(search.take());voice_request=None;if let Some(cancel)=&upload_cancel {let _=cancel.send(true);}}
                         }
                         request=upload_receive.recv()=>{
                             let Some(request)=request else {break;};
                             if !*voice_availability.borrow() || upload.as_ref().is_some_and(|job|!job.0.is_finished()) {
-                                if let Command::Send{nonce,..}=request.command {
-                                    emit(Event::SendResult{nonce,result:Err(Failure::ProtocolAt("Upload unavailable; reselect the file to retry"))})?;
+                                match request.command {
+                                    Command::Interaction(request)=>emit(Event::Interaction(client_core::interactions::Event::Submitted{nonce:request.nonce,result:Err(Failure::ProtocolAt("Upload unavailable; reselect the file to retry"))}))?,
+                                    Command::Send{nonce,..}=>emit(Event::SendResult{nonce,result:Err(Failure::ProtocolAt("Upload unavailable; reselect the file to retry"))})?,
+                                    Command::CreatePost{parent,request,..}=>emit(Event::PostCreated{parent,request,result:Err(Failure::ProtocolAt("Upload unavailable; reselect the file to retry"))})?,
+                                    _=>{}
                                 }
                                 request.progress.send_replace(discord_api::upload::Status::Failed("Upload unavailable; reselect the file to retry"));
                                 continue;
@@ -177,7 +222,7 @@ impl Connection {
                                         changed=updates.changed(), if observing=>{observing=changed.is_ok();wake.request_repaint();}
                                     }
                                 };
-                                let failure=match &event {Event::SendResult{result:Err(f),..} if f.ends_session()=>Some(*f),_=>None};
+                                let failure=match &event {Event::Interaction(client_core::interactions::Event::Submitted{result:Err(f),..}) | Event::SendResult{result:Err(f),..} if f.ends_session()=>Some(*f),_=>None};
                                 let error=emit(event).err().or(failure);
                                 if let Some(error)=error {api.stop();let _=finished.send(Some(error));}
                                 wake.request_repaint();
@@ -187,6 +232,31 @@ impl Connection {
                             let Some(command)=command else {break;};
                             if matches!(command,Command::CancelSearch) {drop(search.take());continue;}
                             if matches!(command,Command::CancelGifs) {drop(gifs.take());continue;}
+                            if matches!(command,Command::ApplicationCommands{..}) {
+                                drop(application_commands.take());
+                                let api=api.clone();let emit=emit.clone();let finished=finished.clone();let wake=wake.clone();
+                                application_commands=Some(AbortTask(tokio::spawn(async move {
+                                    let event=api.execute(command).await;
+                                    let failure=match &event {Event::ApplicationCommands{result:Err(f),..} if f.ends_session() && *f!=Failure::Capacity=>Some(*f),_=>None};
+                                    let error=emit(event).err().or(failure);
+                                    if let Some(error)=error {api.stop();let _=finished.send(Some(error));}
+                                    wake.request_repaint();
+                                })));
+                                continue;
+                            }
+                            if matches!(command,Command::StickerPacks|Command::Sticker(_)) {
+                                let task=if matches!(command,Command::StickerPacks) {&mut sticker_packs} else {&mut sticker_detail};
+                                drop(task.take());
+                                let api=api.clone();let emit=emit.clone();let finished=finished.clone();let wake=wake.clone();
+                                *task=Some(AbortTask(tokio::spawn(async move {
+                                    let event=api.execute(command).await;
+                                    let failure=match &event {Event::StickerPacks(Err(f))|Event::Sticker{result:Err(f),..} if f.ends_session() && *f!=Failure::Capacity=>Some(*f),_=>None};
+                                    let error=emit(event).err().or(failure);
+                                    if let Some(error)=error {api.stop();let _=finished.send(Some(error));}
+                                    wake.request_repaint();
+                                })));
+                                continue;
+                            }
                             if matches!(command,Command::Gifs{..}) {
                                 drop(gifs.take());
                                 let api=api.clone();let emit=emit.clone();let finished=finished.clone();let wake=wake.clone();
@@ -302,6 +372,18 @@ impl Connection {
                                 continue;
                             }
                             if matches!(command,Command::CancelProfile) {drop(profile.take());continue;}
+							if matches!(command,Command::StreamPreview{..}) {
+								drop(stream_preview.take());
+								let api=api.clone();let emit=emit.clone();let finished=finished.clone();let wake=wake.clone();
+								stream_preview=Some(AbortTask(tokio::spawn(async move {
+									let event=api.execute(command).await;
+									let failure=stream_preview_session_failure(&event);
+									let error=emit(event).err().or(failure);
+									if let Some(error)=error {api.stop();let _=finished.send(Some(error));}
+									wake.request_repaint();
+								})));
+								continue;
+							}
                             if matches!(command,Command::Profile{..}) {
                                 drop(profile.take());
                                 let api=api.clone();let emit=emit.clone();let finished=finished.clone();let wake=wake.clone();
@@ -320,9 +402,9 @@ impl Connection {
                                 }
                                 continue;
                             }
-                            if let Command::Members {guild,channel,request,list_id,thread} = command {
+                            if let Command::Members {guild,channel,request,list_id,thread,ranges} = command {
                                 let subscription=match (guild,channel,list_id) {
-                                    (Some(guild),Some(channel),list_id) if thread || list_id.is_some() => Some(discord_gateway::MemberSubscription {guild,channel,request,thread,list_id:list_id.unwrap_or_default()}),
+                                    (Some(guild),Some(channel),list_id) if thread || list_id.is_some() => Some(discord_gateway::MemberSubscription {guild,channel,request,thread,list_id:list_id.unwrap_or_default(),ranges}),
                                     _=>None
                                 };
                                 member_send.send(subscription).map_err(|_|Failure::Network)?;
@@ -358,13 +440,156 @@ impl Connection {
 			terminal,
 			share_activity,
 			own_presence,
+			presence_edits,
+			account_presence,
+			presence_error,
 			game_activity,
+			custom_rich_presence,
+			spotify_activity,
 			rpc_invite,
 			activity_observation,
 			activity_sharing,
 			activity_sharing_request,
 			typing_channel,
 			task,
+		}
+	}
+}
+
+async fn resolve_account_presence(
+	api: &DiscordApi,
+	presence: &watch::Sender<model::OwnPresence>,
+	cached: Option<model::OwnPresence>,
+) -> Option<model::OwnPresence> {
+	let baseline = presence.borrow().clone();
+	let remote = tokio::time::timeout(Duration::from_secs(8), api.account_presence())
+		.await
+		.ok()
+		.and_then(Result::ok);
+	let edited = presence.borrow().clone() != baseline;
+	if !edited && (remote.is_some() || cached.is_some()) {
+		let chosen = remote.clone().or(cached.clone()).unwrap_or_default();
+		let _ = presence.send_if_modified(|slot| {
+			if *slot == baseline {
+				*slot = chosen;
+				true
+			} else {
+				false
+			}
+		});
+	}
+	let current = presence.borrow().clone();
+	(remote.is_some() || cached.is_some() || current != baseline).then_some(current)
+}
+
+struct PresenceSync {
+	api: Arc<DiscordApi>,
+	edits: watch::Receiver<Option<model::OwnPresence>>,
+	remote_changed: Arc<tokio::sync::Notify>,
+	presence: watch::Sender<model::OwnPresence>,
+	account: Arc<watch::Sender<Option<model::OwnPresence>>>,
+	note: watch::Sender<Option<&'static str>>,
+	finished: watch::Sender<Option<Failure>>,
+	wake: egui::Context,
+}
+
+/// Saves local status edits and adopts status changed on other devices, one request at a
+/// time so a remote echo never races a newer local edit. Unsaved edits retry with backoff.
+async fn run_presence_sync(sync: PresenceSync) {
+	const RETRY: [u64; 5] = [2, 5, 15, 30, 60];
+	let PresenceSync {
+		api,
+		mut edits,
+		remote_changed,
+		presence,
+		account,
+		note,
+		finished,
+		wake,
+	} = sync;
+	let mut pending: Option<model::OwnPresence> = None;
+	let mut failures = 0;
+	let stop = |failure: Failure| {
+		api.stop();
+		let _ = finished.send(Some(failure));
+		wake.request_repaint();
+	};
+	loop {
+		let retry = pending
+			.as_ref()
+			.map(|_| Duration::from_secs(RETRY[failures.min(RETRY.len() - 1)]));
+		let mut refresh = false;
+		tokio::select! {
+			changed = edits.changed() => {
+				if changed.is_err() {
+					return;
+				}
+				if let Some(next) = edits.borrow_and_update().clone().filter(model::OwnPresence::valid) {
+					// Always write: the account API compares against a fresh read, while a
+					// remembered "last saved" value goes stale once another device edits.
+					pending = Some(next);
+					failures = 0;
+				}
+			}
+			() = remote_changed.notified() => refresh = pending.is_none(),
+			() = tokio::time::sleep(retry.unwrap_or_default()), if retry.is_some() => {}
+		}
+		if let Some(next) = pending.clone() {
+			match api.set_account_presence(&next).await {
+				Ok(()) => {
+					pending = None;
+					failures = 0;
+					if note.send_replace(None).is_some() {
+						wake.request_repaint();
+					}
+				}
+				Err(failure) if failure.ends_session() => return stop(failure),
+				Err(_) => {
+					failures += 1;
+					if failures >= RETRY.len() {
+						// Give up until the next edit or a settings change from Discord.
+						pending = None;
+					}
+					let _ = note.send_replace(Some(
+						"Could not save status to Discord. Retrying; it stays on this device until Discord accepts it.",
+					));
+					wake.request_repaint();
+				}
+			}
+			continue;
+		}
+		if !refresh {
+			continue;
+		}
+		let remote =
+			match tokio::time::timeout(Duration::from_secs(8), api.account_presence()).await {
+				Ok(Ok(remote)) if remote.valid() => remote,
+				Ok(Err(failure)) if failure.ends_session() => return stop(failure),
+				// Keep the current status; the next change or reconnect reads again.
+				_ => continue,
+			};
+		// An edit made while reading is newer than what Discord returned.
+		if edits.has_changed().unwrap_or(true) {
+			continue;
+		}
+		let modified = presence.send_if_modified(|slot| {
+			let modified = *slot != remote;
+			if modified {
+				slot.clone_from(&remote);
+			}
+			modified
+		});
+		let adopted = account.send_if_modified(|slot| {
+			let modified = slot.as_ref() != Some(&remote);
+			if modified {
+				*slot = Some(remote);
+			}
+			modified
+		});
+		// Discord's value replaces any edit that was given up on.
+		let cleared = note.send_replace(None).is_some();
+		if modified || adopted || cleared {
+			wake.request_repaint();
 		}
 	}
 }
@@ -632,6 +857,18 @@ fn ring_action(
 	}
 }
 
+fn stream_preview_session_failure(event: &Event) -> Option<Failure> {
+	match event {
+		// An oversized optional still must not disconnect the account.
+		Event::StreamPreview { result: Err(f), .. }
+			if f.ends_session() && *f != Failure::Capacity =>
+		{
+			Some(*f)
+		}
+		_ => None,
+	}
+}
+
 // Reads can finish after navigation/cancellation. Only a session-ending failure is global.
 fn scope_history_failure(event: Event, channel: model::Id, request: u64) -> Event {
 	let failure = match event {
@@ -648,6 +885,28 @@ fn scope_history_failure(event: Event, channel: model::Id, request: u64) -> Even
 
 #[cfg(test)]
 mod tests {
+	#[test]
+	fn stream_preview_capacity_is_local_but_auth_failures_end_the_session() {
+		for (failure, expected) in [
+			(Failure::Capacity, None),
+			(Failure::Forbidden, None),
+			(Failure::Expired, Some(Failure::Expired)),
+			(Failure::Challenged, Some(Failure::Challenged)),
+			(Failure::InvalidCredential, Some(Failure::InvalidCredential)),
+		] {
+			assert_eq!(
+				stream_preview_session_failure(&Event::StreamPreview {
+					guild: model::Id(1),
+					channel: model::Id(2),
+					user: model::Id(3),
+					request: 4,
+					result: Err(failure),
+				}),
+				expected
+			);
+		}
+	}
+
 	#[tokio::test]
 	async fn activity_privacy_waits_for_opt_in_and_propagates_expired_session() {
 		let api = Arc::new(
@@ -705,6 +964,7 @@ mod tests {
 				kind: 0,
 				recipients: vec![],
 				member_list_id: None,
+				tags: None,
 				message_count: None,
 				last_message: None,
 			}),
@@ -728,6 +988,7 @@ mod tests {
 		let (mut ready, warnings) = envelope.navigation().unwrap();
 		let (guilds, channels) = ready.navigation().unwrap();
 		client_core::Startup {
+			external_stickers: false,
 			user: ready.user.into_model(),
 			guilds,
 			channels,

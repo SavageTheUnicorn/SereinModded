@@ -8,7 +8,7 @@ use discord_voice::{
 	audio::{Audio, Devices},
 };
 use eframe::egui;
-use model::Id;
+use model::{Id, notification_preferences::Sound};
 use std::{
 	sync::{Arc, OnceLock, mpsc},
 	time::{Duration, Instant},
@@ -76,6 +76,7 @@ struct Live {
 	user: Id,
 	peer: Option<Id>,
 	ring_pending: bool,
+	cues: CallCues,
 	session: Zeroizing<String>,
 	identity: Arc<discord_voice::Identity>,
 	audio: Audio,
@@ -91,20 +92,141 @@ struct Live {
 	camera_negotiated: bool,
 	camera_clock: Instant,
 	/// Latest decoded camera picture per remote user, replaced (never queued) by the decoder.
-	remote_video: Arc<std::sync::Mutex<Vec<(u64, egui::ColorImage)>>>,
+	remote_video: Arc<std::sync::Mutex<RemotePictures>>,
 	/// Decoded audio of a watched stream, mixed into this call's playback.
 	stream_audio: mpsc::SyncSender<discord_voice::Frame>,
 }
+
+#[derive(Default)]
+struct CallCues {
+	joined: bool,
+	peers: Option<[u64; voice::MAX_PARTICIPANTS]>,
+}
+impl CallCues {
+	fn poll(
+		&mut self,
+		ready: bool,
+		gateway_connected: bool,
+		owner: Id,
+		participants: &[voice::Participant],
+	) -> Option<Sound> {
+		let joined = !self.joined && ready;
+		self.joined |= ready;
+		if !self.joined {
+			return None;
+		}
+		let cue = joined.then_some(Sound::UserJoin);
+		if !gateway_connected {
+			self.peers = None;
+			return cue;
+		}
+		let mut peers = [0; voice::MAX_PARTICIPANTS];
+		for (slot, participant) in peers.iter_mut().zip(
+			participants
+				.iter()
+				.filter(|participant| participant.user != owner),
+		) {
+			*slot = participant.user.0;
+		}
+		// ponytail: membership scans are capped at 64 IDs; no per-frame set allocation.
+		let membership_cue = self.peers.replace(peers).and_then(|previous| {
+			if previous
+				.iter()
+				.any(|user| *user != 0 && !peers.contains(user))
+			{
+				Some(Sound::UserLeave)
+			} else {
+				peers
+					.iter()
+					.any(|user| *user != 0 && !previous.contains(user))
+					.then_some(Sound::UserJoin)
+			}
+		});
+		cue.or(membership_cue)
+	}
+}
 /// Remote cameras kept as textures at once; matches the transport's source limit.
 const MAX_REMOTE_VIDEO: usize = 16;
+type RemotePictures = Vec<(u64, Arc<egui::ColorImage>, bool)>;
+type CameraPicture = Option<(Arc<egui::ColorImage>, bool)>;
+
+#[allow(clippy::chunks_exact_to_as_chunks)] // Matches egui's faster profiled conversion loop.
+fn store_remote_frame(
+	pictures: &mut RemotePictures,
+	frame: discord_voice::RemoteFrame<'_>,
+) -> bool {
+	if frame.rgba.len() != frame.width as usize * frame.height as usize * 4 {
+		return false;
+	}
+	let entry = if let Some(index) = pictures.iter().position(|(user, _, _)| *user == frame.user) {
+		&mut pictures[index]
+	} else if pictures.len() < MAX_REMOTE_VIDEO {
+		pictures.push((frame.user, Arc::new(egui::ColorImage::default()), false));
+		pictures.last_mut().expect("remote frame inserted")
+	} else {
+		return false;
+	};
+	let size = [frame.width as usize, frame.height as usize];
+	if let Some(image) = Arc::get_mut(&mut entry.1) {
+		image.size = size;
+		image.source_size = egui::vec2(frame.width as f32, frame.height as f32);
+		image.pixels.clear();
+		image.pixels.extend(frame.rgba.chunks_exact(4).map(|pixel| {
+			egui::Color32::from_rgba_unmultiplied(pixel[0], pixel[1], pixel[2], pixel[3])
+		}));
+	} else {
+		entry.1 = Arc::new(egui::ColorImage::from_rgba_unmultiplied(size, frame.rgba));
+	}
+	entry.2 = true;
+	true
+}
+
+#[allow(clippy::chunks_exact_to_as_chunks)] // Matches egui's allocation fallback loop.
+fn store_camera_frame(picture: &mut CameraPicture, rgb: &[u8]) -> bool {
+	let size = [discord_voice::camera::WIDTH, discord_voice::camera::HEIGHT];
+	if rgb.len() != size[0] * size[1] * 3 {
+		return false;
+	}
+	let (image, dirty) =
+		picture.get_or_insert_with(|| (Arc::new(egui::ColorImage::default()), false));
+	if let Some(image) = Arc::get_mut(image) {
+		image.size = size;
+		image.source_size = egui::vec2(size[0] as f32, size[1] as f32);
+		image.pixels.clear();
+		image.pixels.extend(
+			rgb.chunks_exact(3)
+				.map(|pixel| egui::Color32::from_rgb(pixel[0], pixel[1], pixel[2])),
+		);
+	} else {
+		*image = Arc::new(egui::ColorImage::from_rgb(size, rgb));
+	}
+	*dirty = true;
+	true
+}
+
+struct MicPreview {
+	audio: Audio,
+	devices: Devices,
+	failure: Arc<OnceLock<&'static str>>,
+	started: Instant,
+}
+
+struct CameraTest {
+	camera: discord_voice::camera::Camera,
+	device: Option<String>,
+	picture: Arc<std::sync::Mutex<CameraPicture>>,
+}
+
 #[derive(Default)]
 pub struct Voice {
+	camera_test: Option<CameraTest>,
+	mic_preview: Option<MicPreview>,
 	screen: crate::screen::Screen,
 	watch: crate::watch::Watch,
 	camera: Option<discord_voice::camera::Camera>,
 	camera_device: Option<String>,
 	camera_generation: u64,
-	camera_preview: Option<std::sync::Arc<std::sync::Mutex<Option<egui::ColorImage>>>>,
+	camera_preview: Option<std::sync::Arc<std::sync::Mutex<CameraPicture>>>,
 	pending: Option<Pending>,
 	live: Option<Live>,
 	retiring: Option<mpsc::Receiver<()>>,
@@ -113,6 +235,8 @@ pub struct Voice {
 }
 impl Voice {
 	pub fn stop(&mut self) {
+		self.camera_test = None;
+		self.mic_preview = None;
 		self.screen.stop();
 		self.watch.stop();
 		self.pending = None;
@@ -151,6 +275,8 @@ impl Voice {
 		}
 	}
 	pub fn begin(&mut self, state: &State, ring: bool) -> Result<(), &'static str> {
+		self.camera_test = None;
+		self.mic_preview = None;
 		self.reap();
 		if self.retiring.is_some() {
 			return Err("Previous audio devices are still closing; try again shortly");
@@ -294,6 +420,10 @@ impl Voice {
 		ctx: &egui::Context,
 	) -> Option<Command> {
 		self.reap();
+		ui.voice_switch_ready =
+			self.pending.is_none() && self.live.is_none() && self.retiring.is_none();
+		self.poll_mic_preview(state, ui, ctx);
+		self.poll_camera_test(state, ui, ctx);
 		ui.voice_speaking.clear();
 		ui.voice_microphone_unavailable = false;
 		self.poll_camera_devices(state.demo, ui, ctx);
@@ -411,21 +541,31 @@ impl Voice {
 				) || call.server_muted
 				|| deafened || (ui.voice_push_to_talk && !ui.voice_ptt_active);
 			live.audio.set_controls(muted, deafened);
-			live.audio.set_noise_suppression(ui.voice_noise_suppression);
+			live.audio.set_processing(ui.voice_processing.effective());
 			live.audio.set_input_enabled(state.can_speak(call.channel));
 			live.audio
 				.set_gain(ui.voice_gain.input_percent, ui.voice_gain.output_percent);
 			let user_volumes = ui.voice_user_volumes();
+			let stream_volume = ui.voice_stream_volume();
+			let activity_threshold_db = ui
+				.voice_processing
+				.effective()
+				.sensitivity_db
+				.unwrap_or(-70);
 			live.controls.send_if_modified(|control| {
 				if control.muted == muted
 					&& control.deafened == deafened
 					&& control.user_volumes == user_volumes
+					&& control.stream_volume == stream_volume
+					&& control.activity_threshold_db == activity_threshold_db
 				{
 					false
 				} else {
 					control.muted = muted;
 					control.deafened = deafened;
 					control.user_volumes = user_volumes;
+					control.stream_volume = stream_volume;
+					control.activity_threshold_db = activity_threshold_db;
 					true
 				}
 			});
@@ -455,7 +595,7 @@ impl Voice {
 					}
 					Notice::WaitingForPeer => {
 						ui.voice_privacy_code = None;
-						live.audio.set_ready(false);
+						live.audio.set_ready(true);
 						live.device_deadline = None;
 						state.apply_voice(voice::Event::Progress {
 							channel: live.channel,
@@ -484,6 +624,10 @@ impl Voice {
 			failure = live.failure.get().copied();
 			let devices_ready = live.audio.is_ready();
 			ui.voice_microphone_unavailable = live.audio.microphone_unavailable();
+			if ui.voice_settings_open() {
+				ui.voice_preview_level = Some(live.audio.preview_level_db());
+				ctx.request_repaint_after(Duration::from_millis(50));
+			}
 			if failure.is_none() {
 				let pending = live
 					.audio
@@ -496,7 +640,11 @@ impl Voice {
 						state.apply_voice(voice::Event::Progress {
 							channel: live.channel,
 							request: live.request,
-							phase: Phase::OpeningAudio,
+							phase: if ui.voice_privacy_code.is_some() {
+								Phase::OpeningAudio
+							} else {
+								Phase::Waiting
+							},
 						});
 						ctx.request_repaint_after(remaining);
 					}
@@ -504,7 +652,7 @@ impl Voice {
 					Err(error) => failure = Some(error),
 				}
 			}
-			if failure.is_none() && devices_ready {
+			if failure.is_none() && devices_ready && ui.voice_privacy_code.is_some() {
 				state.apply_voice(voice::Event::Progress {
 					channel: live.channel,
 					request: live.request,
@@ -520,10 +668,35 @@ impl Voice {
 			}
 			// A worker can finish between draining notices and checking its lifecycle.
 			failure = live.failure.get().copied().or(failure);
+			if failure.is_none()
+				&& !state.demo
+				&& state.auth == client_core::auth::AuthState::Authenticated
+				&& let Some(call) = &state.voice.active
+			{
+				// Waiting alone still joins voice, but its audio devices may not be open yet.
+				let ready =
+					devices_ready && matches!(call.phase, Phase::Connected | Phase::Waiting);
+				if let Some(cue) = live.cues.poll(
+					ready,
+					state.gateway_connected,
+					live.user,
+					&call.participants,
+				) && ui.notification_options.allows(cue)
+				{
+					ui.notification_preview = Some(cue);
+					ctx.request_repaint();
+				}
+			}
 			let pictures = live
 				.remote_video
 				.try_lock()
-				.map(|mut slot| std::mem::take(&mut *slot))
+				.map(|mut slot| {
+					slot.iter_mut()
+						.filter_map(|(user, image, dirty)| {
+							std::mem::take(dirty).then(|| (*user, image.clone()))
+						})
+						.collect::<Vec<_>>()
+				})
 				.unwrap_or_default();
 			for (user, image) in pictures {
 				if let Some((_, texture)) = ui
@@ -557,11 +730,14 @@ impl Voice {
 				})
 				.unwrap_or_default();
 			ui.voice_remote_video.retain(|(id, _)| visible.contains(id));
+			if let Ok(mut pictures) = live.remote_video.try_lock() {
+				pictures.retain(|(id, _, _)| visible.contains(&Id(*id)));
+			}
 		}
 		if failure.is_none()
 			&& let Some(live) = &self.live
 			&& let Some(call) = &state.voice.active
-			&& call.phase == Phase::Connected
+			&& matches!(call.phase, Phase::Connected | Phase::Waiting)
 			&& !call.deafened
 			&& !call.server_deafened
 		{
@@ -612,6 +788,180 @@ impl Voice {
 		self.watch
 			.poll(runtime, state, ui, ctx, watched, stream_audio)
 	}
+	fn poll_mic_preview(&mut self, state: &State, ui: &mut ui::MessagingUi, ctx: &egui::Context) {
+		if state.demo
+			|| !ui.voice_available
+			|| !ui.voice_settings_open()
+			|| state.voice.active.is_some()
+			|| self.pending.is_some()
+			|| self.live.is_some()
+		{
+			ui.voice_preview_requested = false;
+			ui.voice_preview_status = "";
+		}
+		if !ui.voice_preview_requested {
+			if self.mic_preview.is_some() {
+				ui.voice_preview_status = "";
+			}
+			self.mic_preview = None;
+			ui.voice_preview_level = None;
+			return;
+		}
+		if self.mic_preview.is_none() {
+			let failure = Arc::new(OnceLock::new());
+			let worker_failure = failure.clone();
+			let wake = ctx.clone();
+			match Audio::preview(
+				Devices {
+					input: ui.voice_input.clone(),
+					output: ui.voice_output.clone(),
+				},
+				move |result| {
+					if let Err(error) = result {
+						let _ = worker_failure.set(error);
+					}
+					wake.request_repaint();
+				},
+			) {
+				Ok(audio) => {
+					self.mic_preview = Some(MicPreview {
+						audio,
+						devices: Devices {
+							input: ui.voice_input.clone(),
+							output: ui.voice_output.clone(),
+						},
+						failure,
+						started: Instant::now(),
+					})
+				}
+				Err(error) => {
+					ui.voice_preview_status = error;
+					ui.voice_preview_requested = false;
+					return;
+				}
+			}
+		}
+		let preview = self.mic_preview.as_mut().expect("preview started");
+		let devices = Devices {
+			input: ui.voice_input.clone(),
+			output: ui.voice_output.clone(),
+		};
+		if devices != preview.devices {
+			preview.audio.set_devices(devices.clone());
+			preview.devices = devices;
+			preview.started = Instant::now();
+		}
+		preview
+			.audio
+			.set_gain(ui.voice_gain.input_percent, ui.voice_gain.output_percent);
+		preview
+			.audio
+			.set_processing(ui.voice_processing.effective());
+		preview.audio.set_ready(true);
+		let error = preview.failure.get().copied().or_else(|| {
+			if preview.audio.is_stopped() {
+				Some("Microphone test stopped; try again.")
+			} else if !preview.audio.is_ready() && preview.started.elapsed() >= DEVICE_OPEN_TIMEOUT
+			{
+				Some(
+					"Audio devices did not open; check device selection and microphone permission.",
+				)
+			} else {
+				None
+			}
+		});
+		if let Some(error) = error {
+			ui.voice_preview_requested = false;
+			ui.voice_preview_level = None;
+			ui.voice_preview_status = error;
+			self.mic_preview = None;
+			return;
+		}
+		ui.voice_preview_level = Some(preview.audio.preview_level_db());
+		ui.voice_preview_status = if preview.audio.microphone_unavailable() {
+			"Microphone unavailable; check permission or choose another input. Retrying…"
+		} else if preview.audio.is_ready() {
+			"Playing your microphone through the selected speakers."
+		} else {
+			"Opening microphone and speakers…"
+		};
+		ctx.request_repaint_after(Duration::from_millis(50));
+	}
+
+	fn poll_camera_test(&mut self, state: &State, ui: &mut ui::MessagingUi, ctx: &egui::Context) {
+		ui.camera_test_available = !state.demo
+			&& ui.voice_available
+			&& discord_voice::camera::SUPPORTED
+			&& state.voice.active.is_none()
+			&& self.pending.is_none()
+			&& self.live.is_none();
+		if !ui.camera_test_available || !ui.voice_settings_open() {
+			ui.camera_test_requested = false;
+			ui.camera_test_status = "";
+		}
+		if let Some(preview) = &self.camera_test {
+			if preview.device != ui.voice_camera_device {
+				ui.camera_test_requested = false;
+				ui.camera_test_status = "Camera changed. Click Preview camera to use it.";
+			} else if let Some(error) = preview.camera.error() {
+				ui.camera_test_requested = false;
+				ui.camera_test_status = error;
+			}
+		}
+		if !ui.camera_test_requested {
+			self.camera_test = None;
+			ui.camera_test_texture = None;
+			return;
+		}
+		if self.camera_test.is_none() {
+			let picture = Arc::new(std::sync::Mutex::new(None));
+			let frames = picture.clone();
+			let wake = ctx.clone();
+			// No transport sender is captured: these frames can only reach the settings texture.
+			let on_frame = Arc::new(move |frame: discord_voice::camera::Frame| {
+				if let Ok(mut slot) = frames.try_lock()
+					&& store_camera_frame(&mut slot, &frame.rgb)
+				{
+					wake.request_repaint();
+				}
+			});
+			let wake = ctx.clone();
+			match discord_voice::camera::Camera::start(
+				ui.voice_camera_device.clone(),
+				on_frame,
+				Arc::new(move || wake.request_repaint()),
+			) {
+				Ok(camera) => {
+					self.camera_test = Some(CameraTest {
+						camera,
+						device: ui.voice_camera_device.clone(),
+						picture,
+					});
+					ui.camera_test_status = "Opening camera…";
+				}
+				Err(error) => {
+					ui.camera_test_requested = false;
+					ui.camera_test_status = error;
+					return;
+				}
+			}
+		}
+		let image = self.camera_test.as_ref().and_then(|preview| {
+			let mut slot = preview.picture.try_lock().ok()?;
+			let (image, dirty) = slot.as_mut()?;
+			std::mem::take(dirty).then(|| image.clone())
+		});
+		if let Some(image) = image {
+			if let Some(texture) = &mut ui.camera_test_texture {
+				texture.set(image, egui::TextureOptions::LINEAR);
+			} else {
+				ui.camera_test_texture =
+					Some(ctx.load_texture("settings-camera", image, egui::TextureOptions::LINEAR));
+			}
+			ui.camera_test_status = "Local camera preview · not shared";
+		}
+	}
+
 	fn poll_camera_devices(&mut self, demo: bool, ui: &mut ui::MessagingUi, ctx: &egui::Context) {
 		if demo {
 			ui.voice_refresh_cameras = false;
@@ -719,14 +1069,11 @@ impl Voice {
 					timestamp: (start.elapsed().as_micros() * 90 / 1000) as u32,
 					data,
 				});
-				let image = egui::ColorImage::from_rgb(
-					[discord_voice::camera::WIDTH, discord_voice::camera::HEIGHT],
-					&frame.rgb,
-				);
-				if let Ok(mut slot) = preview.try_lock() {
-					*slot = Some(image);
+				if let Ok(mut slot) = preview.try_lock()
+					&& store_camera_frame(&mut slot, &frame.rgb)
+				{
+					wake.request_repaint();
 				}
-				wake.request_repaint();
 			});
 			let wake = ctx.clone();
 			match discord_voice::camera::Camera::start(
@@ -748,16 +1095,22 @@ impl Voice {
 				}
 			}
 		}
-		let image = self
-			.camera_preview
-			.as_ref()
-			.and_then(|preview| preview.try_lock().ok()?.take());
+		let image = self.camera_preview.as_ref().and_then(|preview| {
+			let mut preview = preview.try_lock().ok()?;
+			let (image, dirty) = preview.as_mut()?;
+			std::mem::take(dirty).then(|| image.clone())
+		});
 		if let Some(image) = image {
 			if let Some(texture) = &mut ui.voice_camera_preview {
 				texture.set(image, egui::TextureOptions::LINEAR);
 			} else {
 				ui.voice_camera_preview =
 					Some(ctx.load_texture("local-camera", image, egui::TextureOptions::LINEAR));
+				let cue = model::notification_preferences::Sound::CameraOn;
+				if ui.notification_options.allows(cue) {
+					ui.notification_preview = Some(cue);
+					ctx.request_repaint();
+				}
 			}
 			ui.voice_camera_status = "Camera on · local preview";
 		}
@@ -803,35 +1156,32 @@ impl Voice {
 			},
 		)?;
 		let (controls, control_receive) = watch::channel(Controls {
+			activity_threshold_db: ui
+				.voice_processing
+				.effective()
+				.sensitivity_db
+				.unwrap_or(-70),
 			muted: listen_only || ui.voice_push_to_talk,
 			camera: 0,
 			deafened: false,
 			user_volumes: ui.voice_user_volumes(),
+			stream_volume: ui.voice_stream_volume(),
 		});
-		let remote_video: Arc<std::sync::Mutex<Vec<(u64, egui::ColorImage)>>> =
+		let remote_video: Arc<std::sync::Mutex<RemotePictures>> =
 			Arc::new(std::sync::Mutex::new(Vec::new()));
 		let pictures = remote_video.clone();
 		let picture_wake = ctx.clone();
 		let sink: discord_voice::VideoSink = Arc::new(move |frame: discord_voice::RemoteFrame| {
-			if frame.rgba.len() != frame.width as usize * frame.height as usize * 4 {
-				return;
+			if pictures
+				.lock()
+				.is_ok_and(|mut pictures| store_remote_frame(&mut pictures, frame))
+			{
+				picture_wake.request_repaint();
 			}
-			let image = egui::ColorImage::from_rgba_unmultiplied(
-				[frame.width as usize, frame.height as usize],
-				frame.rgba,
-			);
-			if let Ok(mut slot) = pictures.lock() {
-				if let Some(entry) = slot.iter_mut().find(|(user, _)| *user == frame.user) {
-					entry.1 = image;
-				} else if slot.len() < MAX_REMOTE_VIDEO {
-					slot.push((frame.user, image));
-				}
-			}
-			picture_wake.request_repaint();
 		});
 		audio.set_controls(listen_only || ui.voice_push_to_talk, false);
 		audio.set_input_enabled(input_enabled);
-		audio.set_noise_suppression(ui.voice_noise_suppression);
+		audio.set_processing(ui.voice_processing.effective());
 		audio.set_gain(ui.voice_gain.input_percent, ui.voice_gain.output_percent);
 		let session = pending.session.ok_or("Missing voice session")?;
 		let session_copy = Zeroizing::new(session.expose().to_owned());
@@ -907,6 +1257,7 @@ impl Voice {
 			session: session_copy,
 			identity,
 			ring_pending: pending.ring,
+			cues: CallCues::default(),
 			audio,
 			controls,
 			events,
@@ -940,9 +1291,210 @@ fn camera_preview_allowed(state: &State) -> bool {
 	})
 }
 
+/// Device-free check of preview rendering and the guards that prevent automatic capture.
+#[cfg(all(debug_assertions, feature = "demo"))]
+pub fn debug_mic_preview_check() {
+	ui::MessagingUi::debug_call_switch_check(test_support::existing_call_demo_state());
+	discord_voice::audio::debug_processing_check();
+	let ctx = egui::Context::default();
+	ui::design::apply(&ctx);
+	let mut state = test_support::demo_state();
+	let mut view = ui::MessagingUi::default();
+	view.voice_available = true;
+	view.preview_settings("voice");
+	assert!(view.voice_settings_open());
+	for (width, profile) in [
+		(480.0, model::voice_settings::InputProfile::VoiceIsolation),
+		(1120.0, model::voice_settings::InputProfile::Studio),
+		(1120.0, model::voice_settings::InputProfile::Custom),
+	] {
+		view.voice_processing.profile = profile;
+		for _ in 0..3 {
+			ctx.run_ui(
+				egui::RawInput {
+					screen_rect: Some(egui::Rect::from_min_size(
+						egui::Pos2::ZERO,
+						egui::vec2(width, 760.0),
+					)),
+					..Default::default()
+				},
+				|ui| {
+					let _ = view.show(ui, &mut state);
+				},
+			)
+			.drop_without_applying_deltas();
+		}
+	}
+	assert!(!view.voice_preview_requested);
+	assert!(!view.camera_test_requested);
+	let mut camera_host = Voice::default();
+	view.camera_test_requested = true;
+	camera_host.poll_camera_test(&state, &mut view, &ctx);
+	assert!(!view.camera_test_requested && camera_host.camera_test.is_none());
+	state.demo = false;
+	view.preview_settings("appearance");
+	view.camera_test_requested = true;
+	camera_host.poll_camera_test(&state, &mut view, &ctx);
+	assert!(!view.camera_test_requested && camera_host.camera_test.is_none());
+	state.demo = true;
+	view.preview_settings("voice");
+	let legacy: local_store::AppPreferences =
+		serde_json::from_str(r#"{"voice_noise_suppression":true}"#).unwrap();
+	let mut preferences = crate::app_settings::Settings {
+		current: legacy,
+		..Default::default()
+	};
+	preferences.apply(&mut view);
+	assert_eq!(
+		view.voice_processing.effective().suppression,
+		model::voice_settings::NoiseSuppression::RnNoise
+	);
+	view.voice_processing.custom.sensitivity_db = Some(-63);
+	preferences.observe(&view);
+	let saved = serde_json::to_string(&preferences.current).unwrap();
+	let restored: local_store::AppPreferences = serde_json::from_str(&saved).unwrap();
+	assert_eq!(restored.voice_processing, Some(view.voice_processing));
+	assert!(restored.is_valid());
+	let mut voice = Voice::default();
+	view.voice_preview_requested = true;
+	voice.poll_mic_preview(&state, &mut view, &ctx);
+	assert!(!view.voice_preview_requested && voice.mic_preview.is_none());
+	state.demo = false;
+	view.preview_settings("appearance");
+	view.voice_preview_requested = true;
+	voice.poll_mic_preview(&state, &mut view, &ctx);
+	assert!(!view.voice_preview_requested && voice.mic_preview.is_none());
+	println!(
+		"Mic/camera preview debug check passed: settings render, opening settings never starts capture, demo and closed-page guards stop requests. No audio devices opened."
+	);
+}
+
+/// Offline cue selection check; no Discord connection or audio devices are opened.
+#[cfg(any(test, all(debug_assertions, feature = "demo")))]
+pub fn debug_call_cues_check() {
+	let participant = |id| voice::Participant {
+		user: Id(id),
+		muted: false,
+		deafened: false,
+		server_muted: false,
+		server_deafened: false,
+		video: false,
+		streaming: false,
+	};
+	let owner = participant(1);
+	let peer = participant(2);
+	let mut cues = CallCues::default();
+	assert_eq!(cues.poll(false, true, owner.user, &[owner, peer]), None);
+	assert_eq!(
+		cues.poll(true, true, owner.user, &[owner, peer]),
+		Some(Sound::UserJoin)
+	);
+	let mut muted_peer = peer;
+	muted_peer.muted = true;
+	assert_eq!(
+		cues.poll(true, true, owner.user, &[muted_peer, owner]),
+		None
+	);
+	// Device reopening and rekeying do not announce this same call again.
+	assert_eq!(cues.poll(false, true, owner.user, &[owner, peer]), None);
+	assert_eq!(cues.poll(true, true, owner.user, &[owner, peer]), None);
+	// Compare identities rather than counts; departures can themselves trigger rekeying.
+	let replacement = participant(3);
+	assert_eq!(
+		cues.poll(false, true, owner.user, &[owner, replacement]),
+		Some(Sound::UserLeave)
+	);
+	assert_eq!(
+		cues.poll(true, true, owner.user, &[owner, replacement]),
+		None
+	);
+	assert_eq!(cues.poll(false, false, owner.user, &[]), None);
+	assert_eq!(cues.poll(true, true, owner.user, &[owner]), None);
+	// A remote join is audible even while it rekeys media, and only once.
+	assert_eq!(
+		cues.poll(false, true, owner.user, &[owner, peer]),
+		Some(Sound::UserJoin)
+	);
+	assert_eq!(cues.poll(true, true, owner.user, &[peer, owner]), None);
+	assert_eq!(
+		cues.poll(true, true, owner.user, &[owner, muted_peer]),
+		None
+	);
+	assert_eq!(
+		cues.poll(true, true, owner.user, &[owner]),
+		Some(Sound::UserLeave)
+	);
+	assert_eq!(cues.poll(true, true, owner.user, &[owner]), None);
+	assert_eq!(
+		CallCues::default().poll(true, true, owner.user, &[owner]),
+		Some(Sound::UserJoin),
+		"a new explicitly started call has its own join cue"
+	);
+	println!(
+		"Call cue debug check passed: local/remote joins, departures, rekeying and reconnect suppression. No audio devices opened."
+	);
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn call_cues_track_joins_and_departures_without_reconnect_noise() {
+		debug_call_cues_check();
+	}
+
+	#[test]
+	fn optimization_remote_video_reuses_the_latest_frame_buffer() {
+		let mut pictures = Vec::new();
+		let rgba = [1, 2, 3, 255, 4, 5, 6, 255];
+		assert!(store_remote_frame(
+			&mut pictures,
+			discord_voice::RemoteFrame {
+				user: 7,
+				width: 2,
+				height: 1,
+				rgba: &rgba,
+			},
+		));
+		let pixels = pictures[0].1.pixels.as_ptr();
+		pictures[0].2 = false;
+		assert!(store_remote_frame(
+			&mut pictures,
+			discord_voice::RemoteFrame {
+				user: 7,
+				width: 2,
+				height: 1,
+				rgba: &rgba,
+			},
+		));
+		assert_eq!(pictures[0].1.pixels.as_ptr(), pixels);
+		assert!(pictures[0].2);
+		let upload = pictures[0].1.clone();
+		assert!(store_remote_frame(
+			&mut pictures,
+			discord_voice::RemoteFrame {
+				user: 7,
+				width: 1,
+				height: 1,
+				rgba: &rgba[..4],
+			},
+		));
+		assert!(!Arc::ptr_eq(&pictures[0].1, &upload));
+		assert_eq!(upload.size, [2, 1]);
+	}
+
+	#[test]
+	fn optimization_local_camera_reuses_the_latest_frame_buffer() {
+		let mut picture = None;
+		let rgb = vec![127; discord_voice::camera::WIDTH * discord_voice::camera::HEIGHT * 3];
+		assert!(store_camera_frame(&mut picture, &rgb));
+		let pixels = picture.as_ref().unwrap().0.pixels.as_ptr();
+		picture.as_mut().unwrap().1 = false;
+		assert!(store_camera_frame(&mut picture, &rgb));
+		assert_eq!(picture.as_ref().unwrap().0.pixels.as_ptr(), pixels);
+		assert!(picture.unwrap().1);
+	}
 
 	#[test]
 	#[allow(clippy::field_reassign_with_default)] // MessagingUi has private fields in another crate.

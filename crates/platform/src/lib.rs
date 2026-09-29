@@ -1,6 +1,7 @@
 //! Credential persistence and temporary owner-operated login/verification surfaces.
 pub mod badge;
 pub mod captcha;
+pub mod compositor;
 pub mod game_activity;
 pub mod hotkeys;
 pub mod notifications;
@@ -12,6 +13,7 @@ pub mod tray;
 pub mod video;
 #[cfg(target_os = "macos")]
 pub mod window;
+pub mod window_effects;
 use client_core::auth::{Failure, SessionSecret};
 pub use pointer::cursor_position;
 #[cfg(not(target_os = "linux"))]
@@ -32,9 +34,14 @@ pub use login_linux::LoginView;
 /// Logical height of the native header the desktop app draws above the login webview.
 pub const LOGIN_HEADER_HEIGHT: f32 = 56.0;
 const SERVICE: &str = "cz.viceverse.serein";
+#[cfg(not(feature = "development-data"))]
 const ACCOUNT: &str = "discord-session";
+#[cfg(feature = "development-data")]
+const ACCOUNT: &str = "discord-session.development";
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CredentialError {
+	/// No OS credential store exists (e.g. Linux without a Secret Service provider).
+	NoStore,
 	Unavailable,
 	Invalid,
 	TimedOut,
@@ -53,9 +60,40 @@ pub(crate) fn ensure_gtk_application_id() {
 	});
 }
 
+/// The entry restored on launch. Switching accounts rewrites it from the per-account entry.
 pub fn load_session() -> Result<Option<SessionSecret>, CredentialError> {
-	let entry = keyring::Entry::new(SERVICE, ACCOUNT).map_err(|_| CredentialError::Unavailable)?;
-	match entry.get_password() {
+	load_entry(ACCOUNT)
+}
+pub fn save_session(secret: &SessionSecret) -> Result<(), CredentialError> {
+	save_entry(ACCOUNT, secret)
+}
+pub fn forget_session() -> Result<(), CredentialError> {
+	forget_entry(ACCOUNT)
+}
+/// One entry per remembered account, so the switcher never keeps a second copy in memory.
+fn account_entry(account: model::Id) -> String {
+	format!("{ACCOUNT}.{account}")
+}
+pub fn load_account_session(account: model::Id) -> Result<Option<SessionSecret>, CredentialError> {
+	load_entry(&account_entry(account))
+}
+pub fn save_account_session(
+	account: model::Id,
+	secret: &SessionSecret,
+) -> Result<(), CredentialError> {
+	save_entry(&account_entry(account), secret)
+}
+pub fn forget_account_session(account: model::Id) -> Result<(), CredentialError> {
+	forget_entry(&account_entry(account))
+}
+fn entry(name: &str) -> Result<keyring::Entry, CredentialError> {
+	keyring::Entry::new(SERVICE, name).map_err(|error| match error {
+		keyring::Error::NoDefaultStore => CredentialError::NoStore,
+		_ => CredentialError::Unavailable,
+	})
+}
+fn load_entry(name: &str) -> Result<Option<SessionSecret>, CredentialError> {
+	match entry(name)?.get_password() {
 		Ok(value) => SessionSecret::from_owner_input(value)
 			.map(Some)
 			.map_err(|_| CredentialError::Invalid),
@@ -63,13 +101,13 @@ pub fn load_session() -> Result<Option<SessionSecret>, CredentialError> {
 		Err(_) => Err(CredentialError::Unavailable),
 	}
 }
-pub fn save_session(secret: &SessionSecret) -> Result<(), CredentialError> {
-	keyring::Entry::new(SERVICE, ACCOUNT)
-		.and_then(|entry| entry.set_password(secret.expose()))
+fn save_entry(name: &str, secret: &SessionSecret) -> Result<(), CredentialError> {
+	entry(name)?
+		.set_password(secret.expose())
 		.map_err(|_| CredentialError::Unavailable)
 }
-pub fn forget_session() -> Result<(), CredentialError> {
-	match keyring::Entry::new(SERVICE, ACCOUNT).and_then(|entry| entry.delete_credential()) {
+fn forget_entry(name: &str) -> Result<(), CredentialError> {
+	match entry(name)?.delete_credential() {
 		Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
 		Err(_) => Err(CredentialError::Unavailable),
 	}
@@ -82,6 +120,10 @@ fn discord_origin(value: &str) -> bool {
 			&& url.username().is_empty()
 			&& url.password().is_none()
 	})
+}
+#[cfg(any(not(target_os = "linux"), test))]
+fn login_navigation(value: &str) -> bool {
+	discord_origin(value) || captcha::hcaptcha_origin(value)
 }
 /// Receives only the account token used by THIS ephemeral, owner-operated login page.
 /// No browser-profile reads, password interception, console instructions, or QR exchange implementation.
@@ -112,7 +154,7 @@ impl LoginView {
 			.with_incognito(true)
 			.with_devtools(false)
 			.with_initialization_script_for_main_only(script, true)
-			.with_navigation_handler(|url| discord_origin(&url))
+			.with_navigation_handler(|url| login_navigation(&url))
 			.with_new_window_req_handler(|_, _| wry::NewWindowResponse::Deny)
 			.with_download_started_handler(|_, _| false)
 			.with_ipc_handler(move |request| {
@@ -165,6 +207,14 @@ fn bounds(parent: &winit::window::Window) -> wry::Rect {
 mod tests {
 	use super::*;
 	#[test]
+	fn credential_account_names_are_profile_scoped() {
+		#[cfg(feature = "development-data")]
+		assert_eq!(ACCOUNT, "discord-session.development");
+		#[cfg(not(feature = "development-data"))]
+		assert_eq!(ACCOUNT, "discord-session");
+		assert_eq!(account_entry(model::Id(7)), format!("{ACCOUNT}.7"));
+	}
+	#[test]
 	fn handoff_accepts_only_our_discord_origin() {
 		assert!(discord_origin("https://discord.com/login"));
 		for value in [
@@ -179,5 +229,11 @@ mod tests {
 		let script = include_str!("login-handoff.js");
 		assert!(!script.contains("localStorage"));
 		assert!(!script.contains("password"));
+
+		{
+			assert!(login_navigation("https://newassets.hcaptcha.com/captcha/"));
+			assert!(!login_navigation("http://hcaptcha.com/"));
+			assert!(!login_navigation("https://hcaptcha.com.evil.test/"));
+		}
 	}
 }

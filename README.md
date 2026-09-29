@@ -171,12 +171,12 @@ Download `serein-<version>-macOS-ARM64.zip` from [Releases](https://github.com/V
 - 💾 **Bounded Local Persistence:** Recent chat history, drafts, image previews, settings, and diagnostics are stored in an account-isolated, bounded local SQLite database. All local data is strictly cleared upon explicit logout.
 - 🎙️ **Voice Calls, Video & Screen Sharing:** Complete native voice engine with 1-to-1 and group DM calls, server voice channels, push-to-talk, Sonora AEC3 acoustic echo cancellation, RNNoise noise suppression, Opus codec, and DAVE v1 end-to-end encryption. Includes native screen capture (macOS ScreenCaptureKit, Windows Graphics Capture, Linux portal/PipeWire with VA-API/NVENC hardware encoding and software fallback; Linux native capture remains unverified) and incoming stream & camera video playback with hardware-accelerated decoding (VideoToolbox, VA-API, DirectX).
 - 🧵 **Forum Channels & Active Threads:** Browse forum channels, view posts sorted by recent activity, read message threads with unread indicators, and create new forum posts directly in-app.
-- ⚙️ **Server Administration Suite:** Full server management interface including Server Profiles (banners, icons, traits, descriptions), role editor with fine-grained permission matrix, paginated audit logs with action filters, invite manager with revocation, integrations and webhooks, and member moderation.
+- ⚙️ **Server Administration Suite:** Full server management interface including Server Profiles (banners, icons, traits, descriptions), custom sticker management, role editor with fine-grained permission matrix, paginated audit logs with action filters, invite manager with revocation, integrations and webhooks, and member moderation.
 - ✨ **GIF & Twemoji Picker:** Instant KLIPY GIF search with favorites and one-click sending, full Twemoji picker with search and quick-reactions, plus custom guild emojis.
 - 📎 **Multi-Attachment Batch Uploads:** Composer staging tray supporting multiple files of any type (PDF, ZIP, 3D STL, videos, audio, images) with file-type badges, thumbnails, size indicators, individual removal, and progress tracking.
 - 👤 **Native Profile Customization:** In-app profile editor for global display names, bios / about me, pronouns, and custom accent colors with real-time live preview cards.
 - 🎨 **Extensions & Theme Shop:** Git-backed plugin engine and community theme shop with preview cards, color preset toggles, permission verification, and a built-in deleted-message retention protector.
-- 🎬 **Rich Media & Video Player:** Inline video playback for MOV and MP4 attachments, interactive seekable voice message waveforms, right-click media save/copy context menus, and full-resolution image viewer modals.
+- 🎬 **Rich Media & Video Player:** Inline video playback for MOV, MP4, and WebM attachments where platform codecs are available, interactive seekable voice message waveforms, right-click media save/copy context menus, and full-resolution image viewer modals.
 - ⌨️ **Keybinds & Shortcuts:** Built-in keybind reference sheet styled with raised keycaps, quick edit (`Up`), quick delete (`Backspace`), and intuitive keyboard navigation.
 - 🎮 **Rich Presence & Game Detection:** Built-in Discord IPC and WebSocket RPC servers, plus executable-based detection of running games, showing live game activities in member rosters, DM lists, and user profiles, with opt-in system tray integration.
 
@@ -230,6 +230,12 @@ cargo run --locked --features demo -- --demo
 cargo run --locked
 ```
 
+Default source builds keep SQLite, image caches, extensions and game metadata in the OS-local
+`serein-development` directory, isolated from installed Serein data and safe from `cargo clean`.
+Set `SEREIN_DATA_DIR` to another absolute path when development copies need separate data roots;
+packaged builds use the normal `serein` directory when the variable is absent. Login tokens remain
+in the operating-system credential store under separate development and packaged-build entries.
+
 ### Workspace Commands
 
 ```sh
@@ -258,14 +264,14 @@ cargo xtask package
 | **Reactions & Emojis** | Implemented | Twemoji rendering, native reaction counts, eight-emoji quick picker, full emoji picker integration, custom guild emojis, and add/remove reaction controls |
 | **GIFs & Media Search** | Implemented | KLIPY GIF picker with search, favorites category, and one-click direct sending |
 | **User Mentions & Autocomplete** | Implemented | Clickable user mentions with interactive composer autocompletion and visual highlight styling |
-| **Media Previews & Video Player** | Implemented | Inline MOV and MP4 video playback, media copy/save context menus, inline image cards, embed cards, related embed image galleries, and full-resolution image viewer modals |
+| **Media Previews & Video Player** | Implemented | Inline MOV, MP4, and WebM playback where platform codecs are available; media copy/save context menus, inline image cards, embed cards, related embed image galleries, and full-resolution image viewer modals |
 | **File & Attachment Uploads** | Implemented | Multi-attachment batch staging with file-type badges (PDF, ZIP, STL, images), thumbnail previews, individual file removal, upload progress bar, and drag-and-drop |
 | **Voice Engine & Calls** | Implemented | 1-to-1/group DM calls & server channels, Opus codec, DAVE v1 E2EE, Sonora AEC3 acoustic echo cancellation, RNNoise suppression, push-to-talk (`V`), audio device selector |
 | **Voice Messages** | Implemented | Inline voice message playback with interactive waveforms and bounded streaming audio buffering |
 | **Screen Sharing & Video** | Implemented | Native screen capture (macOS ScreenCaptureKit, Windows Graphics Capture, Linux portal/PipeWire with VA-API/NVENC hardware encoding and software fallback; Linux native capture remains unverified), quality presets (720p/1080p, up to 60fps), and local camera/screen previews |
 | **Camera Video & Stream Viewing** | Implemented | Hardware-accelerated decoding (macOS VideoToolbox, Linux VA-API, Windows DXVA/D3D11) for incoming screen streams and camera video feeds |
 | **Threads & Forum Channels** | Implemented | Forum post listing, recent activity sorting, active thread browsing, and new forum post / thread creation |
-| **Server Administration** | Implemented | Server profile editor (banners, icons, traits), role management with permissions matrix, audit log viewer, invite tracking and revocation, integrations/webhooks, and member moderation |
+| **Server Administration** | Implemented | Server profile editor (banners, icons, traits), custom sticker upload/edit/delete, role management with permissions matrix, audit log viewer, invite tracking and revocation, integrations/webhooks, and member moderation |
 | **Extensions & Theme Shop** | Implemented | Git-backed plugins, community theme catalog with preview cards and color presets, permission prompt modals, and deleted-message protector |
 | **Keybinds & Shortcuts** | Implemented | In-app keybind cheat sheet with raised keycaps, quick edit (`Up`), quick delete (`Backspace`), and keyboard navigation hotkeys |
 | **Rich Presence & Game IPC** | Implemented | Discord IPC and WebSocket RPC servers plus running-game detection; displays activities in member rosters, DMs, and user profiles; opt-in system tray |
@@ -327,6 +333,8 @@ For full details, review the [Storage Policy](docs/storage-policy.md) and [Threa
 - [Voice Architecture & Procedure](docs/voice.md)
 - [Design Tokens & UI Styling](docs/design.md)
 - [Extensions & Plugin Architecture](docs/extensions.md)
+- [Extension SDK Creator Wiki](https://github.com/ViceVerse-cz/Serein/wiki)
+- [SDK Examples and Offline Authoring Guide](examples/extensions/README.md)
 - [Theme API Specification](docs/theme-api.md)
 - [Threat Model & Security](docs/threat-model.md)
 - [Third-Party Licenses & Notices](THIRD_PARTY_NOTICES.md)

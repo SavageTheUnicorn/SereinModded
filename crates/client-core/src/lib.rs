@@ -1,4 +1,5 @@
 //! Single UI-thread state owner. Adapters deliver generation-tagged typed events.
+pub mod application_commands;
 pub mod archives;
 pub mod auth;
 pub mod captcha;
@@ -6,17 +7,20 @@ pub mod channel_actions;
 pub mod fingerprint;
 pub mod forum;
 pub mod gifs;
+pub mod guild_creation;
 pub mod guild_folders;
 pub mod permissions;
+pub mod stickers;
 pub use permissions::ChannelAccess;
 #[cfg(test)]
 mod permissions_tests;
 
+mod forwarding;
+pub mod interactions;
 pub mod invites;
 pub mod member_search;
 pub mod message_actions;
 pub mod messaging_permissions;
-pub mod notification_settings;
 pub mod notifications;
 pub mod presence;
 pub mod profile;
@@ -34,13 +38,20 @@ pub mod server_audit_log;
 pub mod server_integrations;
 pub mod server_roles;
 pub mod server_settings;
+mod thread_starter;
 mod threads;
+mod trail;
+#[doc(hidden)]
+pub use trail::Trail;
 pub mod typing;
 pub mod user_actions;
+mod verification;
+mod view_revisions;
 pub mod voice;
 use model::*;
 use session_cache::Timeline;
 use std::collections::{BTreeMap, BTreeSet};
+use trail::Place;
 
 pub const MAX_DRAFT_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_CONTENT: usize = 2000;
@@ -54,15 +65,18 @@ pub const EVENT_SLOTS: usize = 8; // UI drain batch; reliable events share a 32 
 pub const COMMAND_SLOTS: usize = 16; // ordinary commands <=16 KiB; bulk DM settings <=33 KiB; channel edit <=128 KiB; group icon <=350 KiB
 
 pub enum Command {
+	StickerPacks,
+	Sticker(Id),
+	Interaction(interactions::Request),
+	ApplicationCommands {
+		channel: Id,
+		guild: Option<Id>,
+		request: u64,
+	},
 	MemberSearch(member_search::Request),
 	MessagingPermissions {
 		request: u64,
 		change: Option<model::messaging_permissions::Change>,
-	},
-	AccountNotificationSettings {
-		request: u64,
-		section: model::notification_settings::Section,
-		change: Option<model::notification_settings::Change>,
 	},
 	ChannelAction {
 		guild: Id,
@@ -88,7 +102,13 @@ pub enum Command {
 		request: u64,
 	},
 	/// None loads the current settings; Some saves the complete folder layout.
-	GuildFolders(Option<model::guild_folders::Settings>),
+	/// Load, or save `(loaded base, desired)` if Discord still has the base folders.
+	GuildFolders(
+		Option<(
+			model::guild_folders::Settings,
+			model::guild_folders::Settings,
+		)>,
+	),
 	GroupAction {
 		action: group_actions::Action,
 		request: u64,
@@ -100,11 +120,16 @@ pub enum Command {
 	UserAction {
 		action: user_actions::Action,
 		request: u64,
+		captcha: Option<Box<captcha::Retry>>,
 	},
 	JoinInvite {
 		code: String,
 		request: u64,
 		captcha: Option<Box<captcha::Retry>>,
+	},
+	CreateGuild {
+		request: guild_creation::Request,
+		sequence: u64,
 	},
 	Invite {
 		code: String,
@@ -114,6 +139,14 @@ pub enum Command {
 		guild: Id,
 		title: String,
 		content: String,
+		/// Forum tag IDs applied to the new post.
+		tags: Vec<Id>,
+		/// Filenames staged for the starter message, in selection order; empty sends text only.
+		attachments: Vec<String>,
+		request: u64,
+	},
+	ForumSummaries {
+		channels: Vec<Id>,
 		request: u64,
 	},
 	ForumPosts {
@@ -139,9 +172,16 @@ pub enum Command {
 		guild: Option<Id>,
 		query: String,
 		before: Option<Id>,
+		offset: u32,
 		request: u64,
 	},
 	CancelSearch,
+	/// The message the selected thread hangs off, read from its parent channel.
+	ThreadStarter {
+		thread: Id,
+		parent: Id,
+		request: u64,
+	},
 	Gifs {
 		query: Option<String>,
 		request: u64,
@@ -152,6 +192,8 @@ pub enum Command {
 		message: Id,
 		request: u64,
 		manual: bool,
+		/// Private mark-unread badge. `None` omits the field. Discord does not calculate it.
+		mention_count: Option<u32>,
 	},
 	MarkGuildRead {
 		guild: Id,
@@ -164,6 +206,12 @@ pub enum Command {
 		request: u64,
 	},
 	CancelProfile,
+	StreamPreview {
+		guild: Id,
+		channel: Id,
+		user: Id,
+		request: u64,
+	},
 	/// None loads the account's global profile; Some writes only explicitly changed fields.
 	EditProfile {
 		user: Id,
@@ -177,6 +225,7 @@ pub enum Command {
 		channel: Option<Id>,
 		request: u64,
 		list_id: Option<String>,
+		ranges: Vec<[usize; 2]>,
 	},
 	History {
 		channel: Id,
@@ -184,7 +233,15 @@ pub enum Command {
 		after: Option<Id>,
 		request: u64,
 	},
+	Forward {
+		source: Id,
+		message: Id,
+		guild: Option<Id>,
+		channel: Id,
+		nonce: String,
+	},
 	Send {
+		sticker: Option<Id>,
 		channel: Id,
 		content: String,
 		nonce: String,
@@ -208,6 +265,7 @@ pub enum Command {
 	},
 }
 pub struct Startup {
+	pub external_stickers: bool,
 	pub user: User,
 	pub guilds: Vec<Guild>,
 	pub channels: Vec<Channel>,
@@ -247,6 +305,7 @@ impl Startup {
 			bytes,
 		})
 	}
+	/// Bytes retained by this event for the bounded capacity budget.
 	pub fn bytes(&self) -> usize {
 		size_of::<Self>()
 			+ self.user.heap_bytes()
@@ -296,11 +355,16 @@ fn prepare_navigation(
 		|| guilds
 			.iter()
 			.any(|g| g.emojis.as_ref().is_some_and(|e| !valid_custom_emojis(e)))
-		|| guilds.iter().map(Guild::bytes).sum::<usize>()
-			+ channels.iter().map(Channel::bytes).sum::<usize>()
-			+ permissions.bytes()
-			+ spare_bytes
-			> model::account::MAX_BYTES
+		|| guilds.iter().any(|g| {
+			g.stickers.as_ref().is_some_and(|s| {
+				!valid_stickers(s, MAX_GUILD_STICKERS)
+					|| s.iter().any(|sticker| sticker.guild_id != Some(g.id))
+			})
+		}) || guilds.iter().map(Guild::bytes).sum::<usize>()
+		+ channels.iter().map(Channel::bytes).sum::<usize>()
+		+ permissions.bytes()
+		+ spare_bytes
+		> model::account::MAX_BYTES
 	{
 		return Err("Account navigation exceeds safe capacity");
 	}
@@ -331,20 +395,36 @@ fn prepare_navigation(
 	Ok(permission_state)
 }
 pub enum Event {
+	StickerEntitlement {
+		user: Id,
+		premium_type: Patch<u8>,
+	},
+	StickerPacks(Result<Vec<model::StickerPack>, auth::Failure>),
+	Sticker {
+		id: Id,
+		result: Result<model::Sticker, auth::Failure>,
+	},
+	GuildStickers {
+		guild: Id,
+		stickers: Vec<model::Sticker>,
+	},
+	Interaction(interactions::Event),
+	ApplicationCommands {
+		channel: Id,
+		request: u64,
+		result: Result<Vec<model::application_commands::Command>, auth::Failure>,
+	},
 	MemberSearch {
 		request: member_search::Request,
 		result: Result<Vec<Member>, auth::Failure>,
 	},
 	Startup(Box<PreparedStartup>),
 	StartupWarnings(model::account::Warnings),
+	/// Redacted decode cause preceding a session failure; schema paths only, never remote values.
+	FailureDetail(Box<str>),
 	MessagingPermissions {
 		request: u64,
 		result: Result<model::messaging_permissions::Snapshot, auth::Failure>,
-	},
-	SocialNotification(model::notification_settings::SocialNotification),
-	AccountNotificationSettings {
-		request: u64,
-		result: Result<model::notification_settings::Snapshot, auth::Failure>,
 	},
 	InviteChallenge {
 		request: u64,
@@ -358,7 +438,16 @@ pub enum Event {
 		result: Result<Id, auth::Failure>,
 	},
 	GuildJoined(Guild),
+	GuildCreated {
+		sequence: u64,
+		result: Result<Id, auth::Failure>,
+	},
 	GuildFolders(Result<model::guild_folders::Settings, auth::Failure>),
+	/// Discord says another session (or this one) changed account settings.
+	AccountSettings {
+		status: bool,
+		folders: bool,
+	},
 	UserAction(user_actions::Event),
 	ServerAction(server_actions::Event),
 	GroupAction(group_actions::Event),
@@ -376,6 +465,15 @@ pub enum Event {
 		parent: Id,
 		request: u64,
 		result: Result<model::archives::Page, auth::Failure>,
+	},
+	ThreadStarter {
+		thread: Id,
+		request: u64,
+		result: Result<Message, auth::Failure>,
+	},
+	ForumSummaries {
+		request: u64,
+		results: Vec<(Id, Result<model::forum::Summary, auth::Failure>)>,
 	},
 	ForumPosts {
 		parent: Id,
@@ -399,6 +497,13 @@ pub enum Event {
 		guild: Option<Id>,
 		request: u64,
 		result: Result<Box<UserProfile>, auth::Failure>,
+	},
+	StreamPreview {
+		guild: Id,
+		channel: Id,
+		user: Id,
+		request: u64,
+		result: Result<String, auth::Failure>,
 	},
 	ProfileEdited {
 		user: Id,
@@ -502,6 +607,7 @@ pub struct Envelope {
 	pub event: Event,
 }
 pub struct Pending {
+	pub sticker: Option<Sticker>,
 	pub channel: Id,
 	pub content: String,
 	/// Filenames of the files uploaded with this message, in send order.
@@ -512,18 +618,33 @@ pub struct Pending {
 }
 #[derive(Default)]
 pub struct NavigationIndex {
+	view_revisions: view_revisions::Revisions,
+	invalidations: std::cell::Cell<u64>,
 	bytes: std::cell::Cell<Option<(usize, usize, usize)>>,
 	channels: std::cell::RefCell<BTreeMap<Id, usize>>,
 	channel_stamp: std::cell::Cell<Option<(usize, usize)>>,
 	guilds: std::cell::RefCell<BTreeMap<Id, usize>>,
+	guild_stamp: std::cell::Cell<Option<(usize, usize)>>,
+}
+
+/// Where a text channel was left during this session.
+/// `message` is absent when the reader was on the live edge.
+#[derive(Clone, Copy)]
+pub struct ReadingCursor {
+	pub message: Option<Id>,
+	pub inset: f32,
 }
 
 pub struct State {
+	pub stickers: stickers::Stickers,
+	pub interactions: interactions::Interactions,
+	pub application_commands: application_commands::Catalog,
 	pub messaging_permissions: messaging_permissions::Settings,
-	pub notification_settings: notification_settings::Settings,
 	pub guild_folders: Option<model::guild_folders::Settings>,
 	pub folders_pending: bool,
 	pub folders_error: Option<&'static str>,
+	/// Discord reported a folder change since the last load.
+	pub folders_stale: bool,
 	pub user_actions: user_actions::Actions,
 	pub server_actions: server_actions::Actions,
 	pub channel_actions: channel_actions::Actions,
@@ -537,6 +658,7 @@ pub struct State {
 	pub posting: forum::Posting,
 	pub posts: forum::Posts,
 	pub archived_thread: Option<Id>,
+	pub thread_starter: thread_starter::Starter,
 	pub search: Option<search::SearchView>,
 	pub search_request: u64,
 	pub gifs: gifs::Gifs,
@@ -544,8 +666,12 @@ pub struct State {
 	pub pins_changed: Option<Id>,
 	pub message_actions: message_actions::MessageActions,
 	pub search_target: Option<Id>,
+	/// The next consumed `search_target` restores a saved inset instead of centering.
+	pub restore_scroll: bool,
 	/// The active range was fetched around a target, independently of its consumed scroll cue.
 	pub history_targeted: bool,
+	/// Session reading cursors. Missing means the channel has not been opened yet.
+	pub reading: Vec<(Id, ReadingCursor)>,
 	pub reply_deletions: ReplyDeletions,
 	pub read_state: read_state::ReadState,
 	pub startup_warnings: model::account::Warnings,
@@ -557,11 +683,13 @@ pub struct State {
 	pub own_profile: profile::OwnProfile,
 	pub invites: invites::Cache,
 	pub invite_join: invites::Join,
+	pub guild_creation: guild_creation::Creation,
 	pub voice: voice::State,
 	pub generation: u64,
 	pub auth: auth::AuthState,
 	pub user: Option<User>,
 	pub members: Option<MemberList>,
+	pub member_chunks: MemberChunks,
 	pub member_search: [member_search::View; 2],
 	pub member_search_nonce: u64,
 	pub direct_presences: Vec<MemberPresence>,
@@ -576,14 +704,22 @@ pub struct State {
 	#[doc(hidden)]
 	pub navigation_index: NavigationIndex,
 	pub selected: Option<Id>,
+	/// Session-local last opened direct or group message.
+	#[doc(hidden)]
+	pub last_viewed_dm: Option<Id>,
 	/// Session-local guild/channel ID pairs, oldest visit first; at most 16 KiB.
 	#[doc(hidden)]
 	pub last_viewed_channels: Vec<(Id, Id)>,
+	/// Session-local opened threads, newest first; at most 1,024 IDs / 8 KiB.
+	#[doc(hidden)]
+	pub last_viewed_threads: Vec<Id>,
 	pub timeline: Timeline,
 	pub preserve_deleted_messages: bool,
 	pub resident: resident::Windows,
 	pub freshness: Freshness,
 	pub status: &'static str,
+	/// User-copyable cause of the last session failure, cleared by the next READY.
+	pub failure_detail: Option<Box<str>>,
 	pub drafts: BTreeMap<Id, String>,
 	pub pending: Vec<Pending>,
 	pub reply: Option<Reply>,
@@ -598,15 +734,129 @@ pub struct State {
 	pub gateway_connected: bool,
 	pub revision: u64,
 	pub demo: bool,
+	#[doc(hidden)]
+	pub trail: Trail,
 }
+
+const MEMBER_CHUNK: usize = 100;
+const MEMBER_CACHE_BYTES: usize = 1024 * 1024;
+const MEMBER_CACHE_CHUNKS: usize = 32;
+
+/// Decoded member-list chunks for the open request. The gateway subscription stays on the
+/// viewport. This cache is what the sidebar paints when the user scrolls back.
+#[derive(Default)]
+pub struct MemberChunks {
+	request: u64,
+	viewport: usize,
+	anchor: Option<usize>,
+	chunks: BTreeMap<usize, Vec<Option<MemberSlot>>>,
+}
+
+impl MemberChunks {
+	fn clear(&mut self) {
+		*self = Self::default();
+	}
+
+	fn slot(&self, index: usize) -> Option<&MemberSlot> {
+		let start = (index / MEMBER_CHUNK) * MEMBER_CHUNK;
+		self.chunks.get(&start)?.get(index - start)?.as_ref()
+	}
+
+	fn occupied(&self) -> bool {
+		self.chunks
+			.values()
+			.any(|chunk| chunk.iter().any(|slot| slot.is_some()))
+	}
+
+	fn bytes(&self) -> usize {
+		self.chunks
+			.values()
+			.flat_map(|chunk| chunk.iter().flatten())
+			.map(MemberSlot::bytes)
+			.sum()
+	}
+
+	fn merge(&mut self, list: &MemberList) {
+		if !list.lazy {
+			return;
+		}
+		if self.request != list.request {
+			self.chunks.clear();
+			self.anchor = None;
+			self.request = list.request;
+		}
+		let pending_holes =
+			list.freshness != Freshness::Fresh && list.slots.iter().all(|slot| slot.is_none());
+		if !pending_holes {
+			if self.anchor.is_none() && list.slots.iter().any(|slot| slot.is_some()) {
+				self.anchor = Some((list.start / MEMBER_CHUNK) * MEMBER_CHUNK);
+			}
+			for (offset, slot) in list.slots.iter().enumerate() {
+				let absolute = list.start.saturating_add(offset);
+				let start = (absolute / MEMBER_CHUNK) * MEMBER_CHUNK;
+				let chunk = self
+					.chunks
+					.entry(start)
+					.or_insert_with(|| vec![None; MEMBER_CHUNK]);
+				let relative = absolute - start;
+				if relative < chunk.len() {
+					chunk[relative] = slot.clone();
+				}
+			}
+		}
+	}
+
+	fn look_at(&mut self, index: usize, ranges: &[[usize; 2]]) {
+		self.viewport = index;
+		self.evict(ranges);
+	}
+
+	fn evict(&mut self, ranges: &[[usize; 2]]) {
+		let anchor = self.anchor;
+		let protected = |start: usize| {
+			anchor == Some(start)
+				|| ranges
+					.iter()
+					.any(|[from, to]| start <= *to && start + MEMBER_CHUNK > *from)
+		};
+		let viewport_chunk = (self.viewport / MEMBER_CHUNK) * MEMBER_CHUNK;
+		while self.chunks.len() > MEMBER_CACHE_CHUNKS || self.bytes() > MEMBER_CACHE_BYTES {
+			let Some(victim) = self
+				.chunks
+				.keys()
+				.copied()
+				.filter(|start| !protected(*start))
+				.max_by_key(|start| start.abs_diff(viewport_chunk))
+			else {
+				break;
+			};
+			self.chunks.remove(&victim);
+		}
+	}
+}
+
+/// Result of a back/forward step that landed. `command` is the optional history fetch.
+pub struct NavStep {
+	pub command: Option<Command>,
+}
+
+enum Apply {
+	Opened(Option<Command>),
+	AlreadyHere,
+	Rejected(&'static str),
+}
+
 impl Default for State {
 	fn default() -> Self {
 		Self {
+			stickers: Default::default(),
+			interactions: Default::default(),
+			application_commands: Default::default(),
 			messaging_permissions: Default::default(),
-			notification_settings: Default::default(),
 			guild_folders: None,
 			folders_pending: false,
 			folders_error: None,
+			folders_stale: false,
 			user_actions: user_actions::Actions::default(),
 			server_actions: server_actions::Actions::default(),
 			channel_actions: channel_actions::Actions::default(),
@@ -620,13 +870,16 @@ impl Default for State {
 			posting: forum::Posting::default(),
 			posts: forum::Posts::default(),
 			archived_thread: None,
+			thread_starter: Default::default(),
 			search: None,
 			search_request: 0,
 			gifs: gifs::Gifs::default(),
 			pins_changed: None,
 			message_actions: Default::default(),
 			search_target: None,
+			restore_scroll: false,
 			history_targeted: false,
+			reading: Vec::new(),
 			reply_deletions: ReplyDeletions::default(),
 			read_state: read_state::ReadState::default(),
 			startup_warnings: Default::default(),
@@ -638,11 +891,13 @@ impl Default for State {
 			own_profile: Default::default(),
 			invites: Default::default(),
 			invite_join: Default::default(),
+			guild_creation: Default::default(),
 			voice: voice::State::default(),
 			generation: 1,
 			auth: auth::AuthState::Unauthenticated,
 			user: None,
 			members: None,
+			member_chunks: MemberChunks::default(),
 			member_search: Default::default(),
 			member_search_nonce: 0,
 			direct_presences: vec![],
@@ -654,12 +909,15 @@ impl Default for State {
 			channels: vec![],
 			navigation_index: NavigationIndex::default(),
 			selected: None,
+			last_viewed_dm: None,
 			last_viewed_channels: Vec::new(),
+			last_viewed_threads: Vec::new(),
 			timeline: Timeline::default(),
 			preserve_deleted_messages: false,
 			resident: resident::Windows::default(),
 			freshness: Freshness::Stale,
 			status: "Disconnected",
+			failure_detail: None,
 			drafts: BTreeMap::new(),
 			pending: vec![],
 			reply: None,
@@ -674,6 +932,7 @@ impl Default for State {
 			gateway_connected: false,
 			revision: 0,
 			demo: false,
+			trail: Trail::default(),
 		}
 	}
 }
@@ -707,7 +966,8 @@ impl State {
 	fn channel_stamp(&self) -> (usize, usize) {
 		(self.channels.as_ptr() as usize, self.channels.len())
 	}
-	fn channel_index(&self, id: Id) -> Option<usize> {
+	/// Index into the current channel slice; invalid after a navigation mutation.
+	pub fn channel_index(&self, id: Id) -> Option<usize> {
 		let stamp = self.channel_stamp();
 		if self.navigation_index.channel_stamp.get() == Some(stamp) {
 			let cached = self.navigation_index.channels.borrow().get(&id).copied();
@@ -736,18 +996,23 @@ impl State {
 	}
 	/// Call after replacing IDs or payloads directly in synthetic navigation vectors.
 	pub fn invalidate_navigation(&self) {
+		self.navigation_index
+			.invalidations
+			.set(self.navigation_index.invalidations.get().wrapping_add(1));
 		self.navigation_index.channel_stamp.set(None);
+		self.navigation_index.guild_stamp.set(None);
 		self.navigation_index.guilds.borrow_mut().clear();
 		self.navigation_index.bytes.set(None);
 	}
 
 	pub fn guild(&self, id: Id) -> Option<&Guild> {
-		let cached = self.navigation_index.guilds.borrow().get(&id).copied();
-		if let Some(guild) = cached
-			.and_then(|index| self.guilds.get(index))
-			.filter(|guild| guild.id == id)
-		{
-			return Some(guild);
+		let stamp = (self.guilds.as_ptr() as usize, self.guilds.len());
+		if self.navigation_index.guild_stamp.get() == Some(stamp) {
+			let cached = self.navigation_index.guilds.borrow().get(&id).copied();
+			if cached.is_none_or(|index| self.guilds.get(index).is_some_and(|guild| guild.id == id))
+			{
+				return cached.and_then(|index| self.guilds.get(index));
+			}
 		}
 		let mut index = self.navigation_index.guilds.borrow_mut();
 		*index = self
@@ -757,6 +1022,7 @@ impl State {
 			.enumerate()
 			.map(|(index, guild)| (guild.id, index))
 			.collect();
+		self.navigation_index.guild_stamp.set(Some(stamp));
 		index.get(&id).and_then(|index| self.guilds.get(*index))
 	}
 
@@ -782,6 +1048,7 @@ impl State {
 				.map(|p| {
 					p.content.capacity()
 						+ p.nonce.capacity()
+						+ p.sticker.as_ref().map_or(0, Sticker::heap_bytes)
 						+ p.attachments.iter().map(String::capacity).sum::<usize>()
 						+ p.attachments.capacity() * size_of::<String>()
 						+ size_of::<Pending>()
@@ -789,6 +1056,13 @@ impl State {
 				.sum::<usize>()
 	}
 	fn remember_channel(&mut self, channel: Id) {
+		if self
+			.channel(channel)
+			.is_some_and(|c| c.guild.is_none() && matches!(c.kind, 1 | 3))
+		{
+			self.last_viewed_dm = Some(channel);
+			return;
+		}
 		let Some(guild) = self.channel(channel).and_then(|c| c.guild) else {
 			return;
 		};
@@ -797,6 +1071,19 @@ impl State {
 			self.last_viewed_channels.remove(0);
 		}
 		self.last_viewed_channels.push((guild, channel));
+	}
+	/// Restores saved server visits (oldest first) behind the ones made this session.
+	pub fn seed_viewed_channels(&mut self, saved: &[(Id, Id)]) {
+		let room = MAX_VIEWED_SERVERS.saturating_sub(self.last_viewed_channels.len());
+		let mut fresh: Vec<_> = saved
+			.iter()
+			.rev()
+			.filter(|(guild, _)| !self.last_viewed_channels.iter().any(|(id, _)| id == guild))
+			.take(room)
+			.copied()
+			.collect();
+		fresh.reverse();
+		self.last_viewed_channels.splice(0..0, fresh);
 	}
 	pub fn select_guild(&mut self, guild: Id) -> Option<Command> {
 		self.guild(guild)?;
@@ -829,49 +1116,234 @@ impl State {
 		if self.selected == Some(channel) && self.freshness != Freshness::Unavailable {
 			return None;
 		}
+		match self.apply_channel(channel) {
+			Apply::Opened(command) => {
+				self.record(Place::Channel(channel));
+				command
+			}
+			Apply::AlreadyHere => None,
+			Apply::Rejected(status) => {
+				self.status = status;
+				None
+			}
+		}
+	}
+
+	fn record(&mut self, place: Place) {
+		if self.trail.is_empty() && !matches!(place, Place::Home) {
+			self.trail.visit(Place::Home);
+		}
+		self.trail.visit(place);
+	}
+
+	fn apply_channel(&mut self, channel: Id) -> Apply {
+		if self.selected == Some(channel) && self.freshness != Freshness::Unavailable {
+			return Apply::AlreadyHere;
+		}
 		if !self.channel(channel).is_some_and(navigable) {
-			self.status = "This channel kind is unsupported";
-			return None;
+			return Apply::Rejected("This channel kind is unsupported");
 		}
 		if !self.can_view(channel) {
-			self.status = "Channel permissions are unavailable or access was revoked";
-			return None;
+			return Apply::Rejected("Channel permissions are unavailable or access was revoked");
 		}
 		if let Some(previous) = self.selected {
 			self.remember_channel(previous);
 		}
 		self.remember_channel(channel);
+		if self
+			.channel(channel)
+			.is_some_and(|c| matches!(c.kind, 10..=12))
+		{
+			self.last_viewed_threads.retain(|id| *id != channel);
+			self.last_viewed_threads.truncate(1023);
+			self.last_viewed_threads.insert(0, channel);
+		}
 		self.retire_archived_thread(Some(channel));
 		self.typing.clear();
 		self.select_resident(channel);
 		self.history_targeted = false;
-		self.members = None;
+		if self.shared_member_list_id(channel).is_none() {
+			self.members = None;
+		}
 		self.member_search = Default::default();
 		self.selected = Some(channel);
 		self.clear_search();
+		self.reset_thread_starter();
 		self.search_target = None;
+		self.restore_scroll = false;
 		self.reactions.reset();
+		self.interactions.reset();
+		let scope = self.application_command_scope(channel);
+		self.application_commands.retain(scope);
 		self.older_exhausted = false;
 		self.reply = None;
 		self.revision += 1;
 		if self.channel(channel).is_some_and(|c| !c.supports_text()) {
 			self.cancel_history();
 			self.freshness = Freshness::Fresh;
+			return Apply::Opened(None);
+		}
+		if let Some(message) = self.reading(channel).and_then(|cursor| cursor.message) {
+			if self.timeline.get(message).is_some() && !self.timeline.is_deleted(message) {
+				self.cancel_history();
+				self.history_before = None;
+				self.history_targeted = false;
+				self.search_target = Some(message);
+				self.restore_scroll = true;
+				self.revision += 1;
+				if self.gateway_connected {
+					self.freshness = Freshness::Fresh;
+				}
+				return Apply::Opened(None);
+			}
+			if let Some(command) = self.open_scrolled_window(message) {
+				return Apply::Opened(Some(command));
+			}
+		}
+		Apply::Opened(Some(self.history(None)))
+	}
+
+	/// Return to the last available direct message, or Friends when none remains.
+	pub fn open_messages(&mut self) -> Option<Command> {
+		if let Some(channel) = self.last_viewed_dm.filter(|id| {
+			self.channel(*id)
+				.is_some_and(|c| c.guild.is_none() && matches!(c.kind, 1 | 3))
+				&& self.can_view(*id)
+		}) {
+			return self.select(channel);
+		}
+		self.open_home();
+		None
+	}
+
+	/// Open Friends / Home. Does not clear the timeline or emit a command.
+	pub fn open_home(&mut self) {
+		self.last_viewed_dm = None;
+		self.application_commands.clear();
+		self.selected = None;
+		self.record(Place::Home);
+	}
+
+	/// Land on Home because the open channel is gone.
+	pub fn arrived_home(&mut self) {
+		self.application_commands.clear();
+		if let Some(Place::Channel(id)) = self.trail.current()
+			&& self.selected == Some(id)
+		{
+			self.trail.drop_current();
+		}
+		self.selected = None;
+		self.record(Place::Home);
+	}
+
+	pub fn navigate_back(&mut self) -> Option<NavStep> {
+		self.navigate(true)
+	}
+
+	pub fn navigate_forward(&mut self) -> Option<NavStep> {
+		self.navigate(false)
+	}
+
+	fn navigate(&mut self, back: bool) -> Option<NavStep> {
+		let mut blocked = None;
+		loop {
+			let Some(place) = (if back {
+				self.trail.peek_back()
+			} else {
+				self.trail.peek_forward()
+			}) else {
+				if let Some(status) = blocked {
+					self.status = status;
+				}
+				return None;
+			};
+			let apply = match place {
+				Place::Home => {
+					self.application_commands.clear();
+					self.selected = None;
+					Apply::Opened(None)
+				}
+				Place::Channel(channel) => self.apply_channel(channel),
+			};
+			match apply {
+				Apply::Opened(command) => {
+					self.commit_nav(back);
+					return Some(NavStep { command });
+				}
+				Apply::AlreadyHere => {
+					self.commit_nav(back);
+					return Some(NavStep { command: None });
+				}
+				Apply::Rejected(status) => {
+					blocked = Some(status);
+					if back {
+						self.trail.drop_back();
+					} else {
+						self.trail.drop_forward();
+					}
+				}
+			}
+		}
+	}
+	fn commit_nav(&mut self, back: bool) {
+		if back {
+			self.trail.commit_back();
+		} else {
+			self.trail.commit_forward();
+		}
+	}
+
+	fn shared_member_list_id(&self, next: Id) -> Option<String> {
+		if self.freshness == Freshness::Unavailable {
 			return None;
 		}
-		let command = self.history(None);
-		Some(command)
+		let list = self.members.as_ref()?;
+		if list.channel == next || !list.lazy || list.freshness == Freshness::Unavailable {
+			return None;
+		}
+		let next_channel = self.channel(next)?.clone();
+		if next_channel.guild != list.guild || matches!(next_channel.kind, 10..=12) {
+			return None;
+		}
+		let next_id = self.member_list_id(&next_channel)?;
+		let current = self.channel(list.channel)?.clone();
+		self.member_list_id(&current)
+			.filter(|current| current == &next_id)
 	}
+
 	pub fn request_members(&mut self) -> Option<Command> {
 		let index = self.channel_index(self.selected?)?;
+		let channel_id = self.channels[index].id;
+		if let Some(list_id) = self.shared_member_list_id(channel_id) {
+			let (request, ranges, guild) = {
+				let list = self.members.as_mut()?;
+				list.channel = channel_id;
+				(list.request, list.ranges.clone(), list.guild)
+			};
+			return Some(Command::Members {
+				thread: false,
+				guild,
+				channel: Some(channel_id),
+				request,
+				list_id: Some(list_id),
+				ranges,
+			});
+		}
 		let channel = &self.channels[index];
 		self.member_request = self.member_request.wrapping_add(1);
+		self.member_chunks.clear();
 		if !self.can_view(channel.id) {
 			return None;
 		}
 		let thread = matches!(channel.kind, 10..=12);
 		let list_id = self.member_list_id(channel);
-		let rows = if channel.guild.is_none() && self.freshness != Freshness::Unavailable {
+		let lazy = channel.guild.is_some() && !thread;
+		let ranges = if lazy && list_id.is_some() && self.freshness != Freshness::Unavailable {
+			vec![[0, 99]]
+		} else {
+			vec![]
+		};
+		let slots = if channel.guild.is_none() && self.freshness != Freshness::Unavailable {
 			let mut users = channel.recipients.clone();
 			if let Some(user) = &self.user
 				&& !users.iter().any(|u| u.id == user.id)
@@ -881,14 +1353,15 @@ impl State {
 			users
 				.into_iter()
 				.map(|user| {
-					Some(Member {
+					Some(MemberSlot::Person(Member {
 						roles: vec![],
 						nick: None,
 						status: None,
 						custom_status: None,
 						activities: vec![],
+						clients: model::ClientPlatforms::default(),
 						user,
-					})
+					}))
 				})
 				.collect()
 		} else {
@@ -907,9 +1380,13 @@ impl State {
 			guild: channel.guild,
 			channel: channel.id,
 			request: self.member_request,
-			total: rows.len() as u64,
-			rows,
+			start: 0,
+			total: if lazy { 0 } else { slots.len() as u64 },
+			slots,
+			lazy,
 			freshness,
+			groups: vec![],
+			ranges: ranges.clone(),
 		});
 		let command = Command::Members {
 			thread,
@@ -919,12 +1396,14 @@ impl State {
 			channel: Some(channel.id),
 			request: self.member_request,
 			list_id,
+			ranges,
 		};
 		self.apply_direct_presence(&[]);
 		Some(command)
 	}
 	pub fn close_members(&mut self) -> Command {
 		self.member_request = self.member_request.wrapping_add(1);
+		self.member_chunks.clear();
 		self.members = None;
 		Command::Members {
 			thread: false,
@@ -932,10 +1411,113 @@ impl State {
 			channel: None,
 			request: self.member_request,
 			list_id: None,
+			ranges: vec![],
 		}
+	}
+	pub fn member_slot(&self, index: usize) -> Option<&MemberSlot> {
+		let list = self.members.as_ref()?;
+		if !list.lazy || self.member_chunks.request != list.request {
+			return None;
+		}
+		self.member_chunks.slot(index)
+	}
+	pub fn members_cached(&self) -> bool {
+		self.members.as_ref().is_some_and(|list| {
+			list.lazy && self.member_chunks.request == list.request && self.member_chunks.occupied()
+		})
+	}
+	pub fn focus_member_ranges(&mut self, first: usize, last: usize) -> Option<Command> {
+		let list = self.members.as_ref()?;
+		if !list.lazy
+			|| Some(list.channel) != self.selected
+			|| list.freshness == Freshness::Unavailable
+			|| !self.can_view(list.channel)
+			|| self.freshness == Freshness::Unavailable
+		{
+			return None;
+		}
+		let index = self.channel_index(list.channel)?;
+		let channel = &self.channels[index];
+		if channel.guild.is_none() || matches!(channel.kind, 10..=12) {
+			return None;
+		}
+		let list_id = self.member_list_id(channel)?;
+		let max_idx = if list.total > 0 {
+			(list.total as usize).saturating_sub(1)
+		} else {
+			0
+		};
+		let first = first.min(max_idx);
+		let last = last.min(max_idx).max(first);
+		let chunk = |i: usize| -> [usize; 2] {
+			let start = (i / 100) * 100;
+			[start, start + 99]
+		};
+		let mut ranges = vec![chunk(first)];
+		let last_chunk = chunk(last);
+		if last_chunk != ranges[0] {
+			if last_chunk[0] > ranges[0][1].saturating_add(1) {
+				let start = last_chunk[0] - 100;
+				ranges = vec![[start, start + 99], last_chunk];
+			} else {
+				ranges.push(last_chunk);
+			}
+		}
+		let unchanged = ranges == list.ranges;
+		if unchanged {
+			self.member_chunks.look_at(first, &ranges);
+			return None;
+		}
+		let request = list.request;
+		let guild = list.guild;
+		let channel_id = list.channel;
+		self.members.as_mut()?.ranges = ranges.clone();
+		self.member_chunks.look_at(first, &ranges);
+		Some(Command::Members {
+			thread: false,
+			guild,
+			channel: Some(channel_id),
+			request,
+			list_id: Some(list_id),
+			ranges,
+		})
 	}
 	pub fn history(&mut self, before: Option<Id>) -> Command {
 		self.history_range(before, None)
+	}
+	fn open_scrolled_window(&mut self, message: Id) -> Option<Command> {
+		if message.0 <= 1 || self.timeline.is_deleted(message) {
+			return None;
+		}
+		let after = Id(message.0 - 1);
+		self.timeline.clear_window_preserving_deletions();
+		self.newer_cursor = None;
+		self.newer_may_have_more = false;
+		self.revision += 1;
+		let command = self.history_range(None, Some(after));
+		self.timeline.begin_page(false);
+		self.history_targeted = true;
+		self.search_target = Some(message);
+		self.restore_scroll = true;
+		self.enforce_resident_budget();
+		Some(command)
+	}
+	const MAX_READING_CURSORS: usize = 64;
+	pub fn reading(&self, channel: Id) -> Option<ReadingCursor> {
+		self.reading
+			.iter()
+			.find(|(id, _)| *id == channel)
+			.map(|(_, cursor)| *cursor)
+	}
+	pub fn remember_reading(&mut self, channel: Id, cursor: ReadingCursor) {
+		if channel.0 == 0 {
+			return;
+		}
+		self.reading.retain(|(id, _)| *id != channel);
+		self.reading.push((channel, cursor));
+		if self.reading.len() > Self::MAX_READING_CURSORS {
+			self.reading.remove(0);
+		}
 	}
 	fn history_range(&mut self, before: Option<Id>, after: Option<Id>) -> Command {
 		self.typing.clear();
@@ -951,7 +1533,7 @@ impl State {
 				.iter()
 				.any(|channel| channel.id == *id && channel.supports_text())
 		}) else {
-			self.selected = None;
+			self.arrived_home();
 			self.search_target = None;
 			self.reply = None;
 			self.invalidate_members();
@@ -1018,11 +1600,54 @@ impl State {
 	pub fn prepare_send(&mut self) -> Option<Command> {
 		self.prepare_send_with_attachment(None)
 	}
+	/// Queue explicit text without consuming the composer draft or reply target.
+	pub fn prepare_text_send(&mut self, content: &str) -> Option<Command> {
+		self.prepare_message_content(&[], None, true, Some(content), None)
+	}
+	/// Queue an explicit reply without consuming the composer draft or its reply target.
+	pub fn prepare_reply_send(
+		&mut self,
+		target: Id,
+		content: &str,
+		mention: bool,
+	) -> Option<Command> {
+		let channel = self.selected?;
+		let message = self.timeline.get(target)?;
+		if message.channel != channel || message.ephemeral || !self.accepts_reply_source(message) {
+			self.status = "This message is unavailable for replies";
+			return None;
+		}
+		let mut reply = Reply::to(target);
+		reply.mention = mention;
+		self.prepare_message_content(&[], None, true, Some(content), Some(reply))
+	}
 	pub fn prepare_send_with_attachment(&mut self, filename: Option<&str>) -> Option<Command> {
 		self.prepare_send_with_attachments(filename.as_slice())
 	}
 	/// Queue the draft with up to ten attachment filenames; an empty slice sends text only.
 	pub fn prepare_send_with_attachments(&mut self, filenames: &[&str]) -> Option<Command> {
+		self.prepare_message(filenames, None, false)
+	}
+	/// Send selected artwork without consuming the text draft.
+	pub fn prepare_image_send(&mut self, filename: &str) -> Option<Command> {
+		self.prepare_message(&[filename], None, true)
+	}
+	pub(crate) fn prepare_message(
+		&mut self,
+		filenames: &[&str],
+		sticker: Option<&Sticker>,
+		preserve_draft: bool,
+	) -> Option<Command> {
+		self.prepare_message_content(filenames, sticker, preserve_draft, None, None)
+	}
+	fn prepare_message_content(
+		&mut self,
+		filenames: &[&str],
+		sticker: Option<&Sticker>,
+		preserve_draft: bool,
+		explicit_content: Option<&str>,
+		explicit_reply: Option<Reply>,
+	) -> Option<Command> {
 		let channel = self.selected?;
 		if !self.can_send(channel) || (!filenames.is_empty() && !self.can_attach(channel)) {
 			self.status = "Sending is unavailable with the current connection or permissions";
@@ -1043,8 +1668,14 @@ impl State {
 			self.status = "Attachment filename is invalid or too long";
 			return None;
 		}
-		let content = self.drafts.get(&channel).map_or("", String::as_str);
-		if (content.trim().is_empty() && filenames.is_empty())
+		let content = if let Some(content) = explicit_content {
+			content
+		} else if sticker.is_some() || preserve_draft {
+			""
+		} else {
+			self.drafts.get(&channel).map_or("", String::as_str)
+		};
+		if (content.trim().is_empty() && filenames.is_empty() && sticker.is_none())
 			|| content.chars().count() > MAX_CONTENT
 			|| self.pending.len() >= 64
 			|| self.draft_bytes()
@@ -1054,6 +1685,7 @@ impl State {
 					.map(|name| name.len() + size_of::<String>())
 					.sum::<usize>()
 				+ size_of::<Pending>()
+				+ sticker.map_or(0, Sticker::heap_bytes)
 				+ 32 > MAX_DRAFT_BYTES
 		{
 			self.status = "Send exceeds the session input budget";
@@ -1067,6 +1699,7 @@ impl State {
 			.as_millis();
 		let nonce = fingerprint::nonce(epoch, self.send_sequence);
 		self.pending.push(Pending {
+			sticker: sticker.cloned(),
 			channel,
 			content: content.clone(),
 			attachments: filenames.iter().map(|name| (*name).to_owned()).collect(),
@@ -1074,16 +1707,56 @@ impl State {
 			delivery: Delivery::Sending,
 			confirmed: None,
 		});
-		self.drafts.remove(&channel);
+		if sticker.is_none() && !preserve_draft {
+			self.drafts.remove(&channel);
+		}
 		self.search_target = None;
 		Some(Command::Send {
+			sticker: sticker.map(|s| s.id),
 			channel,
 			content,
 			nonce,
-			reply: self.reply.take(),
+			reply: match (explicit_reply, explicit_content) {
+				(Some(reply), _) => Some(reply),
+				(None, None) => self.reply.take(),
+				(None, Some(_)) => None,
+			},
 		})
 	}
+	/// Reports a command the transport could not accept as a bounded outcome error.
 	pub fn command_rejected(&mut self, command: Command) {
+		match &command {
+			Command::ApplicationCommands {
+				channel, request, ..
+			} => {
+				self.apply_application_commands(
+					*channel,
+					*request,
+					Err(auth::Failure::ProtocolAt(
+						"Application commands were not queued; try again",
+					)),
+				);
+				return;
+			}
+			Command::StickerPacks => {
+				self.stickers.loading = false;
+				self.stickers.error = Some("Sticker packs were not queued; try again");
+				return;
+			}
+			Command::Sticker(_) => {
+				self.stickers.detail_loading = None;
+				self.stickers.detail_error = Some("Sticker details were not queued; try again");
+				return;
+			}
+			_ => {}
+		}
+		if let Command::Interaction(request) = command {
+			let _ = self.apply_interaction(interactions::Event::Submitted {
+				nonce: request.nonce,
+				result: Err(auth::Failure::Network),
+			});
+			return;
+		}
 		if let Command::MemberSearch(request) = command {
 			self.searched_members(
 				request,
@@ -1096,15 +1769,6 @@ impl State {
 				request,
 				Err(auth::Failure::ProtocolAt(
 					"Messaging permissions were not queued; try again",
-				)),
-			);
-			return;
-		}
-		if let Command::AccountNotificationSettings { request, .. } = command {
-			self.apply_account_notification_settings(
-				request,
-				Err(auth::Failure::ProtocolAt(
-					"Notification settings were not queued; try again",
 				)),
 			);
 			return;
@@ -1194,7 +1858,10 @@ impl State {
 			});
 			return;
 		}
-		if let Command::UserAction { action, request } = command {
+		if let Command::UserAction {
+			action, request, ..
+		} = command
+		{
 			let _ = self.apply_user_action(user_actions::Event::Written {
 				action,
 				request,
@@ -1216,6 +1883,23 @@ impl State {
 		} = command
 		{
 			self.apply_archives(parent, request, Err(auth::Failure::Capacity));
+			return;
+		}
+		if let Command::ThreadStarter {
+			thread, request, ..
+		} = command
+		{
+			self.apply_thread_starter(thread, request, Err(auth::Failure::Capacity));
+			return;
+		}
+		if let Command::ForumSummaries { channels, request } = command {
+			self.apply_forum_summaries(
+				request,
+				channels
+					.into_iter()
+					.map(|channel| (channel, Err(auth::Failure::Capacity)))
+					.collect(),
+			);
 			return;
 		}
 		if let Command::ForumPosts {
@@ -1345,6 +2029,15 @@ impl State {
 			);
 			return;
 		}
+		if let Command::CreateGuild { sequence, .. } = command {
+			self.apply_guild_created(
+				sequence,
+				Err(auth::Failure::ProtocolAt(
+					"Server creation was not queued; check Discord before retrying",
+				)),
+			);
+			return;
+		}
 		if let Command::Invite { code } = command {
 			self.apply_invite(code, Err(auth::Failure::Capacity));
 			return;
@@ -1359,6 +2052,16 @@ impl State {
 			return;
 		}
 		if matches!(command, Command::CancelProfile) {
+			return;
+		}
+		if let Command::StreamPreview {
+			guild,
+			channel,
+			user,
+			request,
+		} = command
+		{
+			self.apply_stream_preview(guild, channel, user, request, Err(auth::Failure::Capacity));
 			return;
 		}
 
@@ -1397,7 +2100,7 @@ impl State {
 		if matches!(&command, Command::History { request, .. } if *request == self.request) {
 			self.cancel_history();
 		}
-		if let Command::Send { nonce, .. } = command {
+		if let Command::Send { nonce, .. } | Command::Forward { nonce, .. } = command {
 			self.apply(Envelope {
 				generation: self.generation,
 				event: Event::SendResult {
@@ -1424,6 +2127,9 @@ impl State {
 		if envelope.generation != self.generation {
 			return;
 		}
+		if self.handle_private_message_event(&envelope.event) {
+			return;
+		}
 		if let Event::Startup(startup) = envelope.event {
 			if startup.bytes() > model::account::MAX_BYTES {
 				self.auth = auth::AuthState::Failed;
@@ -1436,6 +2142,7 @@ impl State {
 				..
 			} = *startup;
 			let Startup {
+				external_stickers,
 				user,
 				guilds,
 				channels,
@@ -1460,6 +2167,7 @@ impl State {
 			if self.auth != auth::AuthState::Authenticated {
 				return;
 			}
+			self.stickers.external_allowed = external_stickers;
 			warnings.read_state |= self.apply_read_state(read_state).is_err();
 			if let Some(settings) = notifications {
 				warnings.notifications |= self.apply_notification_preferences(settings).is_err();
@@ -1474,6 +2182,7 @@ impl State {
 		}
 		if matches!(envelope.event, Event::Ready { .. } | Event::Resync) {
 			self.startup_warnings = Default::default();
+			self.failure_detail = None;
 		}
 		if matches!(envelope.event, Event::Resync) {
 			self.read_state.reset();
@@ -1483,6 +2192,13 @@ impl State {
 			envelope.event,
 			Event::Ready { .. } | Event::Disconnected | Event::Resync
 		) {
+			if matches!(envelope.event, Event::Ready { .. } | Event::Resync) {
+				self.stickers.external_allowed = false;
+			}
+			self.interrupt_stickers();
+			self.posts.clear_summaries();
+			self.interactions.reset();
+			self.application_commands.clear();
 			self.local_game_activity = Default::default();
 			self.invalidate_messaging_permissions(None);
 			self.interrupt_own_profile();
@@ -1521,6 +2237,13 @@ impl State {
 			self.navigation_index.bytes.set(None);
 		}
 		let access_changed = envelope.event.changes_access();
+		// Command permissions are evaluated live from `permissions`; member, role and channel
+		// updates keep the index. Only a lost bot conversation invalidates its own index.
+		if let Event::Unavailable(channel) = &envelope.event
+			&& self.application_commands.scope == Some(*channel)
+		{
+			self.application_commands.clear();
+		}
 		// Ephemeral names must not outlive navigation identity/permission replacement.
 		if access_changed {
 			self.typing.clear();
@@ -1545,6 +2268,9 @@ impl State {
 			Event::ThreadChanged { guild, patch } => Some((*guild, patch.id)),
 			_ => None,
 		};
+		if let Some((_, id)) = archive_mutation {
+			self.forget_channel_reference_name(id);
+		}
 		if archive_mutation.is_some_and(|(guild, id)| {
 			self.archives.as_ref().is_some_and(|view| {
 				view.guild == guild
@@ -1559,17 +2285,15 @@ impl State {
 		}
 		if let Event::ThreadChanged { guild, patch } = &envelope.event
 			&& !self
-				.channels
-				.iter()
-				.any(|c| c.id == patch.id && c.guild == Some(*guild) && matches!(c.kind, 10..=12))
+				.channel(patch.id)
+				.is_some_and(|c| c.guild == Some(*guild) && matches!(c.kind, 10..=12))
 		{
 			return;
 		}
 		if let Event::ThreadRemoved { guild, id } = &envelope.event
 			&& !self
-				.channels
-				.iter()
-				.any(|c| c.id == *id && c.guild == Some(*guild) && matches!(c.kind, 10..=12))
+				.channel(*id)
+				.is_some_and(|c| c.guild == Some(*guild) && matches!(c.kind, 10..=12))
 		{
 			return;
 		}
@@ -1588,6 +2312,7 @@ impl State {
 		{
 			self.observe_group_change(patch.id, false);
 		}
+		self.filter_view_revisions(&envelope.event);
 		self.revision += 1;
 		if matches!(
 			&envelope.event,
@@ -1606,6 +2331,32 @@ impl State {
 		{
 			self.clear_search();
 		}
+		let previous_channel = self.selected;
+		let previous_tail = matches!(
+			&envelope.event,
+			Event::History { .. } | Event::Message(_) | Event::Patch(_) | Event::SendResult { .. }
+		)
+		.then(|| self.timeline.iter().last().map(|message| message.id))
+		.flatten();
+		let incoming_tail = match &envelope.event {
+			Event::Message(message)
+				if !self.history_targeted && Some(message.channel) == self.selected =>
+			{
+				Some(message.id)
+			}
+			Event::SendResult {
+				nonce,
+				result: Ok(message),
+			} if !self.history_targeted
+				&& Some(message.channel) == self.selected
+				&& self.pending.iter().any(|pending| {
+					pending.nonce == *nonce && pending.channel == message.channel
+				}) =>
+			{
+				Some(message.id)
+			}
+			_ => None,
+		};
 		let result = match envelope.event {
 			Event::Startup(_) => {
 				unreachable!("startup is applied atomically before ordinary events")
@@ -1616,6 +2367,8 @@ impl State {
 				self.startup_warnings.sessions |= warnings.sessions;
 				self.startup_warnings.presence |= warnings.presence;
 				self.startup_warnings.emojis |= warnings.emojis;
+				self.startup_warnings.stickers |= warnings.stickers;
+				self.startup_warnings.entries |= warnings.entries;
 				if warnings.read_state {
 					self.read_state.reset();
 				}
@@ -1629,6 +2382,10 @@ impl State {
 			}
 			Event::GuildFolders(result) => {
 				self.apply_guild_folders(result);
+				Ok(())
+			}
+			Event::AccountSettings { folders, .. } => {
+				self.folders_stale |= folders && self.guild_folders.is_some();
 				Ok(())
 			}
 			Event::Typing(_) => unreachable!("typing is handled before timeline invalidation"),
@@ -1667,10 +2424,6 @@ impl State {
 						*guild = actual;
 					}
 				}
-				// Typed updates replace the old PermissionsChanged fallback too.
-				// Retire both snapshots and in-flight profiles before applying them.
-				self.clear_profile();
-				self.profile_cache.clear();
 				self.server_admin.permissions_changed(&event);
 				self.update_permissions(event)
 			}
@@ -1680,6 +2433,18 @@ impl State {
 				result,
 			} => {
 				self.apply_archives(parent, request, result);
+				Ok(())
+			}
+			Event::ThreadStarter {
+				thread,
+				request,
+				result,
+			} => {
+				self.apply_thread_starter(thread, request, result);
+				Ok(())
+			}
+			Event::ForumSummaries { request, results } => {
+				self.apply_forum_summaries(request, results);
 				Ok(())
 			}
 			Event::ForumPosts {
@@ -1706,22 +2471,53 @@ impl State {
 				self.apply_search(channel, request, result);
 				Ok(())
 			}
+			Event::StickerEntitlement { user, premium_type } => {
+				if self.user.as_ref().is_some_and(|own| own.id == user)
+					&& !matches!(premium_type, Patch::Absent)
+				{
+					self.stickers.external_allowed = matches!(premium_type, Patch::Value(2 | 3));
+				}
+				Ok(())
+			}
+			Event::StickerPacks(result) => {
+				self.apply_sticker_packs(result);
+				Ok(())
+			}
+			Event::Sticker { id, result } => {
+				self.apply_sticker(id, result);
+				Ok(())
+			}
+			Event::GuildStickers { guild, stickers } => {
+				if let Some(index) = self.guilds.iter().position(|g| g.id == guild) {
+					let previous = self.guilds[index]
+						.stickers
+						.as_ref()
+						.map_or(0, sticker_bytes);
+					if !valid_stickers(&stickers, MAX_GUILD_STICKERS)
+						|| stickers.iter().any(|s| s.guild_id != Some(guild))
+						|| self.navigation_bytes().saturating_sub(previous)
+							+ sticker_bytes(&stickers)
+							+ self.permissions.bytes()
+							> model::account::MAX_BYTES
+					{
+						self.guilds[index].stickers = None;
+						self.navigation_index.bytes.set(None);
+						self.fail(auth::Failure::Capacity);
+						return;
+					}
+					self.guilds[index].stickers = Some(stickers);
+					self.navigation_index.bytes.set(None);
+				}
+				Ok(())
+			}
 			Event::Gifs { request, result } => {
 				self.apply_gifs(request, result);
 				Ok(())
 			}
 			Event::ReadState(event) => self.apply_read_state(event),
 			Event::NotificationPreferences(event) => self.apply_notification_preferences(event),
-			Event::SocialNotification(item) => {
-				self.receive_social_notification(item);
-				Ok(())
-			}
 			Event::MessagingPermissions { request, result } => {
 				self.apply_messaging_permissions(request, result);
-				Ok(())
-			}
-			Event::AccountNotificationSettings { request, result } => {
-				self.apply_account_notification_settings(request, result);
 				Ok(())
 			}
 			Event::UserAction(event) => self.apply_user_action(event),
@@ -1736,6 +2532,15 @@ impl State {
 				threads,
 				removed,
 			} => self.apply_threads_sync(guild, parents, threads, removed),
+			Event::Interaction(event) => self.apply_interaction(event),
+			Event::ApplicationCommands {
+				channel,
+				request,
+				result,
+			} => {
+				self.apply_application_commands(channel, request, result);
+				Ok(())
+			}
 			Event::Reactions(event) => self.apply_reactions(event),
 			Event::InviteChallenge { request, challenge } => {
 				self.apply_invite_challenge(request, *challenge);
@@ -1743,6 +2548,10 @@ impl State {
 			}
 			Event::JoinInvite { request, result } => {
 				self.apply_invite_join(request, result);
+				Ok(())
+			}
+			Event::GuildCreated { sequence, result } => {
+				self.apply_guild_created(sequence, result);
 				Ok(())
 			}
 			Event::GuildJoined(guild) => {
@@ -1758,10 +2567,10 @@ impl State {
 						self.fail(auth::Failure::Capacity);
 						return;
 					}
-					self.guilds.push(guild);
+					self.guilds.insert(0, guild);
 					bytes += (self.guilds.capacity() - capacity) * size_of::<Guild>();
 					if bytes + self.permissions.bytes() > model::account::MAX_BYTES {
-						self.guilds.pop();
+						self.guilds.remove(0);
 						self.guilds.shrink_to_fit();
 						self.invalidate_navigation();
 						self.fail(auth::Failure::Capacity);
@@ -1790,6 +2599,16 @@ impl State {
 				result,
 			} => {
 				self.apply_profile(user, guild, request, result);
+				Ok(())
+			}
+			Event::StreamPreview {
+				guild,
+				channel,
+				user,
+				request,
+				result,
+			} => {
+				self.apply_stream_preview(guild, channel, user, request, result);
 				Ok(())
 			}
 
@@ -1846,7 +2665,7 @@ impl State {
 			}
 			Event::ChannelCreated(channel) | Event::ChannelRestored(channel) => {
 				if self.archived_thread == Some(channel.id)
-					&& self.channels.iter().any(|old| {
+					&& self.channel(channel.id).is_some_and(|old| {
 						old.id == channel.id
 							&& (old.guild != channel.guild
 								|| old.parent_id != channel.parent_id
@@ -1858,7 +2677,7 @@ impl State {
 					&& (!channel
 						.guild
 						.is_some_and(|guild| self.guild(guild).is_some())
-						|| self.channels.iter().any(|old| {
+						|| self.channel(channel.id).is_some_and(|old| {
 							old.id == channel.id
 								&& (old.guild != channel.guild || !matches!(old.kind, 10..=12))
 						})) {
@@ -1930,7 +2749,7 @@ impl State {
 				{
 					self.clear_archives();
 				}
-				if let Some(index) = self.channels.iter().position(|c| c.id == patch.id) {
+				if let Some(index) = self.channel_index(patch.id) {
 					let previous = self.channels[index].clone();
 					let channel = &mut self.channels[index];
 					if let Some(latest) = channel.last_message {
@@ -1967,6 +2786,11 @@ impl State {
 					if let Patch::Value(count) = patch.message_count {
 						channel.message_count = Some(count);
 					}
+					match patch.tags {
+						Patch::Value(tags) => channel.tags = Some(tags),
+						Patch::Null => channel.tags = None,
+						Patch::Absent => {}
+					}
 					if self.navigation_bytes() + self.permissions.bytes()
 						> model::account::MAX_BYTES
 					{
@@ -1978,7 +2802,7 @@ impl State {
 					if self.selected == Some(self.channels[index].id)
 						&& !navigable(&self.channels[index])
 					{
-						self.selected = None;
+						self.arrived_home();
 						self.invalidate_members();
 						self.timeline.clear();
 						self.cancel_history();
@@ -1993,9 +2817,8 @@ impl State {
 			}
 			Event::RecipientAdded { channel, user } => {
 				if let Some(index) = self
-					.channels
-					.iter()
-					.position(|c| c.id == channel && c.guild.is_none())
+					.channel_index(channel)
+					.filter(|&index| self.channels[index].guild.is_none())
 				{
 					let previous = self.channels[index].clone();
 					let c = &mut self.channels[index];
@@ -2037,11 +2860,11 @@ impl State {
 					}
 					return;
 				}
-				if let Some(c) = self
-					.channels
-					.iter_mut()
-					.find(|c| c.id == channel && c.guild.is_none())
+				if let Some(index) = self
+					.channel_index(channel)
+					.filter(|&index| self.channels[index].guild.is_none())
 				{
+					let c = &mut self.channels[index];
 					c.recipients.retain(|u| u.id != user);
 					for (id, participants) in &mut self.voice.dm_participants {
 						if *id == channel {
@@ -2081,24 +2904,52 @@ impl State {
 				{
 					return;
 				}
-				if list.rows.len() > 100
-					|| list.rows.iter().flatten().any(|row| !row.valid())
-					|| list
-						.rows
-						.iter()
-						.flatten()
-						.any(|member| member.roles.len() > model::permissions::MAX_MEMBER_ROLES)
-					|| list.rows.iter().flatten().map(Member::bytes).sum::<usize>() > 128 * 1024
-				{
-					self.members.as_mut().unwrap().freshness = Freshness::Unavailable;
-				} else {
-					for member in list.rows.iter().flatten() {
-						self.timeline.apply_author_membership(
-							member.user.id,
-							&member.roles,
-							member.nick.as_deref(),
-						);
+				let ranges_left = self.members.as_ref().is_some_and(|current| {
+					!current.ranges.is_empty()
+						&& !list.ranges.is_empty()
+						&& current.ranges != list.ranges
+				});
+				let invalid = list.slots.len() > 200
+					|| list.slots.iter().flatten().any(|slot| match slot {
+						MemberSlot::Person(row) => {
+							!row.valid() || row.roles.len() > model::permissions::MAX_MEMBER_ROLES
+						}
+						MemberSlot::Group(id) => id.is_empty() || id.len() > 32,
+					}) || list.slot_bytes() > 256 * 1024
+					|| list.groups.len() > model::permissions::MAX_ROLES + 2;
+				if invalid {
+					if !ranges_left {
+						self.members.as_mut().unwrap().freshness = Freshness::Unavailable;
 					}
+				} else if ranges_left {
+					if list.freshness == Freshness::Fresh {
+						let protect = self
+							.members
+							.as_ref()
+							.map(|current| current.ranges.clone())
+							.unwrap_or_default();
+						self.member_chunks.merge(&list);
+						self.member_chunks.evict(&protect);
+					}
+				} else {
+					let kept_ranges = self.members.as_ref().map(|m| m.ranges.clone());
+					for slot in list.slots.iter().flatten() {
+						if let MemberSlot::Person(member) = slot {
+							self.timeline.apply_author_membership(
+								member.user.id,
+								&member.roles,
+								member.nick.as_deref(),
+							);
+						}
+					}
+					let mut list = list;
+					if list.ranges.is_empty()
+						&& let Some(ranges) = kept_ranges.filter(|ranges| !ranges.is_empty())
+					{
+						list.ranges = ranges;
+					}
+					self.member_chunks.merge(&list);
+					self.member_chunks.evict(&list.ranges);
 					self.members = Some(list);
 				}
 				Ok(())
@@ -2131,36 +2982,42 @@ impl State {
 						return;
 					}
 				};
-				let current: BTreeMap<_, _> = channels
-					.iter()
-					.map(|channel| (channel.id, channel))
-					.collect();
+				let mut current: Vec<_> = channels.iter().collect();
+				current.sort_unstable_by_key(|channel| channel.id);
+				let current_channel = |id| {
+					current
+						.binary_search_by_key(&id, |channel| channel.id)
+						.ok()
+						.map(|index| current[index])
+				};
 				let mut removed: BTreeSet<_> = self
 					.channels
 					.iter()
 					.filter(|old| {
-						current.get(&old.id).is_none_or(|channel| {
+						current_channel(old.id).is_none_or(|channel| {
 							(navigable(old) && !navigable(channel))
 								|| (old.supports_text() != channel.supports_text())
 						})
 					})
 					.map(|channel| channel.id)
 					.collect();
-				let unavailable = self
-					.selected
-					.is_some_and(|id| current.get(&id).is_none_or(|channel| !navigable(channel)));
+				let unavailable = self.selected.is_some_and(|id| {
+					current_channel(id).is_none_or(|channel| !navigable(channel))
+				});
 				if unavailable && let Some(selected) = self.selected {
 					removed.insert(selected);
 				}
+				drop(current);
 				self.remove_channels(&removed);
 				self.cancel_history();
 				if unavailable {
-					self.selected = None;
+					self.arrived_home();
 					self.freshness = Freshness::Unavailable;
 				} else {
 					self.freshness = Freshness::Stale;
 				}
 				self.voice.roster.clear();
+				self.voice.preview = None;
 				self.voice.dm_calls.clear();
 				self.voice.dm_participants.clear();
 				self.members = None;
@@ -2176,6 +3033,7 @@ impl State {
 				self.cancel_server_admin();
 				self.cancel_group_action();
 				self.cancel_invite_join();
+				self.cancel_guild_creation();
 				self.user_actions.reset();
 				self.server_actions.reset();
 				self.channel_actions.reset();
@@ -2215,6 +3073,7 @@ impl State {
 				{
 					return;
 				}
+				messages.retain(|message| !message.ephemeral);
 				let mut ids = BTreeSet::new();
 				let has_deleted_reference = messages.iter().any(|message| message.reply_deleted);
 				if older != self.history_before.is_some()
@@ -2286,6 +3145,7 @@ impl State {
 				}
 				self.cancel_history();
 				if failure == auth::Failure::Forbidden {
+					self.application_commands.clear();
 					self.invalidate_members();
 					self.timeline.clear();
 					self.freshness = Freshness::Unavailable;
@@ -2304,9 +3164,9 @@ impl State {
 				}
 				self.typing_message(&m);
 				if let Some(post) = self
-					.channels
-					.iter_mut()
-					.find(|c| c.id == m.channel && matches!(c.kind, 10..=12))
+					.channel_index(m.channel)
+					.and_then(|index| self.channels.get_mut(index))
+					.filter(|c| matches!(c.kind, 10..=12))
 				{
 					post.message_count = post.message_count.map(|n| n.saturating_add(1));
 				}
@@ -2453,6 +3313,14 @@ impl State {
 									&& known.nonce.as_deref() == Some(nonce.as_str())
 							}));
 						if correlated {
+							if let Some(sticker) = self
+								.pending
+								.iter()
+								.find(|p| p.nonce == nonce && p.channel == m.channel)
+								.and_then(|p| p.sticker.clone())
+							{
+								self.remember_sticker(sticker);
+							}
 							self.observe_last_message(m.channel, m.id);
 						}
 						let accepted_reference = correlated && self.accepts_reply_source(&m);
@@ -2507,11 +3375,12 @@ impl State {
 				self.fail(f);
 				Ok(())
 			}
+			Event::FailureDetail(detail) => {
+				self.failure_detail = Some(detail);
+				Ok(())
+			}
 			Event::Disconnected => {
 				self.member_search = Default::default();
-				self.interrupt_notification_settings(auth::Failure::ProtocolAt(
-					"Disconnected; reload notification settings",
-				));
 				self.cancel_message_actions();
 				self.cancel_user_action();
 				self.cancel_server_action();
@@ -2520,12 +3389,12 @@ impl State {
 				self.cancel_server_admin();
 				self.cancel_group_action();
 				self.cancel_invite_join();
+				self.cancel_guild_creation();
 				self.read_state.cancel();
 				self.clear_profile();
 				// The voice socket is independent and a RESUME replays roster changes, so the call,
 				// roster and known DM calls all stay. Only a fresh READY invalidates the voice state.
 				self.voice.incoming = None;
-				self.invalidate_members();
 				self.gateway_connected = false;
 				self.cancel_history();
 				self.freshness = Freshness::Stale;
@@ -2533,7 +3402,6 @@ impl State {
 				Ok(())
 			}
 			Event::Resumed => {
-				self.members = None;
 				self.member_search = Default::default();
 				self.gateway_connected = true;
 				self.cancel_history();
@@ -2550,6 +3418,7 @@ impl State {
 				self.cancel_server_admin();
 				self.cancel_group_action();
 				self.cancel_invite_join();
+				self.cancel_guild_creation();
 				self.clear_direct_presences();
 				self.permissions = permissions::Permissions::default();
 				self.read_state.cancel();
@@ -2558,7 +3427,8 @@ impl State {
 				self.disconnect_voice(
 					"Discord session or permissions changed; rejoin after refreshing",
 				);
-				self.invalidate_members();
+				self.member_search = Default::default();
+				self.members = None;
 				self.timeline.clear();
 				self.freshness = Freshness::Stale;
 				self.cancel_history();
@@ -2578,6 +3448,23 @@ impl State {
 				Ok(())
 			}
 		};
+		// Older-page retention can evict the live tail, including an arrival racing the
+		// page. Once detached, later live messages must not bridge the missing range.
+		if result.is_ok()
+			&& self.selected == previous_channel
+			&& self.history_before.is_some()
+			&& let Some(tail) = previous_tail.max(incoming_tail)
+			&& !self.timeline.is_deleted(tail)
+			&& self
+				.timeline
+				.iter()
+				.last()
+				.is_none_or(|message| message.id < tail)
+		{
+			self.history_targeted = true;
+			self.newer_cursor = None;
+			self.newer_may_have_more = false;
+		}
 		if let Err(status) = result {
 			self.clear_cached_history();
 			self.status = status;
@@ -2605,6 +3492,7 @@ impl State {
 			}
 			self.reconcile_notifications();
 			self.prune_resident();
+			self.prune_post_summaries();
 		}
 		if self.search.is_some() && !self.can_search() {
 			self.clear_search();
@@ -2640,6 +3528,7 @@ impl State {
 				&& !self.can_open_member_settings(guild)
 				&& !self.can_open_role_settings(guild)
 				&& !self.can_open_integration_settings(guild)
+				&& !self.can_retain_channel_integrations(guild)
 				&& !self.can_open_audit_log_settings(guild)
 			{
 				self.server_admin.reset();
@@ -2662,14 +3551,19 @@ impl State {
 	fn invalidate_members(&mut self) {
 		self.member_search = Default::default();
 		self.member_request = self.member_request.wrapping_add(1);
+		self.member_chunks.clear();
 		if let Some(list) = &mut self.members {
 			list.request = self.member_request;
-			list.rows.clear();
+			list.slots.clear();
+			list.start = 0;
+			list.groups.clear();
+			list.ranges.clear();
 			list.freshness = Freshness::Unavailable;
 		}
 	}
 	fn remove_channels(&mut self, removed: &BTreeSet<Id>) {
 		self.invalidate_navigation();
+		self.last_viewed_threads.retain(|id| !removed.contains(id));
 		for id in removed {
 			self.resident.remove(*id);
 		}
@@ -2693,10 +3587,6 @@ impl State {
 			self.read_state.forget(*id);
 			self.forget_direct_inbox(*id);
 		}
-		if !removed.is_empty() {
-			self.clear_profile();
-			self.profile_cache.clear();
-		}
 		if self.selected.is_some_and(|id| removed.contains(&id)) {
 			self.clear_search();
 			self.search_target = None;
@@ -2713,6 +3603,14 @@ impl State {
 			return;
 		}
 		if let Some(nonce) = &message.nonce {
+			if let Some(sticker) = self
+				.pending
+				.iter()
+				.find(|p| p.nonce == *nonce && p.channel == message.channel)
+				.and_then(|p| p.sticker.clone())
+			{
+				self.remember_sticker(sticker);
+			}
 			self.pending
 				.retain(|p| !(p.nonce == *nonce && p.channel == message.channel));
 		}
@@ -2726,8 +3624,9 @@ impl State {
 			_ => {}
 		}
 		if failure.ends_session() {
+			self.application_commands.clear();
+			self.interrupt_stickers();
 			self.invalidate_messaging_permissions(Some(failure));
-			self.interrupt_notification_settings(failure);
 			self.interrupt_own_profile();
 			self.local_game_activity = Default::default();
 			self.cancel_message_actions();
@@ -2742,6 +3641,7 @@ impl State {
 			self.cancel_server_admin();
 			self.cancel_group_action();
 			self.cancel_invite_join();
+			self.cancel_guild_creation();
 			self.clear_direct_presences();
 			self.clear_cached_history();
 			self.clear_search();
@@ -2759,6 +3659,7 @@ impl State {
 	fn cancel_history(&mut self) {
 		self.typing.clear();
 		self.reactions.reset();
+		self.interactions.reset();
 		self.search_target = None;
 		self.request += 1;
 		self.history_pending = false;
@@ -2796,7 +3697,7 @@ impl Event {
 				result: Ok(()),
 				..
 			}) | Event::ServerAction(server_actions::Event::Written {
-				action: server_actions::Action::Leave(_),
+				action: server_actions::Action::Leave(_) | server_actions::Action::Delete(_),
 				result: Ok(None),
 				..
 			}) | Event::ServerAdmin(server_admin::Event {
@@ -2828,6 +3729,16 @@ impl Event {
 	pub fn bytes(&self) -> usize {
 		size_of::<Self>()
 			+ match self {
+				Self::Interaction(event) => event.bytes(),
+				Self::ApplicationCommands { result, .. } => result.as_ref().map_or(0, |commands| {
+					commands.capacity() * size_of::<model::application_commands::Command>()
+						+ commands
+							.iter()
+							.map(|command| {
+								command.bytes() - size_of::<model::application_commands::Command>()
+							})
+							.sum::<usize>()
+				}),
 				Self::Startup(startup) => startup.bytes(),
 				Self::MessagingPermissions { result, .. } => result
 					.as_ref()
@@ -2858,7 +3769,6 @@ impl Event {
 					.result
 					.as_ref()
 					.map_or(0, model::server_admin::Result::bytes),
-				Self::SocialNotification(item) => item.body.capacity(),
 				Self::GuildFolders(result) => result
 					.as_ref()
 					.map_or(0, model::guild_folders::Settings::heap_bytes),
@@ -2920,6 +3830,9 @@ impl Event {
 				Self::UserAction(user_actions::Event::FriendProfile((u, n))) => {
 					u.heap_bytes() + n.capacity()
 				}
+				Self::UserAction(user_actions::Event::Challenge { challenge, .. }) => {
+					challenge.bytes()
+				}
 				Self::UserAction(user_actions::Event::Relationships(entries)) => entries
 					.as_ref()
 					.map_or(0, |e| e.capacity() * size_of::<(Id, bool)>()),
@@ -2937,6 +3850,17 @@ impl Event {
 				Self::UserAction(user_actions::Event::RequestSpam { .. }) => size_of::<Id>(),
 				Self::Archives { result, .. } => {
 					result.as_ref().map_or(0, model::archives::Page::bytes)
+				}
+				Self::ThreadStarter { result, .. } => result.as_ref().map_or(0, Message::bytes),
+				Self::ForumSummaries { results, .. } => {
+					results.capacity()
+						* size_of::<(Id, Result<model::forum::Summary, auth::Failure>)>()
+						+ results
+							.iter()
+							.map(|(_, result)| {
+								result.as_ref().map_or(0, model::forum::Summary::bytes)
+							})
+							.sum::<usize>()
 				}
 				Self::ForumPosts { result, .. } => {
 					result.as_ref().map_or(0, model::forum::Page::bytes)
@@ -2972,9 +3896,13 @@ impl Event {
 				Self::Profile { result, .. } | Self::ProfileEdited { result, .. } => {
 					result.as_ref().map_or(0, |p| p.bytes())
 				}
+				Self::StreamPreview { result, .. } => result.as_ref().map_or(0, String::capacity),
 				Self::Voice(event) => event.bytes(),
 				Self::Permissions(event) => event.bytes(),
 				Self::GuildEmojis { emojis, .. } => custom_emoji_bytes(emojis),
+				Self::GuildStickers { stickers, .. } => sticker_bytes(stickers),
+				Self::StickerPacks(result) => result.as_ref().map_or(0, stickers::pack_bytes),
+				Self::Sticker { result, .. } => result.as_ref().map_or(0, Sticker::heap_bytes),
 				Self::GuildChanged(patch) => [&patch.name, &patch.icon]
 					.into_iter()
 					.map(|value| match value {
@@ -3039,8 +3967,13 @@ impl Event {
 						})
 				}
 				Self::Members(list) => {
-					list.rows.capacity() * size_of::<Option<Member>>()
-						+ list.rows.iter().flatten().map(Member::bytes).sum::<usize>()
+					list.slots.capacity() * size_of::<Option<MemberSlot>>()
+						+ list.slot_bytes()
+						+ list
+							.groups
+							.iter()
+							.map(|(id, _)| id.capacity())
+							.sum::<usize>()
 				}
 				Self::RecipientAdded { user, .. } => user.heap_bytes(),
 				Self::History { messages, .. } => messages.iter().map(Message::bytes).sum(),
@@ -3051,10 +3984,13 @@ impl Event {
 						_ => 0,
 					};
 					content
-						+ match &p.reactions {
-							Patch::Value(r) => model::reaction_bytes(r),
+						+ match &p.sticker_items {
+							Patch::Value(stickers) => model::sticker_bytes(stickers),
 							_ => 0,
-						} + match &p.mentions {
+						} + match &p.reactions {
+						Patch::Value(r) => model::reaction_bytes(r),
+						_ => 0,
+					} + match &p.mentions {
 						Patch::Value(users) => model::mention_bytes(users),
 						_ => 0,
 					} + match &p.attachments {
@@ -3076,6 +4012,34 @@ impl Event {
 
 #[cfg(test)]
 mod tests {
+
+	#[test]
+	#[ignore = "manual release timing; run with --release --ignored --nocapture"]
+	fn guild_lookup_benchmark() {
+		let state = State {
+			guilds: (1..=1_000)
+				.map(|id| Guild {
+					stickers: None,
+					id: Id(id),
+					name: "Synthetic".into(),
+					icon: None,
+					emojis: None,
+				})
+				.collect(),
+			..State::default()
+		};
+		for run in 0..6 {
+			let start = std::time::Instant::now();
+			for _ in 0..10_000 {
+				assert!(std::hint::black_box(state.guild(std::hint::black_box(Id(500)))).is_some());
+				assert!(
+					std::hint::black_box(state.guild(std::hint::black_box(Id(1_001)))).is_none()
+				);
+			}
+			println!("guild lookup run {run} (0 = warmup): {:?}", start.elapsed());
+		}
+	}
+
 	pub(crate) fn grant_permissions(state: &mut State) {
 		let Some(user) = &state.user else {
 			return;
@@ -3121,6 +4085,7 @@ mod tests {
 				last_message: None,
 				icon: None,
 				member_list_id: None,
+				tags: None,
 				message_count: None,
 			}],
 			selected: Some(Id(1)),
@@ -3174,6 +4139,7 @@ mod tests {
 				last_message: None,
 				icon: None,
 				member_list_id: None,
+				tags: None,
 				message_count: None,
 			}],
 			selected: Some(Id(1)),
@@ -3263,176 +4229,355 @@ mod tests {
 
 	#[test]
 	fn server_selection_restores_viewed_channels_and_revalidates_access() {
-		use model::permissions as p;
-		let mut state = State {
-			user: Some(message(1).author),
-			guilds: (1..=2)
-				.map(|id| Guild {
-					id: Id(id),
+		{
+			use model::permissions as p;
+			let mut state = State {
+				user: Some(message(1).author),
+				guilds: (1..=2)
+					.map(|id| Guild {
+						stickers: None,
+						id: Id(id),
+						name: "Synthetic".into(),
+						icon: None,
+						emojis: None,
+					})
+					.collect(),
+				channels: [(10, 1, 0), (11, 1, 0), (12, 1, 2), (20, 2, 0), (30, 0, 1)]
+					.into_iter()
+					.map(|(id, guild, kind)| Channel {
+						id: Id(id),
+						guild: (guild != 0).then_some(Id(guild)),
+						kind,
+						name: "Synthetic".into(),
+						position: id as i32,
+						parent_id: None,
+						recipients: vec![],
+						last_message: None,
+						icon: None,
+						member_list_id: None,
+						tags: None,
+						message_count: None,
+					})
+					.collect(),
+				..State::default()
+			};
+			state
+				.permissions
+				.replace(p::Snapshot {
+					guilds: (1..=2)
+						.map(|id| p::Guild {
+							id: Id(id),
+							owner: Some(Id(999)),
+							member: Some(p::Member {
+								roles: vec![],
+								timeout_until: None,
+							}),
+							roles: Some(vec![p::Role {
+								id: Id(id),
+								name: String::new(),
+								color: 0,
+								position: 0,
+								hoist: false,
+								bits: p::VIEW_CHANNEL | p::READ_MESSAGE_HISTORY,
+							}]),
+						})
+						.collect(),
+					channels: state
+						.channels
+						.iter()
+						.filter_map(|c| {
+							c.guild.map(|guild| p::Channel {
+								id: c.id,
+								guild,
+								overwrites: Some(vec![]),
+							})
+						})
+						.collect(),
+				})
+				.unwrap();
+			assert!(matches!(
+				state.select_guild(Id(1)),
+				Some(Command::History {
+					channel: Id(10),
+					..
+				})
+			));
+			state.select(Id(11));
+			state.select(Id(20));
+			assert!(matches!(
+				state.select_guild(Id(1)),
+				Some(Command::History {
+					channel: Id(11),
+					..
+				})
+			));
+			state.drafts.insert(Id(11), "Unsent draft".into());
+			let request = state.request;
+			assert!(state.select_guild(Id(1)).is_none());
+			assert_eq!(state.request, request);
+			assert_eq!(state.drafts[&Id(11)], "Unsent draft");
+			state.select(Id(30));
+			assert_eq!(
+				state.last_viewed_channels.len(),
+				2,
+				"DMs are not server history"
+			);
+			assert!(matches!(
+				state.select_guild(Id(1)),
+				Some(Command::History {
+					channel: Id(11),
+					..
+				})
+			));
+			state.select(Id(20));
+			state
+				.permissions
+				.channels
+				.get_mut(&Id(11))
+				.unwrap()
+				.overwrites = Some(vec![p::Overwrite {
+				id: Id(1),
+				kind: 0,
+				allow: 0,
+				deny: p::VIEW_CHANNEL,
+			}]);
+			state.permissions.clear_cache();
+			assert!(matches!(
+				state.select_guild(Id(1)),
+				Some(Command::History {
+					channel: Id(10),
+					..
+				})
+			));
+			state.select(Id(20));
+			state.channels.retain(|c| c.id != Id(10));
+			state.invalidate_navigation();
+			assert!(matches!(
+				state.select_guild(Id(1)),
+				Some(Command::History {
+					channel: Id(12),
+					..
+				})
+			));
+			assert!(state.voice.active.is_none());
+			assert_eq!(
+				state.selected,
+				Some(Id(12)),
+				"voice is only viewed, never joined"
+			);
+			state.select(Id(20));
+			assert!(matches!(
+				state.select_guild(Id(1)),
+				Some(Command::History {
+					channel: Id(12),
+					..
+				})
+			));
+			assert!(state.voice.active.is_none());
+			assert_eq!(
+				state.selected,
+				Some(Id(12)),
+				"remember a viewed voice channel too"
+			);
+			state.select(Id(20));
+			state.permissions.guilds.remove(&Id(1));
+			state.permissions.clear_cache();
+			assert!(state.select_guild(Id(1)).is_none());
+			assert_eq!(
+				state.selected,
+				Some(Id(20)),
+				"no accessible channel leaves the conversation intact"
+			);
+			state.last_viewed_channels = (100..100 + MAX_VIEWED_SERVERS as u64)
+				.map(|id| (Id(id), Id(id)))
+				.collect();
+			state.remember_channel(Id(20));
+			assert_eq!(state.last_viewed_channels.len(), MAX_VIEWED_SERVERS);
+			assert!(state.last_viewed_channels.capacity() * size_of::<(Id, Id)>() <= 16 * 1024);
+			assert!(
+				!state
+					.last_viewed_channels
+					.iter()
+					.any(|(id, _)| *id == Id(100))
+			);
+			state.logout();
+			assert!(state.last_viewed_channels.is_empty());
+		}
+		{
+			let guild = |id| Guild {
+				stickers: None,
+				id: Id(id),
+				name: "Synthetic".into(),
+				icon: None,
+				emojis: None,
+			};
+			let mut state = State {
+				guilds: vec![guild(1)],
+				..State::default()
+			};
+			assert!(state.guild(Id(2)).is_none());
+			{
+				// A cached miss must not rebuild (and mutably borrow) the index.
+				let _index = state.navigation_index.guilds.borrow();
+				for _ in 0..3 {
+					assert!(state.guild(Id(2)).is_none());
+					assert_eq!(state.guild(Id(1)).unwrap().id, Id(1));
+				}
+			}
+			apply(&mut state, Event::GuildJoined(guild(2)));
+			assert_eq!(state.guild(Id(2)).unwrap().id, Id(2));
+			assert_eq!(state.guild(Id(1)).unwrap().id, Id(1));
+			state.guilds.swap(0, 1);
+			assert_eq!(state.guild(Id(2)).unwrap().id, Id(2));
+			state.guilds[0] = guild(3);
+			state.invalidate_navigation();
+			assert!(state.guild(Id(1)).is_none());
+			assert_eq!(state.guild(Id(3)).unwrap().id, Id(3));
+			state.guilds.retain(|guild| guild.id != Id(3));
+			assert!(state.guild(Id(3)).is_none());
+			assert_eq!(state.guild(Id(2)).unwrap().id, Id(2));
+		}
+		{
+			let channel = Channel {
+				id: Id(1),
+				guild: Some(Id(10)),
+				parent_id: None,
+				kind: 0,
+				name: "Original".into(),
+				position: 7,
+				recipients: vec![],
+				last_message: Some(Id(80)),
+				icon: None,
+				member_list_id: Some("known-list".into()),
+				tags: None,
+				message_count: None,
+			};
+			let mut state = State {
+				user: Some(message(1).author),
+				channels: vec![channel.clone()],
+				guilds: vec![Guild {
+					stickers: None,
+					id: Id(10),
 					name: "Synthetic".into(),
 					icon: None,
 					emojis: None,
-				})
-				.collect(),
-			channels: [(10, 1, 0), (11, 1, 0), (12, 1, 2), (20, 2, 0), (30, 0, 1)]
-				.into_iter()
-				.map(|(id, guild, kind)| Channel {
-					id: Id(id),
-					guild: (guild != 0).then_some(Id(guild)),
-					kind,
-					name: "Synthetic".into(),
-					position: id as i32,
-					parent_id: None,
-					recipients: vec![],
-					last_message: None,
-					icon: None,
-					member_list_id: None,
-					message_count: None,
-				})
-				.collect(),
-			..State::default()
-		};
-		state
-			.permissions
-			.replace(p::Snapshot {
-				guilds: (1..=2)
-					.map(|id| p::Guild {
-						id: Id(id),
-						owner: Some(Id(999)),
-						member: Some(p::Member {
-							roles: vec![],
-							timeout_until: None,
-						}),
-						roles: Some(vec![p::Role {
-							id: Id(id),
-							name: String::new(),
-							color: 0,
-							position: 0,
-							hoist: false,
-							bits: p::VIEW_CHANNEL | p::READ_MESSAGE_HISTORY,
-						}]),
-					})
-					.collect(),
-				channels: state
-					.channels
-					.iter()
-					.filter_map(|c| {
-						c.guild.map(|guild| p::Channel {
-							id: c.id,
-							guild,
-							overwrites: Some(vec![]),
-						})
-					})
-					.collect(),
-			})
-			.unwrap();
-		assert!(matches!(
-			state.select_guild(Id(1)),
-			Some(Command::History {
-				channel: Id(10),
-				..
-			})
-		));
-		state.select(Id(11));
-		state.select(Id(20));
-		assert!(matches!(
-			state.select_guild(Id(1)),
-			Some(Command::History {
-				channel: Id(11),
-				..
-			})
-		));
-		state.drafts.insert(Id(11), "Unsent draft".into());
-		let request = state.request;
-		assert!(state.select_guild(Id(1)).is_none());
-		assert_eq!(state.request, request);
-		assert_eq!(state.drafts[&Id(11)], "Unsent draft");
-		state.select(Id(30));
-		assert_eq!(
-			state.last_viewed_channels.len(),
-			2,
-			"DMs are not server history"
-		);
-		assert!(matches!(
-			state.select_guild(Id(1)),
-			Some(Command::History {
-				channel: Id(11),
-				..
-			})
-		));
-		state.select(Id(20));
-		state
-			.permissions
-			.channels
-			.get_mut(&Id(11))
-			.unwrap()
-			.overwrites = Some(vec![p::Overwrite {
-			id: Id(1),
-			kind: 0,
-			allow: 0,
-			deny: p::VIEW_CHANNEL,
-		}]);
-		state.permissions.clear_cache();
-		assert!(matches!(
-			state.select_guild(Id(1)),
-			Some(Command::History {
-				channel: Id(10),
-				..
-			})
-		));
-		state.select(Id(20));
-		state.channels.retain(|c| c.id != Id(10));
-		state.invalidate_navigation();
-		assert!(matches!(
-			state.select_guild(Id(1)),
-			Some(Command::History {
-				channel: Id(12),
-				..
-			})
-		));
-		assert!(state.voice.active.is_none());
-		assert_eq!(
-			state.selected,
-			Some(Id(12)),
-			"voice is only viewed, never joined"
-		);
-		state.select(Id(20));
-		assert!(matches!(
-			state.select_guild(Id(1)),
-			Some(Command::History {
-				channel: Id(12),
-				..
-			})
-		));
-		assert!(state.voice.active.is_none());
-		assert_eq!(
-			state.selected,
-			Some(Id(12)),
-			"remember a viewed voice channel too"
-		);
-		state.select(Id(20));
-		state.permissions.guilds.remove(&Id(1));
-		state.permissions.clear_cache();
-		assert!(state.select_guild(Id(1)).is_none());
-		assert_eq!(
-			state.selected,
-			Some(Id(20)),
-			"no accessible channel leaves the conversation intact"
-		);
-		state.last_viewed_channels = (100..100 + MAX_VIEWED_SERVERS as u64)
-			.map(|id| (Id(id), Id(id)))
-			.collect();
-		state.remember_channel(Id(20));
-		assert_eq!(state.last_viewed_channels.len(), MAX_VIEWED_SERVERS);
-		assert!(state.last_viewed_channels.capacity() * size_of::<(Id, Id)>() <= 16 * 1024);
-		assert!(
-			!state
-				.last_viewed_channels
-				.iter()
-				.any(|(id, _)| *id == Id(100))
-		);
-		state.logout();
-		assert!(state.last_viewed_channels.is_empty());
+				}],
+				selected: Some(Id(1)),
+				auth: auth::AuthState::Authenticated,
+				gateway_connected: true,
+				freshness: Freshness::Fresh,
+				..State::default()
+			};
+			grant_permissions(&mut state);
+			let candidate = Channel {
+				name: "Restored".into(),
+				position: 0,
+				last_message: None,
+				icon: None,
+				member_list_id: None,
+				tags: None,
+				message_count: None,
+				..channel.clone()
+			};
+			apply(&mut state, Event::ChannelRestored(candidate.clone()));
+			assert!(
+				state.channels[0] == channel,
+				"A candidate cannot replace a known channel's absent fields"
+			);
+			apply(
+				&mut state,
+				Event::ChannelChanged(ChannelPatch {
+					icon: model::Patch::Absent,
+					id: Id(1),
+					name: Patch::Value("Renamed".into()),
+					last_message: Patch::Absent,
+					parent_id: Patch::Absent,
+					position: Patch::Absent,
+					kind: Patch::Absent,
+					message_count: Patch::Absent,
+					tags: Patch::Absent,
+				}),
+			);
+			assert_eq!(state.channels[0].name, "Renamed");
+			assert_eq!(state.channels[0].last_message, Some(Id(80)));
+			assert_eq!(
+				state.channels[0].member_list_id.as_deref(),
+				Some("known-list")
+			);
+			state.drafts.insert(Id(1), "Preserved draft".into());
+			state.history(None);
+			let old_request = state.request;
+			apply(&mut state, Event::Unavailable(Id(1)));
+			for invalid in [
+				Channel {
+					guild: None,
+					..candidate.clone()
+				},
+				Channel {
+					guild: Some(Id(99)),
+					..candidate.clone()
+				},
+				Channel {
+					guild: Some(Id(0)),
+					..candidate.clone()
+				},
+				Channel {
+					id: Id(0),
+					..candidate.clone()
+				},
+				Channel {
+					kind: 1,
+					..candidate.clone()
+				},
+				Channel {
+					kind: 10,
+					..candidate.clone()
+				},
+				Channel {
+					kind: 11,
+					..candidate.clone()
+				},
+				Channel {
+					kind: 12,
+					..candidate.clone()
+				},
+				Channel {
+					kind: 255,
+					..candidate.clone()
+				},
+			] {
+				apply(&mut state, Event::ChannelRestored(invalid));
+				assert!(state.channels.is_empty());
+			}
+			apply(&mut state, Event::ChannelRestored(candidate.clone()));
+			assert!(state.channels[0] == candidate);
+			assert_eq!(state.freshness, Freshness::Unavailable);
+			assert!(!state.history_pending);
+			apply(
+				&mut state,
+				Event::History {
+					channel: Id(1),
+					request: old_request,
+					older: false,
+					messages: vec![message(99)],
+				},
+			);
+			assert!(state.timeline.is_empty());
+			assert_eq!(state.drafts[&Id(1)], "Preserved draft");
+			assert!(matches!(state.select(Id(1)), Some(Command::History { .. })));
+			let request = state.request;
+			apply(
+				&mut state,
+				Event::History {
+					channel: Id(1),
+					request,
+					older: false,
+					messages: vec![message(100)],
+				},
+			);
+			assert_eq!(state.freshness, Freshness::Fresh);
+			assert!(state.timeline.get(Id(100)).is_some());
+		}
 	}
 
 	#[test]
@@ -3463,6 +4608,7 @@ mod tests {
 				last_message: None,
 				icon: None,
 				member_list_id: None,
+				tags: None,
 				message_count: None,
 			}],
 			gateway_connected: true,
@@ -3674,124 +4820,128 @@ mod tests {
 
 	#[test]
 	fn guild_emoji_updates_replace_catalog_and_reject_stale_or_oversized_data() {
-		let emoji = CustomEmoji {
-			id: Id(4),
-			name: "wave".into(),
-			animated: false,
-			available: true,
-			managed: false,
-			roles: Some(vec![]),
-		};
-		let mut state = State {
-			guilds: vec![Guild {
-				id: Id(2),
-				name: "Synthetic".into(),
-				icon: None,
-				emojis: None,
-			}],
-			..State::default()
-		};
-		let event = Event::GuildEmojis {
-			guild: Id(2),
-			emojis: vec![emoji.clone()],
-		};
-		assert!(event.bytes() >= size_of::<Event>() + custom_emoji_bytes(&vec![emoji.clone()]));
-		apply(&mut state, event);
-		assert_eq!(
-			state.guilds[0].emojis.as_ref().unwrap()[0].markup(),
-			"<:wave:4>"
-		);
-		state.apply(Envelope {
-			generation: state.generation + 1,
-			event: Event::GuildEmojis {
-				guild: Id(2),
-				emojis: vec![],
-			},
-		});
-		assert_eq!(state.guilds[0].emojis.as_ref().unwrap().len(), 1);
-		apply(
-			&mut state,
-			Event::GuildEmojis {
-				guild: Id(2),
-				emojis: vec![],
-			},
-		);
-		assert!(state.guilds[0].emojis.as_ref().unwrap().is_empty());
-		let mut huge = emoji.clone();
-		huge.name = String::with_capacity(MAX_GUILD_EMOJI_BYTES);
-		huge.name.push_str("wave");
-		apply(
-			&mut state,
-			Event::GuildEmojis {
-				guild: Id(2),
-				emojis: vec![huge],
-			},
-		);
-		assert!(state.guilds[0].emojis.is_none());
-		apply(
-			&mut state,
-			Event::GuildEmojis {
-				guild: Id(2),
-				emojis: vec![emoji; MAX_GUILD_EMOJIS + 1],
-			},
-		);
-		assert!(state.guilds[0].emojis.is_none());
-		state.logout();
-		assert!(state.guilds.is_empty());
-	}
-
-	#[test]
-	fn ready_rejects_emoji_catalogs_exceeding_total_navigation_budget() {
-		let emoji = CustomEmoji {
-			id: Id(4),
-			name: "wave".into(),
-			animated: false,
-			available: true,
-			managed: false,
-			roles: Some(vec![]),
-		};
-		let mut state = State::default();
-		let mut guilds: Vec<_> = (1..=700)
-			.map(|id| Guild {
-				id: Id(id),
-				name: "Synthetic".into(),
-				icon: None,
-				emojis: Some(vec![emoji.clone()]),
-			})
-			.collect();
-		for guild in &mut guilds {
-			let name = &mut guild.emojis.as_mut().unwrap()[0].name;
-			name.reserve(192 * 1024);
-		}
-		assert!(
-			guilds
-				.iter()
-				.all(|g| valid_custom_emojis(g.emojis.as_ref().unwrap()))
-		);
-		apply(
-			&mut state,
-			Event::Ready {
-				permissions: model::permissions::Snapshot::default(),
-				user: User {
-					id: Id(1),
+		{
+			let emoji = CustomEmoji {
+				id: Id(4),
+				name: "wave".into(),
+				animated: false,
+				available: true,
+				managed: false,
+				roles: Some(vec![]),
+			};
+			let mut state = State {
+				guilds: vec![Guild {
+					stickers: None,
+					id: Id(2),
 					name: "Synthetic".into(),
-					avatar: None,
-					webhook: false,
-					kind: Default::default(),
-					discriminator: 0,
+					icon: None,
+					emojis: None,
+				}],
+				..State::default()
+			};
+			let event = Event::GuildEmojis {
+				guild: Id(2),
+				emojis: vec![emoji.clone()],
+			};
+			assert!(event.bytes() >= size_of::<Event>() + custom_emoji_bytes(&vec![emoji.clone()]));
+			apply(&mut state, event);
+			assert_eq!(
+				state.guilds[0].emojis.as_ref().unwrap()[0].markup(),
+				"<:wave:4>"
+			);
+			state.apply(Envelope {
+				generation: state.generation + 1,
+				event: Event::GuildEmojis {
+					guild: Id(2),
+					emojis: vec![],
 				},
-				guilds,
-				channels: vec![],
-			},
-		);
-		assert!(state.guilds.is_empty());
-		assert!(matches!(state.auth, auth::AuthState::Failed));
+			});
+			assert_eq!(state.guilds[0].emojis.as_ref().unwrap().len(), 1);
+			apply(
+				&mut state,
+				Event::GuildEmojis {
+					guild: Id(2),
+					emojis: vec![],
+				},
+			);
+			assert!(state.guilds[0].emojis.as_ref().unwrap().is_empty());
+			let mut huge = emoji.clone();
+			huge.name = String::with_capacity(MAX_GUILD_EMOJI_BYTES);
+			huge.name.push_str("wave");
+			apply(
+				&mut state,
+				Event::GuildEmojis {
+					guild: Id(2),
+					emojis: vec![huge],
+				},
+			);
+			assert!(state.guilds[0].emojis.is_none());
+			apply(
+				&mut state,
+				Event::GuildEmojis {
+					guild: Id(2),
+					emojis: vec![emoji; MAX_GUILD_EMOJIS + 1],
+				},
+			);
+			assert!(state.guilds[0].emojis.is_none());
+			state.logout();
+			assert!(state.guilds.is_empty());
+		}
+		{
+			let emoji = CustomEmoji {
+				id: Id(4),
+				name: "wave".into(),
+				animated: false,
+				available: true,
+				managed: false,
+				roles: Some(vec![]),
+			};
+			let mut state = State::default();
+			let mut guilds: Vec<_> = (1..=700)
+				.map(|id| Guild {
+					stickers: None,
+					id: Id(id),
+					name: "Synthetic".into(),
+					icon: None,
+					emojis: Some(vec![emoji.clone()]),
+				})
+				.collect();
+			for guild in &mut guilds {
+				let name = &mut guild.emojis.as_mut().unwrap()[0].name;
+				name.reserve(192 * 1024);
+			}
+			assert!(
+				guilds
+					.iter()
+					.all(|g| valid_custom_emojis(g.emojis.as_ref().unwrap()))
+			);
+			apply(
+				&mut state,
+				Event::Ready {
+					permissions: model::permissions::Snapshot::default(),
+					user: User {
+						primary_guild: None,
+						id: Id(1),
+						name: "Synthetic".into(),
+						avatar: None,
+						webhook: false,
+						kind: Default::default(),
+						discriminator: 0,
+					},
+					guilds,
+					channels: vec![],
+				},
+			);
+			assert!(state.guilds.is_empty());
+			assert!(matches!(state.auth, auth::AuthState::Failed));
+		}
 	}
 
 	#[test]
 	fn guild_identity_patches_preserve_omitted_fields_and_change_icon_keys() {
 		let mut state = State {
 			guilds: vec![Guild {
+				stickers: None,
 				emojis: None,
 				id: Id(2),
 				name: "Synthetic server".into(),
@@ -3861,89 +5011,234 @@ mod tests {
 
 	#[test]
 	fn channel_mutations_preserve_partial_metadata_and_remove_deleted_categories() {
-		let mut state = State {
-			user: Some(message(1).author),
-			guilds: vec![Guild {
-				id: Id(1),
-				name: "Synthetic".into(),
+		{
+			let mut state = State {
+				user: Some(message(1).author),
+				guilds: vec![Guild {
+					stickers: None,
+					id: Id(1),
+					name: "Synthetic".into(),
+					icon: None,
+					emojis: None,
+				}],
+				..State::default()
+			};
+			let channel = Channel {
+				last_message: None,
+				id: Id(2),
+				guild: Some(Id(1)),
+				parent_id: Some(Id(3)),
+				position: 7,
+				name: "Synthetic channel".into(),
+				kind: 0,
+				recipients: vec![],
 				icon: None,
-				emojis: None,
-			}],
-			..State::default()
-		};
-		let channel = Channel {
-			last_message: None,
-			id: Id(2),
-			guild: Some(Id(1)),
-			parent_id: Some(Id(3)),
-			position: 7,
-			name: "Synthetic channel".into(),
-			kind: 0,
-			recipients: vec![],
-			icon: None,
-			member_list_id: None,
-			message_count: None,
-		};
-		apply(&mut state, Event::ChannelCreated(channel.clone()));
-		apply(&mut state, Event::ChannelCreated(channel));
-		assert_eq!(state.channels.len(), 1);
-		apply(
-			&mut state,
-			Event::ChannelChanged(ChannelPatch {
-				icon: model::Patch::Absent,
-				last_message: model::Patch::Absent,
-				id: Id(2),
-				name: Patch::Absent,
-				parent_id: Patch::Null,
-				position: Patch::Value(0),
-				kind: Patch::Absent,
-				message_count: Patch::Absent,
-			}),
-		);
-		assert_eq!(state.channels[0].parent_id, None);
-		assert_eq!(state.channels[0].position, 0);
-		assert_eq!(state.channels[0].name, "Synthetic channel");
-		assert_eq!(state.channels[0].kind, 0);
-		grant_permissions(&mut state);
-		assert!(state.select(Id(2)).is_some());
-		apply(
-			&mut state,
-			Event::ChannelChanged(ChannelPatch {
-				icon: model::Patch::Absent,
-				last_message: model::Patch::Absent,
-				id: Id(2),
-				name: Patch::Absent,
-				parent_id: Patch::Absent,
-				position: Patch::Absent,
-				kind: Patch::Value(4),
-				message_count: Patch::Absent,
-			}),
-		);
-		assert!(state.selected.is_none());
-		assert!(!state.history_pending);
-		assert!(state.select(Id(2)).is_none());
-		apply(&mut state, Event::Unavailable(Id(2)));
-		assert!(state.channels.is_empty());
-		for id in 1..=MAX_NAV + 1 {
+				member_list_id: None,
+				tags: None,
+				message_count: None,
+			};
+			apply(&mut state, Event::ChannelCreated(channel.clone()));
+			apply(&mut state, Event::ChannelCreated(channel));
+			assert_eq!(state.channels.len(), 1);
 			apply(
 				&mut state,
-				Event::ChannelCreated(Channel {
-					last_message: None,
-					id: Id(id as u64),
-					guild: None,
-					parent_id: None,
-					position: 0,
-					name: String::new(),
-					kind: 4,
-					recipients: vec![],
-					icon: None,
-					member_list_id: None,
-					message_count: None,
+				Event::ChannelChanged(ChannelPatch {
+					icon: model::Patch::Absent,
+					last_message: model::Patch::Absent,
+					id: Id(2),
+					name: Patch::Absent,
+					parent_id: Patch::Null,
+					position: Patch::Value(0),
+					kind: Patch::Absent,
+					message_count: Patch::Absent,
+					tags: Patch::Absent,
 				}),
 			);
+			assert_eq!(state.channels[0].parent_id, None);
+			assert_eq!(state.channels[0].position, 0);
+			assert_eq!(state.channels[0].name, "Synthetic channel");
+			assert_eq!(state.channels[0].kind, 0);
+			grant_permissions(&mut state);
+			assert!(state.select(Id(2)).is_some());
+			apply(
+				&mut state,
+				Event::ChannelChanged(ChannelPatch {
+					icon: model::Patch::Absent,
+					last_message: model::Patch::Absent,
+					id: Id(2),
+					name: Patch::Absent,
+					parent_id: Patch::Absent,
+					position: Patch::Absent,
+					kind: Patch::Value(4),
+					message_count: Patch::Absent,
+					tags: Patch::Absent,
+				}),
+			);
+			assert!(state.selected.is_none());
+			assert!(!state.history_pending);
+			assert!(state.select(Id(2)).is_none());
+			apply(&mut state, Event::Unavailable(Id(2)));
+			assert!(state.channels.is_empty());
+			for id in 1..=MAX_NAV + 1 {
+				apply(
+					&mut state,
+					Event::ChannelCreated(Channel {
+						last_message: None,
+						id: Id(id as u64),
+						guild: None,
+						parent_id: None,
+						position: 0,
+						name: String::new(),
+						kind: 4,
+						recipients: vec![],
+						icon: None,
+						member_list_id: None,
+						tags: None,
+						message_count: None,
+					}),
+				);
+			}
+			assert_eq!(state.channels.len() + state.guilds.len(), MAX_NAV);
+			assert_eq!(state.status, auth::Failure::Capacity.label());
 		}
-		assert_eq!(state.channels.len() + state.guilds.len(), MAX_NAV);
-		assert_eq!(state.status, auth::Failure::Capacity.label());
+		{
+			let mut state = State {
+				user: Some(message(1).author),
+				gateway_connected: true,
+				auth: auth::AuthState::Authenticated,
+				selected: Some(Id(1)),
+				channels: vec![Channel {
+					id: Id(1),
+					guild: None,
+					parent_id: None,
+					kind: 1,
+					position: 0,
+					name: "Synthetic DM".into(),
+					recipients: vec![],
+					last_message: None,
+					icon: None,
+					member_list_id: None,
+					tags: None,
+					message_count: None,
+				}],
+				..State::default()
+			};
+			state.drafts.insert(Id(1), "unsent draft".into());
+			state.history(None);
+			let request = state.request;
+			apply(
+				&mut state,
+				Event::History {
+					channel: Id(1),
+					request,
+					older: false,
+					messages: (100..150).map(message).collect(),
+				},
+			);
+			let positions = state.timeline.row_ids().collect::<Vec<_>>();
+			state.reply = Some(Reply::to(Id(100)));
+			apply(
+				&mut state,
+				Event::Delete {
+					channel: Id(2),
+					id: Id(100),
+				},
+			);
+			assert_eq!(state.reply_target(), Some(Id(100)));
+			assert!(state.timeline.get(Id(100)).is_some());
+			apply(
+				&mut state,
+				Event::Delete {
+					channel: Id(1),
+					id: Id(100),
+				},
+			);
+			assert_eq!(state.reply, None);
+			state.reply = Some(Reply::to(Id(101)));
+			let mut ids: Vec<_> = (101..150).map(Id).collect();
+			ids.extend([Id(101), Id(999)]); // Duplicate and unknown IDs create no extra rows.
+			apply(
+				&mut state,
+				Event::DeleteBulk {
+					channel: Id(1),
+					ids,
+				},
+			);
+			assert_eq!(state.reply, None);
+			assert_eq!(state.timeline.row_ids().collect::<Vec<_>>(), positions);
+			assert!(state.timeline.is_empty());
+			assert_eq!(state.timeline.bytes(), 0);
+			assert!(state.timeline.get_display(Id(100)).is_none());
+			assert!(state.can_load_older());
+			assert!(!state.can_edit(Id(1), Id(100)));
+			assert!(matches!(
+				state.older_history(),
+				Some(Command::History {
+					before: Some(Id(100)),
+					..
+				})
+			));
+			let request = state.request;
+			apply(
+				&mut state,
+				Event::SendResult {
+					nonce: "synthetic-late".into(),
+					result: Ok(message(100)),
+				},
+			);
+			assert!(state.timeline.get(Id(100)).is_none());
+			apply(
+				&mut state,
+				Event::History {
+					channel: Id(1),
+					request,
+					older: true,
+					messages: vec![message(99)],
+				},
+			);
+			assert_eq!(state.timeline.len(), 1);
+			assert_eq!(state.timeline.row_count(), 51);
+			assert_eq!(state.timeline.row_ids().next(), Some(Id(99)));
+			state.history(None);
+			let request = state.request;
+			apply(
+				&mut state,
+				Event::Delete {
+					channel: Id(1),
+					id: Id(99),
+				},
+			);
+			apply(
+				&mut state,
+				Event::History {
+					channel: Id(1),
+					request,
+					older: false,
+					messages: vec![message(99), message(150)],
+				},
+			);
+			assert_eq!(
+				state.timeline.row_ids().collect::<Vec<_>>(),
+				[Id(99), Id(150)]
+			);
+			assert!(state.timeline.get(Id(99)).is_none());
+			assert!(state.timeline.get_display(Id(99)).is_none());
+			assert!(state.timeline.get(Id(150)).is_some());
+			state.history(None);
+			let request = state.request;
+			apply(&mut state, Event::Resync);
+			apply(
+				&mut state,
+				Event::History {
+					channel: Id(1),
+					request,
+					older: false,
+					messages: vec![message(99)],
+				},
+			);
+			assert_eq!(state.timeline.row_count(), 0);
+			assert_eq!(state.drafts[&Id(1)], "unsent draft");
+		}
 	}
 
 	fn apply(state: &mut State, event: Event) {
@@ -3954,10 +5249,12 @@ mod tests {
 	}
 	pub(super) fn message(id: u64) -> Message {
 		Message {
+			sticker_items: Vec::new(),
 			reactions: Some(vec![]),
 			id: Id(id),
 			channel: Id(1),
 			author: User {
+				primary_guild: None,
 				id: Id(2),
 				name: "Synthetic".into(),
 				avatar: None,
@@ -3973,8 +5270,13 @@ mod tests {
 			reply_to: None,
 			kind: 0,
 			reply_deleted: false,
+			interaction: None,
 			forwarded: false,
 			unsupported: false,
+			components: vec![],
+			application_id: None,
+			flags: 0,
+			ephemeral: false,
 			extra_content: Default::default(),
 			embeds: vec![],
 			attachments: vec![],
@@ -3986,141 +5288,6 @@ mod tests {
 			mentions: Vec::new(),
 			embeds_suppressed: false,
 		}
-	}
-	#[test]
-	fn deleted_reading_rows_keep_pagination_and_release_reply_targets() {
-		let mut state = State {
-			user: Some(message(1).author),
-			gateway_connected: true,
-			auth: auth::AuthState::Authenticated,
-			selected: Some(Id(1)),
-			channels: vec![Channel {
-				id: Id(1),
-				guild: None,
-				parent_id: None,
-				kind: 1,
-				position: 0,
-				name: "Synthetic DM".into(),
-				recipients: vec![],
-				last_message: None,
-				icon: None,
-				member_list_id: None,
-				message_count: None,
-			}],
-			..State::default()
-		};
-		state.drafts.insert(Id(1), "unsent draft".into());
-		state.history(None);
-		let request = state.request;
-		apply(
-			&mut state,
-			Event::History {
-				channel: Id(1),
-				request,
-				older: false,
-				messages: (100..150).map(message).collect(),
-			},
-		);
-		let positions = state.timeline.row_ids().collect::<Vec<_>>();
-		state.reply = Some(Reply::to(Id(100)));
-		apply(
-			&mut state,
-			Event::Delete {
-				channel: Id(2),
-				id: Id(100),
-			},
-		);
-		assert_eq!(state.reply_target(), Some(Id(100)));
-		assert!(state.timeline.get(Id(100)).is_some());
-		apply(
-			&mut state,
-			Event::Delete {
-				channel: Id(1),
-				id: Id(100),
-			},
-		);
-		assert_eq!(state.reply, None);
-		state.reply = Some(Reply::to(Id(101)));
-		let mut ids: Vec<_> = (101..150).map(Id).collect();
-		ids.extend([Id(101), Id(999)]); // Duplicate and unknown IDs create no extra rows.
-		apply(
-			&mut state,
-			Event::DeleteBulk {
-				channel: Id(1),
-				ids,
-			},
-		);
-		assert_eq!(state.reply, None);
-		assert_eq!(state.timeline.row_ids().collect::<Vec<_>>(), positions);
-		assert!(state.timeline.is_empty());
-		assert_eq!(state.timeline.bytes(), 0);
-		assert!(state.can_load_older());
-		assert!(!state.can_edit(Id(1), Id(100)));
-		assert!(matches!(
-			state.older_history(),
-			Some(Command::History {
-				before: Some(Id(100)),
-				..
-			})
-		));
-		let request = state.request;
-		apply(
-			&mut state,
-			Event::SendResult {
-				nonce: "synthetic-late".into(),
-				result: Ok(message(100)),
-			},
-		);
-		assert!(state.timeline.get(Id(100)).is_none());
-		apply(
-			&mut state,
-			Event::History {
-				channel: Id(1),
-				request,
-				older: true,
-				messages: vec![message(99)],
-			},
-		);
-		assert_eq!(state.timeline.len(), 1);
-		assert_eq!(state.timeline.row_count(), 51);
-		assert_eq!(state.timeline.row_ids().next(), Some(Id(99)));
-		state.history(None);
-		let request = state.request;
-		apply(
-			&mut state,
-			Event::Delete {
-				channel: Id(1),
-				id: Id(99),
-			},
-		);
-		apply(
-			&mut state,
-			Event::History {
-				channel: Id(1),
-				request,
-				older: false,
-				messages: vec![message(99), message(150)],
-			},
-		);
-		assert_eq!(
-			state.timeline.row_ids().collect::<Vec<_>>(),
-			[Id(99), Id(150)]
-		);
-		assert!(state.timeline.get(Id(99)).is_none());
-		state.history(None);
-		let request = state.request;
-		apply(&mut state, Event::Resync);
-		apply(
-			&mut state,
-			Event::History {
-				channel: Id(1),
-				request,
-				older: false,
-				messages: vec![message(99)],
-			},
-		);
-		assert_eq!(state.timeline.row_count(), 0);
-		assert_eq!(state.drafts[&Id(1)], "unsent draft");
 	}
 	#[test]
 	fn members_reject_late_requests_and_permission_invalidations() {
@@ -4140,13 +5307,14 @@ mod tests {
 				recipients: vec![user.clone()],
 				icon: None,
 				member_list_id: None,
+				tags: None,
 				message_count: None,
 			}],
 			..State::default()
 		};
 		state.select(Id(1));
 		state.request_members();
-		assert_eq!(state.members.as_ref().unwrap().rows.len(), 1);
+		assert_eq!(state.members.as_ref().unwrap().slots.len(), 1);
 		let previous = state.members.clone().unwrap();
 		state.close_members();
 		apply(&mut state, Event::Members(previous.clone()));
@@ -4154,11 +5322,7 @@ mod tests {
 		state.request_members();
 		apply(&mut state, Event::PermissionsChanged);
 		apply(&mut state, Event::Members(previous));
-		assert!(state.members.as_ref().unwrap().rows.is_empty());
-		assert_eq!(
-			state.members.as_ref().unwrap().freshness,
-			Freshness::Unavailable
-		);
+		assert!(state.members.is_none());
 		apply(&mut state, Event::Resumed);
 		assert!(state.members.is_none());
 		state.request_members();
@@ -4167,6 +5331,7 @@ mod tests {
 			Event::RecipientAdded {
 				channel: Id(1),
 				user: User {
+					primary_guild: None,
 					id: Id(3),
 					name: "Other".into(),
 					avatar: None,
@@ -4176,7 +5341,7 @@ mod tests {
 				},
 			},
 		);
-		assert_eq!(state.members.as_ref().unwrap().rows.len(), 2);
+		assert_eq!(state.members.as_ref().unwrap().slots.len(), 2);
 		apply(
 			&mut state,
 			Event::RecipientRemoved {
@@ -4184,145 +5349,88 @@ mod tests {
 				user: Id(3),
 			},
 		);
-		assert_eq!(state.members.as_ref().unwrap().rows.len(), 1);
-	}
-	#[test]
-	fn channel_restoration_requires_known_guild_and_preserves_existing_patch_state() {
-		let channel = Channel {
-			id: Id(1),
+		assert_eq!(state.members.as_ref().unwrap().slots.len(), 1);
+		let user = state.members.as_ref().unwrap().slots[0]
+			.as_ref()
+			.and_then(|slot| match slot {
+				MemberSlot::Person(member) => Some(member.user.clone()),
+				MemberSlot::Group(_) => None,
+			})
+			.unwrap();
+		let kept = MemberList {
 			guild: Some(Id(10)),
-			parent_id: None,
-			kind: 0,
-			name: "Original".into(),
-			position: 7,
-			recipients: vec![],
-			last_message: Some(Id(80)),
-			icon: None,
-			member_list_id: Some("known-list".into()),
-			message_count: None,
-		};
-		let mut state = State {
-			user: Some(message(1).author),
-			channels: vec![channel.clone()],
-			guilds: vec![Guild {
-				id: Id(10),
-				name: "Synthetic".into(),
-				icon: None,
-				emojis: None,
-			}],
-			selected: Some(Id(1)),
-			auth: auth::AuthState::Authenticated,
-			gateway_connected: true,
+			channel: Id(1),
+			request: 7,
+			start: 0,
+			slots: vec![Some(MemberSlot::Person(Member {
+				roles: vec![],
+				user: user.clone(),
+				nick: Some("Kept".into()),
+				status: None,
+				custom_status: None,
+				activities: vec![],
+				clients: model::ClientPlatforms::default(),
+			}))],
+			total: 250,
+			lazy: true,
 			freshness: Freshness::Fresh,
-			..State::default()
+			groups: vec![],
+			ranges: vec![[0, 99]],
 		};
-		grant_permissions(&mut state);
-		let candidate = Channel {
-			name: "Restored".into(),
-			position: 0,
-			last_message: None,
-			icon: None,
-			member_list_id: None,
-			message_count: None,
-			..channel.clone()
+		state.members = Some(kept.clone());
+		state.member_chunks.merge(&kept);
+		let holes = MemberList {
+			start: 100,
+			slots: vec![None; 100],
+			ranges: vec![[100, 199]],
+			freshness: Freshness::Loading,
+			..kept.clone()
 		};
-		apply(&mut state, Event::ChannelRestored(candidate.clone()));
-		assert!(
-			state.channels[0] == channel,
-			"A candidate cannot replace a known channel's absent fields"
-		);
+		apply(&mut state, Event::Members(holes));
+		match state.member_slot(0) {
+			Some(MemberSlot::Person(member)) => assert_eq!(member.nick.as_deref(), Some("Kept")),
+			_ => panic!("loading snapshot keeps the scrolled-away chunk"),
+		}
+		assert_eq!(state.members.as_ref().unwrap().ranges, vec![[0, 99]]);
+		let mut later_slots = vec![None; 100];
+		later_slots[0] = Some(MemberSlot::Person(Member {
+			roles: vec![],
+			user: user.clone(),
+			nick: Some("Later".into()),
+			status: None,
+			custom_status: None,
+			activities: vec![],
+			clients: model::ClientPlatforms::default(),
+		}));
 		apply(
 			&mut state,
-			Event::ChannelChanged(ChannelPatch {
-				icon: model::Patch::Absent,
-				id: Id(1),
-				name: Patch::Value("Renamed".into()),
-				last_message: Patch::Absent,
-				parent_id: Patch::Absent,
-				position: Patch::Absent,
-				kind: Patch::Absent,
-				message_count: Patch::Absent,
+			Event::Members(MemberList {
+				start: 100,
+				slots: later_slots,
+				ranges: vec![[100, 199]],
+				freshness: Freshness::Fresh,
+				..kept.clone()
 			}),
 		);
-		assert_eq!(state.channels[0].name, "Renamed");
-		assert_eq!(state.channels[0].last_message, Some(Id(80)));
-		assert_eq!(
-			state.channels[0].member_list_id.as_deref(),
-			Some("known-list")
-		);
-		state.drafts.insert(Id(1), "Preserved draft".into());
-		state.history(None);
-		let old_request = state.request;
-		apply(&mut state, Event::Unavailable(Id(1)));
-		for invalid in [
-			Channel {
-				guild: None,
-				..candidate.clone()
-			},
-			Channel {
-				guild: Some(Id(99)),
-				..candidate.clone()
-			},
-			Channel {
-				guild: Some(Id(0)),
-				..candidate.clone()
-			},
-			Channel {
-				id: Id(0),
-				..candidate.clone()
-			},
-			Channel {
-				kind: 1,
-				..candidate.clone()
-			},
-			Channel {
-				kind: 10,
-				..candidate.clone()
-			},
-			Channel {
-				kind: 11,
-				..candidate.clone()
-			},
-			Channel {
-				kind: 12,
-				..candidate.clone()
-			},
-			Channel {
-				kind: 255,
-				..candidate.clone()
-			},
-		] {
-			apply(&mut state, Event::ChannelRestored(invalid));
-			assert!(state.channels.is_empty());
+		match state.member_slot(100) {
+			Some(MemberSlot::Person(member)) => assert_eq!(member.nick.as_deref(), Some("Later")),
+			_ => panic!("a snapshot for a left range stays in the cache"),
 		}
-		apply(&mut state, Event::ChannelRestored(candidate.clone()));
-		assert!(state.channels[0] == candidate);
-		assert_eq!(state.freshness, Freshness::Unavailable);
-		assert!(!state.history_pending);
+		assert_eq!(state.members.as_ref().unwrap().ranges, vec![[0, 99]]);
 		apply(
 			&mut state,
-			Event::History {
-				channel: Id(1),
-				request: old_request,
-				older: false,
-				messages: vec![message(99)],
-			},
+			Event::Members(MemberList {
+				start: 0,
+				slots: vec![None; 100],
+				ranges: vec![[0, 99]],
+				freshness: Freshness::Loading,
+				..kept
+			}),
 		);
-		assert!(state.timeline.is_empty());
-		assert_eq!(state.drafts[&Id(1)], "Preserved draft");
-		assert!(matches!(state.select(Id(1)), Some(Command::History { .. })));
-		let request = state.request;
-		apply(
-			&mut state,
-			Event::History {
-				channel: Id(1),
-				request,
-				older: false,
-				messages: vec![message(100)],
-			},
-		);
-		assert_eq!(state.freshness, Freshness::Fresh);
-		assert!(state.timeline.get(Id(100)).is_some());
+		match state.member_slot(0) {
+			Some(MemberSlot::Person(member)) => assert_eq!(member.nick.as_deref(), Some("Kept")),
+			_ => panic!("a loading snapshot for the open range keeps the cached row"),
+		}
 	}
 
 	#[test]
@@ -4338,9 +5446,11 @@ mod tests {
 			last_message: None,
 			icon: None,
 			member_list_id: None,
+			tags: None,
 			message_count: None,
 		};
 		let guild = Guild {
+			stickers: None,
 			id: Id(10),
 			name: "Synthetic".into(),
 			icon: None,
@@ -4416,28 +5526,80 @@ mod tests {
 
 	#[test]
 	fn ready_replacement_and_removed_reload_cannot_restore_unavailable_history() {
-		let channel = |kind| Channel {
-			id: Id(1),
-			guild: None,
-			parent_id: None,
-			kind,
-			name: "Synthetic".into(),
-			position: 0,
-			recipients: vec![],
-			last_message: None,
-			icon: None,
-			member_list_id: None,
-			message_count: None,
-		};
-		let user = || User {
-			id: Id(2),
-			name: "Synthetic".into(),
-			avatar: None,
-			webhook: false,
-			kind: Default::default(),
-			discriminator: 0,
-		};
-		for replacement in [None, Some(channel(4))] {
+		{
+			let channel = |kind| Channel {
+				id: Id(1),
+				guild: None,
+				parent_id: None,
+				kind,
+				name: "Synthetic".into(),
+				position: 0,
+				recipients: vec![],
+				last_message: None,
+				icon: None,
+				member_list_id: None,
+				tags: None,
+				message_count: None,
+			};
+			let user = || User {
+				primary_guild: None,
+				id: Id(2),
+				name: "Synthetic".into(),
+				avatar: None,
+				webhook: false,
+				kind: Default::default(),
+				discriminator: 0,
+			};
+			for replacement in [None, Some(channel(4))] {
+				let mut state = State {
+					user: Some(user()),
+					channels: vec![channel(1)],
+					selected: Some(Id(1)),
+					auth: auth::AuthState::Authenticated,
+					gateway_connected: true,
+					freshness: Freshness::Fresh,
+					..State::default()
+				};
+				state.timeline.insert(message(80), true, false).unwrap();
+				state.drafts.insert(Id(1), "Preserve this draft".into());
+				state.reply = Some(Reply::to(Id(80)));
+				assert!(matches!(state.history(None), Command::History { .. }));
+				let request = state.request;
+				apply(
+					&mut state,
+					Event::Ready {
+						permissions: model::permissions::Snapshot::default(),
+						user: user(),
+						guilds: vec![],
+						channels: replacement.into_iter().collect(),
+					},
+				);
+				assert!(state.selected.is_none());
+				assert!(state.timeline.is_empty());
+				assert!(state.reply.is_none());
+				assert_eq!(state.freshness, Freshness::Unavailable);
+				assert!(!state.history_pending);
+				assert_ne!(state.request, request);
+				assert_eq!(state.drafts[&Id(1)], "Preserve this draft");
+				assert!(
+					matches!(state.history(None), Command::CancelSearch),
+					"Reload cannot schedule HTTP or a cache load for an unavailable channel"
+				);
+				apply(
+					&mut state,
+					Event::History {
+						channel: Id(1),
+						request,
+						older: false,
+						messages: vec![message(99)],
+					},
+				);
+				apply(&mut state, Event::Message(message(100)));
+				assert!(state.timeline.is_empty());
+				assert!(!state.history_pending);
+				assert_eq!(state.freshness, Freshness::Unavailable);
+			}
+
 			let mut state = State {
 				user: Some(user()),
 				channels: vec![channel(1)],
@@ -4448,248 +5610,200 @@ mod tests {
 				..State::default()
 			};
 			state.timeline.insert(message(80), true, false).unwrap();
-			state.drafts.insert(Id(1), "Preserve this draft".into());
-			state.reply = Some(Reply::to(Id(80)));
-			assert!(matches!(state.history(None), Command::History { .. }));
-			let request = state.request;
+			state.history(None);
+			let old_request = state.request;
 			apply(
 				&mut state,
 				Event::Ready {
 					permissions: model::permissions::Snapshot::default(),
 					user: user(),
 					guilds: vec![],
-					channels: replacement.into_iter().collect(),
+					channels: vec![channel(1)],
 				},
 			);
-			assert!(state.selected.is_none());
-			assert!(state.timeline.is_empty());
-			assert!(state.reply.is_none());
-			assert_eq!(state.freshness, Freshness::Unavailable);
+			assert_eq!(state.selected, Some(Id(1)));
+			assert_eq!(state.freshness, Freshness::Stale);
 			assert!(!state.history_pending);
-			assert_ne!(state.request, request);
-			assert_eq!(state.drafts[&Id(1)], "Preserve this draft");
-			assert!(
-				matches!(state.history(None), Command::CancelSearch),
-				"Reload cannot schedule HTTP or a cache load for an unavailable channel"
+			assert_ne!(state.request, old_request);
+			apply(
+				&mut state,
+				Event::History {
+					channel: Id(1),
+					request: old_request,
+					older: false,
+					messages: vec![message(99)],
+				},
 			);
+			assert!(state.timeline.get(Id(99)).is_none());
+			assert_eq!(state.freshness, Freshness::Stale);
+			let Command::History { request, .. } = state.history(None) else {
+				panic!()
+			};
 			apply(
 				&mut state,
 				Event::History {
 					channel: Id(1),
 					request,
 					older: false,
+					messages: vec![message(100)],
+				},
+			);
+			assert_eq!(state.freshness, Freshness::Fresh);
+			assert!(state.timeline.get(Id(100)).is_some());
+			apply(&mut state, Event::Unavailable(Id(1)));
+			assert_eq!(
+				state.selected,
+				Some(Id(1)),
+				"The existing unavailable state may retain its old selection"
+			);
+			assert!(matches!(state.history(None), Command::CancelSearch));
+			assert!(!state.history_pending);
+			assert!(state.timeline.is_empty());
+			assert_eq!(state.freshness, Freshness::Unavailable);
+			assert!(matches!(
+				State::default().history(None),
+				Command::CancelSearch
+			));
+		}
+		{
+			let mut state = State::default();
+			apply(
+				&mut state,
+				Event::Ready {
+					permissions: model::permissions::Snapshot::default(),
+					user: User {
+						primary_guild: None,
+						id: Id(2),
+						name: "Synthetic".into(),
+						avatar: None,
+						webhook: false,
+						kind: Default::default(),
+						discriminator: 0,
+					},
+					guilds: vec![],
+					channels: vec![Channel {
+						last_message: None,
+						id: Id(1),
+						guild: None,
+						parent_id: None,
+						position: 0,
+						name: "Synthetic".into(),
+						kind: 1,
+						recipients: vec![],
+						icon: None,
+						member_list_id: None,
+						tags: None,
+						message_count: None,
+					}],
+				},
+			);
+			state.select(Id(1));
+			let old_request = state.request;
+			apply(&mut state, Event::Disconnected);
+			apply(
+				&mut state,
+				Event::History {
+					channel: Id(1),
+					request: old_request,
+					older: false,
 					messages: vec![message(99)],
 				},
 			);
-			apply(&mut state, Event::Message(message(100)));
+			assert_eq!(state.freshness, Freshness::Stale);
 			assert!(state.timeline.is_empty());
-			assert!(!state.history_pending);
-			assert_eq!(state.freshness, Freshness::Unavailable);
-		}
+			assert!(!state.can_load_older());
 
-		let mut state = State {
-			user: Some(user()),
-			channels: vec![channel(1)],
-			selected: Some(Id(1)),
-			auth: auth::AuthState::Authenticated,
-			gateway_connected: true,
-			freshness: Freshness::Fresh,
-			..State::default()
-		};
-		state.timeline.insert(message(80), true, false).unwrap();
-		state.history(None);
-		let old_request = state.request;
-		apply(
-			&mut state,
-			Event::Ready {
-				permissions: model::permissions::Snapshot::default(),
-				user: user(),
-				guilds: vec![],
-				channels: vec![channel(1)],
-			},
-		);
-		assert_eq!(state.selected, Some(Id(1)));
-		assert_eq!(state.freshness, Freshness::Stale);
-		assert!(!state.history_pending);
-		assert_ne!(state.request, old_request);
-		apply(
-			&mut state,
-			Event::History {
-				channel: Id(1),
-				request: old_request,
-				older: false,
-				messages: vec![message(99)],
-			},
-		);
-		assert!(state.timeline.get(Id(99)).is_none());
-		assert_eq!(state.freshness, Freshness::Stale);
-		let Command::History { request, .. } = state.history(None) else {
-			panic!()
-		};
-		apply(
-			&mut state,
-			Event::History {
-				channel: Id(1),
-				request,
-				older: false,
-				messages: vec![message(100)],
-			},
-		);
-		assert_eq!(state.freshness, Freshness::Fresh);
-		assert!(state.timeline.get(Id(100)).is_some());
-		apply(&mut state, Event::Unavailable(Id(1)));
-		assert_eq!(
-			state.selected,
-			Some(Id(1)),
-			"The existing unavailable state may retain its old selection"
-		);
-		assert!(matches!(state.history(None), Command::CancelSearch));
-		assert!(!state.history_pending);
-		assert!(state.timeline.is_empty());
-		assert_eq!(state.freshness, Freshness::Unavailable);
-		assert!(matches!(
-			State::default().history(None),
-			Command::CancelSearch
-		));
-	}
-
-	#[test]
-	fn history_is_scoped_bounded_and_cannot_restore_freshness_after_disconnect() {
-		let mut state = State::default();
-		apply(
-			&mut state,
-			Event::Ready {
-				permissions: model::permissions::Snapshot::default(),
-				user: User {
-					id: Id(2),
-					name: "Synthetic".into(),
-					avatar: None,
-					webhook: false,
-					kind: Default::default(),
-					discriminator: 0,
+			apply(&mut state, Event::Resumed);
+			state.history(None);
+			let request = state.request;
+			apply(
+				&mut state,
+				Event::History {
+					channel: Id(1),
+					request,
+					older: false,
+					messages: (51..101).map(message).collect(),
 				},
-				guilds: vec![],
-				channels: vec![Channel {
-					last_message: None,
-					id: Id(1),
-					guild: None,
-					parent_id: None,
-					position: 0,
-					name: "Synthetic".into(),
-					kind: 1,
-					recipients: vec![],
-					icon: None,
-					member_list_id: None,
-					message_count: None,
-				}],
-			},
-		);
-		state.select(Id(1));
-		let old_request = state.request;
-		apply(&mut state, Event::Disconnected);
-		apply(
-			&mut state,
-			Event::History {
-				channel: Id(1),
-				request: old_request,
-				older: false,
-				messages: vec![message(99)],
-			},
-		);
-		assert_eq!(state.freshness, Freshness::Stale);
-		assert!(state.timeline.is_empty());
-		assert!(!state.can_load_older());
+			);
+			assert_eq!(state.freshness, Freshness::Fresh);
+			assert!(state.can_load_older());
+			assert!(matches!(
+				state.older_history(),
+				Some(Command::History {
+					before: Some(Id(51)),
+					..
+				})
+			));
+			assert!(state.older_history().is_none()); // no duplicate concurrent page
+			let request = state.request;
+			apply(
+				&mut state,
+				Event::HistoryFailed {
+					channel: Id(1),
+					request: old_request,
+					failure: auth::Failure::Forbidden,
+				},
+			);
+			assert_eq!(state.freshness, Freshness::Loading);
+			apply(
+				&mut state,
+				Event::History {
+					channel: Id(1),
+					request,
+					older: true,
+					messages: vec![message(50)],
+				},
+			);
+			assert_eq!(state.timeline.len(), 51);
+			assert!(!state.can_load_older()); // short final page
+			apply(
+				&mut state,
+				Event::DeleteBulk {
+					channel: Id(1),
+					ids: vec![Id(50), Id(51)],
+				},
+			);
+			assert_eq!(state.timeline.len(), 49);
+			assert!(state.timeline.get(Id(50)).is_none());
 
-		apply(&mut state, Event::Resumed);
-		state.history(None);
-		let request = state.request;
-		apply(
-			&mut state,
-			Event::History {
-				channel: Id(1),
-				request,
-				older: false,
-				messages: (51..101).map(message).collect(),
-			},
-		);
-		assert_eq!(state.freshness, Freshness::Fresh);
-		assert!(state.can_load_older());
-		assert!(matches!(
-			state.older_history(),
-			Some(Command::History {
-				before: Some(Id(51)),
-				..
-			})
-		));
-		assert!(state.older_history().is_none()); // no duplicate concurrent page
-		let request = state.request;
-		apply(
-			&mut state,
-			Event::HistoryFailed {
-				channel: Id(1),
-				request: old_request,
-				failure: auth::Failure::Forbidden,
-			},
-		);
-		assert_eq!(state.freshness, Freshness::Loading);
-		apply(
-			&mut state,
-			Event::History {
-				channel: Id(1),
-				request,
-				older: true,
-				messages: vec![message(50)],
-			},
-		);
-		assert_eq!(state.timeline.len(), 51);
-		assert!(!state.can_load_older()); // short final page
-		apply(
-			&mut state,
-			Event::DeleteBulk {
-				channel: Id(1),
-				ids: vec![Id(50), Id(51)],
-			},
-		);
-		assert_eq!(state.timeline.len(), 49);
-		assert!(state.timeline.get(Id(50)).is_none());
-
-		state.history(None);
-		let request = state.request;
-		apply(
-			&mut state,
-			Event::History {
-				channel: Id(1),
-				request,
-				older: false,
-				messages: vec![message(100)],
-			},
-		);
-		assert_eq!(state.timeline.len(), 1); // old records absent from fresh page disappear
-		state.history(Some(Id(100)));
-		let request = state.request;
-		apply(
-			&mut state,
-			Event::History {
-				channel: Id(1),
-				request,
-				older: true,
-				messages: vec![message(100)],
-			},
-		);
-		assert_eq!(state.freshness, Freshness::Stale); // before boundary cannot repeat itself
-		state.history(None);
-		let request = state.request;
-		apply(
-			&mut state,
-			Event::HistoryFailed {
-				channel: Id(1),
-				request,
-				failure: auth::Failure::Forbidden,
-			},
-		);
-		assert_eq!(state.freshness, Freshness::Unavailable);
-		assert!(state.timeline.is_empty());
-		apply(&mut state, Event::Message(message(200)));
-		assert!(state.timeline.is_empty()); // queued live content cannot undo revocation
+			state.history(None);
+			let request = state.request;
+			apply(
+				&mut state,
+				Event::History {
+					channel: Id(1),
+					request,
+					older: false,
+					messages: vec![message(100)],
+				},
+			);
+			assert_eq!(state.timeline.len(), 1); // old records absent from fresh page disappear
+			state.history(Some(Id(100)));
+			let request = state.request;
+			apply(
+				&mut state,
+				Event::History {
+					channel: Id(1),
+					request,
+					older: true,
+					messages: vec![message(100)],
+				},
+			);
+			assert_eq!(state.freshness, Freshness::Stale); // before boundary cannot repeat itself
+			state.history(None);
+			let request = state.request;
+			apply(
+				&mut state,
+				Event::HistoryFailed {
+					channel: Id(1),
+					request,
+					failure: auth::Failure::Forbidden,
+				},
+			);
+			assert_eq!(state.freshness, Freshness::Unavailable);
+			assert!(state.timeline.is_empty());
+			apply(&mut state, Event::Message(message(200)));
+			assert!(state.timeline.is_empty()); // queued live content cannot undo revocation
+		}
 	}
 }

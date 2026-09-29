@@ -66,7 +66,10 @@ pub fn gif_page(query: Option<&str>) -> model::GifPage {
 				"Thank you",
 			]
 			.into_iter()
-			.map(str::to_owned)
+			.map(|name| model::GifCategory {
+				name: name.to_owned(),
+				preview: None,
+			})
 			.collect()
 		} else {
 			Vec::new()
@@ -109,6 +112,13 @@ pub fn message(id: u64, channel: Id) -> Message {
 			kind: Default::default(),
 			discriminator: 0,
 			id: Id(if id.is_multiple_of(2) { 1 } else { 2 }),
+			primary_guild: (!id.is_multiple_of(2)).then(|| {
+				Box::new(model::ClanTag {
+					guild: Id(10),
+					tag: "SPDY".into(),
+					badge: Some("f".repeat(32)),
+				})
+			}),
 			name: if id.is_multiple_of(2) {
 				"You (synthetic)"
 			} else {
@@ -124,8 +134,14 @@ pub fn message(id: u64, channel: Id) -> Message {
 		reply_to: None,
 		kind: 0,
 		reply_deleted: false,
+		interaction: None,
 		forwarded: false,
 		unsupported: false,
+		components: vec![],
+		sticker_items: vec![],
+		application_id: None,
+		flags: 0,
+		ephemeral: false,
 		extra_content: Default::default(),
 		embeds: demo_embeds(id),
 		attachments: if id == 500 {
@@ -201,6 +217,7 @@ pub fn message(id: u64, channel: Id) -> Message {
 				webhook: false,
 				kind: Default::default(),
 				discriminator: 0,
+				primary_guild: None,
 			}]
 		} else {
 			Vec::new()
@@ -235,6 +252,36 @@ fn demo_embeds(id: u64) -> Vec<Embed> {
         ..Default::default()
     }]
 }
+/// Synthetic tags offered by the fixture forum, one moderated and one with an emoji.
+fn forum_tags() -> model::forum::Tags {
+	let tag = |id: u64, name: &str, emoji: Option<&str>, moderated: bool| model::forum::Tag {
+		id: Id(id),
+		name: name.into(),
+		moderated,
+		emoji_id: None,
+		emoji_name: emoji.map(Into::into),
+	};
+	model::forum::Tags {
+		available: vec![
+			tag(2601, "Announcement", Some("📣"), true),
+			tag(2602, "Feature request", None, false),
+			tag(2603, "Performance", Some("⚡"), false),
+			tag(2604, "Mobile", None, false),
+			tag(2605, "Discussion", None, false),
+			model::forum::Tag {
+				emoji_id: Some(Id(9002)),
+				..tag(2606, "Bug", Some("serein_spark"), false)
+			},
+			tag(2607, "Accessibility", None, false),
+		],
+		reaction: Some(model::ReactionEmoji {
+			id: None,
+			name: Some("❤️".into()),
+		}),
+		..Default::default()
+	}
+}
+
 pub fn demo_state() -> State {
 	let mut state = State {
 		demo: true,
@@ -249,10 +296,12 @@ pub fn demo_state() -> State {
 				webhook: false,
 				kind: Default::default(),
 				discriminator: 0,
+				primary_guild: None,
 				id: Id(1),
 				name: "You (synthetic)".into(),
 			},
 			guilds: vec![Guild {
+				stickers: None,
 				emojis: Some(vec![
 					model::CustomEmoji {
 						id: Id(9001),
@@ -287,6 +336,7 @@ pub fn demo_state() -> State {
 					recipients: vec![],
 					icon: None,
 					member_list_id: Some("everyone".into()),
+					tags: None,
 					message_count: None,
 				},
 				Channel {
@@ -300,6 +350,7 @@ pub fn demo_state() -> State {
 					recipients: vec![],
 					icon: None,
 					member_list_id: Some("everyone".into()),
+					tags: None,
 					message_count: None,
 				},
 				Channel {
@@ -313,6 +364,7 @@ pub fn demo_state() -> State {
 					recipients: vec![message(1, Id(22)).author],
 					icon: None,
 					member_list_id: None,
+					tags: None,
 					message_count: None,
 				},
 				Channel {
@@ -326,6 +378,7 @@ pub fn demo_state() -> State {
 					recipients: vec![],
 					icon: None,
 					member_list_id: None,
+					tags: None,
 					message_count: None,
 				},
 				Channel {
@@ -342,10 +395,12 @@ pub fn demo_state() -> State {
 						webhook: false,
 						kind: Default::default(),
 						discriminator: 0,
+						primary_guild: None,
 					}],
 					last_message: None,
 					icon: None,
 					member_list_id: None,
+					tags: None,
 					message_count: None,
 				},
 				Channel {
@@ -362,10 +417,12 @@ pub fn demo_state() -> State {
 						webhook: false,
 						kind: Default::default(),
 						discriminator: 0,
+						primary_guild: None,
 					}],
 					last_message: Some(Id(900)),
 					icon: None,
 					member_list_id: None,
+					tags: None,
 					message_count: None,
 				},
 				Channel {
@@ -384,11 +441,13 @@ pub fn demo_state() -> State {
 							webhook: false,
 							kind: Default::default(),
 							discriminator: 0,
+							primary_guild: None,
 						},
 					],
 					last_message: None,
 					icon: None,
 					member_list_id: None,
+					tags: None,
 					message_count: None,
 				},
 				Channel {
@@ -402,6 +461,7 @@ pub fn demo_state() -> State {
 					recipients: vec![],
 					icon: None,
 					member_list_id: None,
+					tags: None,
 					message_count: None,
 				},
 				Channel {
@@ -415,6 +475,7 @@ pub fn demo_state() -> State {
 					recipients: vec![],
 					icon: None,
 					member_list_id: None,
+					tags: None,
 					message_count: None,
 				},
 				Channel {
@@ -428,6 +489,7 @@ pub fn demo_state() -> State {
 					last_message: None,
 					icon: None,
 					member_list_id: None,
+					tags: Some(Box::new(forum_tags())),
 					message_count: None,
 				},
 				Channel {
@@ -441,6 +503,10 @@ pub fn demo_state() -> State {
 					last_message: Some(Id(1_542_322_755_993_600_000)),
 					icon: None,
 					member_list_id: None,
+					tags: Some(Box::new(model::forum::Tags {
+						applied: vec![Id(2601)],
+						..Default::default()
+					})),
 					message_count: Some(10),
 				},
 				Channel {
@@ -454,6 +520,10 @@ pub fn demo_state() -> State {
 					last_message: Some(Id(1_546_671_410_380_800_000)),
 					icon: None,
 					member_list_id: None,
+					tags: Some(Box::new(model::forum::Tags {
+						applied: vec![Id(2602), Id(2603), Id(2604), Id(2605)],
+						..Default::default()
+					})),
 					message_count: Some(0),
 				},
 				Channel {
@@ -467,6 +537,10 @@ pub fn demo_state() -> State {
 					last_message: Some(Id(1_547_722_335_191_040_000)),
 					icon: None,
 					member_list_id: None,
+					tags: Some(Box::new(model::forum::Tags {
+						applied: vec![Id(2603), Id(2602)],
+						..Default::default()
+					})),
 					message_count: Some(6),
 				},
 				Channel {
@@ -477,10 +551,11 @@ pub fn demo_state() -> State {
 					name: "Introductions thread".into(),
 					kind: 11,
 					recipients: vec![],
-					last_message: None,
+					last_message: Some(Id(1_547_722_335_191_040_000)),
 					icon: None,
 					member_list_id: None,
-					message_count: None,
+					tags: None,
+					message_count: Some(4),
 				},
 			],
 		},
@@ -489,6 +564,31 @@ pub fn demo_state() -> State {
 		.permissions
 		.replace(permission_snapshot(&state))
 		.unwrap();
+	// Offline starters for the fixture posts; the demo painter draws a synthetic grid.
+	for (post, image, count) in [(27, Some(710), 12), (41, None, 3), (42, Some(711), 321)] {
+		state.posts.remember_preview(
+			Id(post),
+			model::forum::Starter {
+				image: image.map(|image| EmbedMedia {
+					url: Some(format!(
+						"https://cdn.discordapp.com/attachments/26/{image}/synthetic-preview.png"
+					)),
+					width: 320,
+					height: 320,
+					..Default::default()
+				}),
+				reactions: vec![model::Reaction {
+					emoji: model::ReactionEmoji {
+						id: None,
+						name: Some(if post == 42 { "🔥" } else { "❤️" }.into()),
+					},
+					count,
+					me: post == 27,
+					me_burst: false,
+				}],
+			},
+		);
+	}
 	state
 		.apply_notification_preferences(client_core::notifications::Event::Settings {
 			entries: vec![client_core::notifications::Setting {
@@ -497,6 +597,7 @@ pub fn demo_state() -> State {
 				level: Some(3),
 				suppress_everyone: Some(false),
 				suppress_roles: Some(false),
+				hide_muted_channels: None,
 				channels: vec![(Id(21), Some(true), Some(3))],
 				channel_mute_until: vec![],
 			}],
@@ -522,6 +623,7 @@ pub fn demo_state() -> State {
 					name: "Avery".into(),
 					avatar: None,
 					discriminator: 0,
+					primary_guild: None,
 					webhook: false,
 					kind: Default::default(),
 				},
@@ -534,6 +636,7 @@ pub fn demo_state() -> State {
 					name: "Rowan".into(),
 					avatar: None,
 					discriminator: 0,
+					primary_guild: None,
 					webhook: false,
 					kind: Default::default(),
 				},
@@ -572,6 +675,7 @@ pub fn demo_state() -> State {
 						webhook: false,
 						kind: Default::default(),
 						discriminator: 0,
+						primary_guild: None,
 					},
 					format!("{}.synthetic", name.to_lowercase()),
 				)
@@ -629,6 +733,7 @@ pub fn voice_demo_state() -> State {
 		recipients: vec![],
 		icon: None,
 		member_list_id: None,
+		tags: None,
 		message_count: None,
 		last_message: None,
 	});
@@ -659,11 +764,13 @@ pub fn voice_demo_state() -> State {
 				webhook: false,
 				kind: Default::default(),
 				discriminator: 0,
+				primary_guild: None,
 			},
 			nick: None,
 			status: None,
 			custom_status: None,
 			activities: vec![],
+			clients: model::ClientPlatforms::default(),
 		}),
 	})
 	.collect();
@@ -677,6 +784,7 @@ pub fn voice_demo_state() -> State {
 		request: 0,
 		phase: Phase::Connected,
 		connected_at: Some(Instant::now() - Duration::from_secs(3663)),
+		channel_started_at: Some(Instant::now() - Duration::from_secs(3663)),
 		muted: false,
 		deafened: false,
 		server_muted: false,
@@ -718,6 +826,7 @@ pub fn call_demo_state() -> State {
 		request: 0,
 		phase: Phase::Connected,
 		connected_at: Some(Instant::now() - Duration::from_secs(754)),
+		channel_started_at: None,
 		muted: false,
 		deafened: false,
 		server_muted: false,
@@ -797,6 +906,36 @@ pub fn empty_channel_demo_state(long_name: bool) -> State {
 	state
 }
 
+/// Synthetic switcher roster for offline captures; these accounts never exist on Discord.
+pub fn demo_accounts(current: &model::User) -> Vec<model::SavedAccount> {
+	vec![
+		model::SavedAccount {
+			id: current.id,
+			name: current.name.clone(),
+			display: Some("Riley Quinn".into()),
+			avatar: current.avatar.clone(),
+			discriminator: current.discriminator,
+			has_token: true,
+		},
+		model::SavedAccount {
+			id: Id(4242),
+			name: "riley.alt".into(),
+			display: Some("Riley (alt)".into()),
+			avatar: None,
+			discriminator: 0,
+			has_token: true,
+		},
+		model::SavedAccount {
+			id: Id(4243),
+			name: "serein.testing".into(),
+			display: None,
+			avatar: None,
+			discriminator: 0,
+			has_token: true,
+		},
+	]
+}
+
 pub fn seed_access_marks(state: &mut State) {
 	use model::permissions::{Overwrite, Role, VIEW_CHANNEL};
 	const GUILD: Id = Id(10);
@@ -813,6 +952,7 @@ pub fn seed_access_marks(state: &mut State) {
 		recipients: vec![],
 		icon: None,
 		member_list_id: None,
+		tags: None,
 		message_count: None,
 	};
 	state.channels.extend([
@@ -875,6 +1015,7 @@ pub fn seed_access_marks(state: &mut State) {
 				level: Some(3),
 				suppress_everyone: Some(false),
 				suppress_roles: Some(false),
+				hide_muted_channels: None,
 				channels: vec![(Id(21), Some(true), Some(3)), (Id(25), Some(true), Some(3))],
 				channel_mute_until: vec![],
 			}],
@@ -892,6 +1033,7 @@ pub fn seed_demo_folder_mosaic(state: &mut State) {
 	];
 	for (id, name, hash) in EXTRA {
 		state.guilds.push(Guild {
+			stickers: None,
 			emojis: None,
 			id: Id(id),
 			name: name.into(),
@@ -957,11 +1099,12 @@ pub fn chat_demo_state() -> State {
 		if i == 6 {
 			m.mentions = vec![User {
 				id: Id(2),
-				name: "Robin (synthetic)".into(),
+				name: "𝖘𝖓𝖎𝖎𝖝. (synthetic)".into(),
 				avatar: None,
 				webhook: false,
 				kind: Default::default(),
 				discriminator: 0,
+				primary_guild: None,
 			}];
 		}
 		if i == 8 {
@@ -1060,6 +1203,7 @@ pub fn permission_snapshot(state: &State) -> model::permissions::Snapshot {
 		| p::SPEAK
 		| p::USE_VAD
 		| p::MANAGE_THREADS
+		| p::CREATE_PUBLIC_THREADS
 		| p::MANAGE_CHANNELS;
 	p::Snapshot {
 		guilds: state
@@ -1106,7 +1250,6 @@ pub fn system_demo_state() -> State {
 		(6, ""),
 		(9, ""),
 		(4, "welcome-and-updates"),
-		(18, "Introductions"),
 		(3, ""),
 		(67, ""),
 		(30, ""),
@@ -1117,6 +1260,7 @@ pub fn system_demo_state() -> State {
 		(61, ""),
 		(62, ""),
 		(65, ""),
+		(18, "Introductions thread"),
 		(222, ""),
 	]
 	.into_iter()
@@ -1137,6 +1281,7 @@ pub fn system_demo_state() -> State {
 			webhook: false,
 			kind: Default::default(),
 			discriminator: 0,
+			primary_guild: None,
 		}];
 		state.timeline.insert(m, false, false).unwrap();
 	}
@@ -1203,6 +1348,37 @@ pub fn friends_demo_state() -> State {
 	let mut state = demo_state();
 	state.apply(Envelope {
 		generation: state.generation,
+		event: Event::UserAction(client_core::user_actions::Event::Restrictions(Some(vec![
+			(
+				User {
+					id: Id(8101),
+					name: "Blocked Example".into(),
+					avatar: None,
+					webhook: false,
+					kind: Default::default(),
+					discriminator: 0,
+					primary_guild: None,
+				},
+				"blocked.synthetic".into(),
+				false,
+			),
+			(
+				User {
+					id: Id(8102),
+					name: "Ignored Example".into(),
+					avatar: None,
+					webhook: false,
+					kind: Default::default(),
+					discriminator: 0,
+					primary_guild: None,
+				},
+				"ignored.synthetic".into(),
+				true,
+			),
+		]))),
+	});
+	state.apply(Envelope {
+		generation: state.generation,
 		event: Event::UserAction(client_core::user_actions::Event::Requests(Some(vec![
 			(
 				model::User {
@@ -1210,6 +1386,7 @@ pub fn friends_demo_state() -> State {
 					name: "Avery".into(),
 					avatar: None,
 					discriminator: 0,
+					primary_guild: None,
 					webhook: false,
 					kind: Default::default(),
 				},
@@ -1222,6 +1399,7 @@ pub fn friends_demo_state() -> State {
 					name: "Morgan".into(),
 					avatar: None,
 					discriminator: 0,
+					primary_guild: None,
 					webhook: false,
 					kind: Default::default(),
 				},
@@ -1244,11 +1422,58 @@ pub fn friends_demo_state() -> State {
 						model::Patch::Null
 					},
 					activities: model::Patch::Value(Vec::new()),
+					clients: model::Patch::Absent,
 				})
 				.collect(),
 		),
 	});
 	state
+}
+
+/// Original offline sticker catalog and one received message, used only by the sticker preview.
+pub fn seed_stickers(state: &mut State) {
+	let sticker = |id, name: &str, guild_id, pack_id| model::Sticker {
+		id: Id(id),
+		name: name.into(),
+		description: "Original synthetic sticker artwork".into(),
+		tags: "hello,wave,smile".into(),
+		format_type: 1,
+		guild_id,
+		pack_id,
+		available: true,
+	};
+	let guild_stickers = vec![
+		sticker(9101, "Wave", Some(Id(10)), None),
+		sticker(9102, "Smile", Some(Id(10)), None),
+		sticker(9103, "Celebrate", Some(Id(10)), None),
+	];
+	if let Some(guild) = state.guilds.iter_mut().find(|guild| guild.id == Id(10)) {
+		guild.stickers = Some(guild_stickers.clone());
+	}
+	state.stickers.recent = vec![guild_stickers[0].clone()];
+	state.stickers.packs = vec![model::StickerPack {
+		id: Id(9200),
+		name: "Serein Friends (synthetic)".into(),
+		stickers: vec![
+			sticker(9201, "Sleep", None, Some(Id(9200))),
+			sticker(9202, "Hello", None, Some(Id(9200))),
+			sticker(9203, "Party", None, Some(Id(9200))),
+		],
+	}];
+	state.stickers.loaded = true;
+	if let Some(channel) = state.selected {
+		state.timeline.clear();
+		let mut message = message(501, channel);
+		message.content.clear();
+		message.embeds.clear();
+		message.attachments.clear();
+		message.sticker_items = vec![state.stickers.packs[0].stickers[0].clone()];
+		message.extra_content.sticker_items = true;
+		state.apply(Envelope {
+			generation: state.generation,
+			event: Event::Message(message),
+		});
+	}
 }
 
 #[cfg(test)]
@@ -1359,6 +1584,8 @@ mod tests {
 			(Some(Id(490)), 491, 500),
 		] {
 			let mut state = demo_state();
+			// A loaded boundary scrolls locally; this covers the paged path.
+			state.timeline.clear();
 			state
 				.apply_read_state(client_core::read_state::Event::Snapshot {
 					entries: Some(vec![(Id(20), marker, 0)]),
@@ -1442,6 +1669,7 @@ mod tests {
 					muted: Some(false),
 					suppress_everyone: Some(false),
 					suppress_roles: Some(false),
+					hide_muted_channels: None,
 					level: Some(0),
 					channels: vec![],
 				}],
@@ -1556,6 +1784,7 @@ mod tests {
 			muted: Some(false),
 			suppress_everyone: Some(false),
 			suppress_roles: Some(false),
+			hide_muted_channels: None,
 			level: Some(1),
 			channels: vec![],
 		};
@@ -1637,6 +1866,7 @@ mod tests {
 					muted: Some(false),
 					suppress_everyone: Some(false),
 					suppress_roles: Some(false),
+					hide_muted_channels: None,
 					level: Some(0),
 					channels: vec![],
 				}],
@@ -1662,6 +1892,7 @@ mod tests {
 					muted: Some(false),
 					suppress_everyone: Some(false),
 					suppress_roles: Some(false),
+					hide_muted_channels: None,
 					level: Some(0),
 					channels: vec![(channel, Some(true), Some(0))],
 				}],
@@ -1681,6 +1912,7 @@ mod tests {
 					muted: Some(false),
 					suppress_everyone: Some(false),
 					suppress_roles: Some(false),
+					hide_muted_channels: None,
 					level: Some(0),
 					channels: vec![],
 				}],
@@ -1722,8 +1954,11 @@ mod tests {
 				.map(|id| SearchHit {
 					id: Id(id),
 					channel: Id(20),
-					author: "Synthetic".into(),
+					author: crate::message(1, Id(20)).author,
+					mentions: vec![],
 					excerpt: "pin".into(),
+					attachments: vec![],
+					embeds: vec![],
 				})
 				.collect(),
 			total: 0,
@@ -1844,6 +2079,120 @@ mod tests {
 		assert!(state.request_pins().is_none());
 	}
 	#[test]
+	fn numbered_search_pages_preserve_scope_retry_and_bound_retained_results() {
+		use client_core::{Command, auth::Failure, search::Outcome};
+		let mut state = demo_state();
+		let page = |id, total| {
+			Outcome::Page(SearchPage {
+				hits: vec![SearchHit {
+					id: Id(id),
+					channel: Id(20),
+					author: crate::message(1, Id(20)).author,
+					mentions: vec![],
+					excerpt: "synthetic match".into(),
+					attachments: vec![],
+					embeds: vec![],
+				}],
+				total,
+				partial: false,
+				pin_cursor: None,
+			})
+		};
+		assert!(state.request_search_page(0).is_none());
+		let query = "synthetic before_id:500";
+		let Command::Search {
+			request, offset: 0, ..
+		} = state.request_search(query.into(), None).unwrap()
+		else {
+			panic!()
+		};
+		assert!(state.request_search_page(0).is_none());
+		state.apply_search(Id(20), request, Err(Failure::Network));
+		assert_eq!(state.search.as_ref().unwrap().page_count(), 1);
+		assert!(state.request_search_page(1).is_none());
+		let Command::Search { request, .. } = state.request_search_page(0).unwrap() else {
+			panic!()
+		};
+		state.apply_search(Id(20), request, Ok(page(499, 51)));
+		assert_eq!(state.search.as_ref().unwrap().page_count(), 3);
+		assert!(state.request_search_page(3).is_none());
+		let Command::Search {
+			request: next,
+			channel,
+			guild,
+			query: retained_query,
+			before,
+			offset,
+		} = state.request_search_page(2).unwrap()
+		else {
+			panic!()
+		};
+		assert_eq!(
+			(channel, guild, before, offset),
+			(Id(20), Some(Id(10)), None, 50)
+		);
+		assert_eq!(retained_query, query);
+		assert!(state.search.as_ref().unwrap().page.is_none());
+		assert_eq!(state.search.as_ref().unwrap().total, Some(51));
+		state.apply_search(Id(20), request, Ok(page(499, 100)));
+		assert!(state.search.as_ref().unwrap().loading);
+		state.apply_search(Id(20), next, Err(Failure::Network));
+		assert_eq!(state.search.as_ref().unwrap().page_count(), 3);
+		let Command::Search {
+			request,
+			offset: 50,
+			..
+		} = state.request_search_page(2).unwrap()
+		else {
+			panic!()
+		};
+		state.apply_search(Id(20), request, Ok(page(449, 51)));
+		assert_eq!(
+			state
+				.search
+				.as_ref()
+				.unwrap()
+				.page
+				.as_ref()
+				.unwrap()
+				.hits
+				.len(),
+			1
+		);
+		let Command::Search {
+			request, offset: 0, ..
+		} = state.request_search_page(0).unwrap()
+		else {
+			panic!()
+		};
+		state.apply_search(Id(20), request, Ok(page(499, 51)));
+		// The legacy cursor API starts a new subquery; numbered pages retain that cursor.
+		let Command::Search {
+			request, offset: 0, ..
+		} = state.request_search(query.into(), Some(Id(499))).unwrap()
+		else {
+			panic!()
+		};
+		state.apply_search(Id(20), request, Ok(page(498, u64::MAX)));
+		assert_eq!(state.search.as_ref().unwrap().page_count(), 400);
+		assert!(state.request_search_page(400).is_none());
+		assert!(state.request_search_page(u32::MAX).is_none());
+		let Command::Search {
+			request,
+			before: Some(Id(499)),
+			offset: model::MAX_SEARCH_OFFSET,
+			..
+		} = state.request_search_page(399).unwrap()
+		else {
+			panic!()
+		};
+		state.apply_search(Id(20), request, Ok(page(1, u64::MAX)));
+		state.request_pins().unwrap();
+		assert!(state.request_search_page(0).is_none());
+		state.select(Id(22));
+		assert!(state.request_search_page(0).is_none());
+	}
+	#[test]
 	fn search_pages_reject_late_results_and_open_only_revalidated_history() {
 		use client_core::{Command, auth::Failure, search::Outcome};
 		let mut state = demo_state();
@@ -1852,8 +2201,11 @@ mod tests {
 				hits: vec![SearchHit {
 					id: Id(499),
 					channel: Id(20),
-					author: "Synthetic".into(),
+					author: crate::message(1, Id(20)).author,
+					mentions: vec![],
 					excerpt: "index text".into(),
+					attachments: vec![],
+					embeds: vec![],
 				}],
 				total: 50,
 				partial: false,

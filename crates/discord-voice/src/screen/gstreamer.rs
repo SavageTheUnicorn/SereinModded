@@ -16,15 +16,23 @@ const MAX_SOURCE_BYTES: usize = 7680 * 4320 * 4;
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Mode {
 	Va,
+	VaLegacy,
 	Nvidia,
 	NvidiaCopy,
 	Software,
 }
 impl Mode {
-	pub(super) const ALL: [Self; 4] = [Self::Va, Self::Nvidia, Self::NvidiaCopy, Self::Software];
+	pub(super) const ALL: [Self; 5] = [
+		Self::Va,
+		Self::VaLegacy,
+		Self::Nvidia,
+		Self::NvidiaCopy,
+		Self::Software,
+	];
 	pub(super) fn label(self) -> &'static str {
 		match self {
 			Self::Va => "H.264 · VA-API hardware encoding",
+			Self::VaLegacy => "H.264 · VA-API hardware encoding · CPU scaling",
 			Self::Nvidia => "H.264 · NVENC hardware encoding",
 			Self::NvidiaCopy => "H.264 · NVENC hardware encoding · CPU scaling",
 			Self::Software => "H.264 · software encoding (higher CPU use)",
@@ -51,6 +59,7 @@ impl Capture {
 	pub(super) fn new(
 		settings: Settings,
 		mode: Mode,
+		bitrate: u32,
 		source: gst::Element,
 		stop: Arc<AtomicBool>,
 		ready: Arc<AtomicBool>,
@@ -60,6 +69,7 @@ impl Capture {
 		if !settings.valid() {
 			return Err(INVALID);
 		}
+		let bitrate = bitrate.clamp(250_000, settings.bit_rate());
 		let size = format!(
 			"width={},height={},pixel-aspect-ratio=1/1",
 			settings.width, settings.height
@@ -79,6 +89,12 @@ impl Capture {
 				),
 				"glcolorscale ! video/x-raw(memory:GLMemory),format=RGBA,width=640,height=360 ! gldownload ! videoconvert ! video/x-raw,format=BGRA",
 			),
+			// ponytail: CPU scaling avoids mixing VAMemory and legacy VASurface buffers;
+			// add legacy GPU postprocessing only if measured scaling cost warrants it.
+			Mode::VaLegacy => (
+				format!("videoconvertscale add-borders=true ! video/x-raw,format=NV12,{size}"),
+				"videoconvertscale add-borders=true ! video/x-raw,format=BGRA,width=640,height=360",
+			),
 			Mode::NvidiaCopy | Mode::Software => (
 				format!("videoconvertscale add-borders=true ! video/x-raw,format=BGRA,{size}"),
 				"videoconvertscale add-borders=true ! video/x-raw,format=BGRA,width=640,height=360",
@@ -87,12 +103,17 @@ impl Capture {
 		let encoder = match mode {
 			Mode::Va => format!(
 				"vah264enc name=encoder rate-control=cbr bitrate={} key-int-max={} b-frames=0",
-				settings.bit_rate() / 1000,
+				bitrate / 1000,
+				settings.fps * 2
+			),
+			Mode::VaLegacy => format!(
+				"vaapih264enc name=encoder rate-control=cbr bitrate={} keyframe-period={} max-bframes=0 cabac=false dct8x8=false",
+				bitrate / 1000,
 				settings.fps * 2
 			),
 			Mode::Nvidia | Mode::NvidiaCopy => format!(
 				"nvh264enc name=encoder rc-mode=cbr bitrate={} gop-size={} bframes=0 rc-lookahead=0 zerolatency=true",
-				settings.bit_rate() / 1000,
+				bitrate / 1000,
 				settings.fps * 2
 			),
 			Mode::Software => String::new(),
@@ -210,6 +231,20 @@ impl Capture {
 			.map_err(|_| UNAVAILABLE)?;
 		Ok(capture)
 	}
+	pub(super) fn set_bitrate(&self, bitrate: u32) -> bool {
+		let Some(encoder) = self.pipeline.by_name("encoder") else {
+			return false;
+		};
+		if !encoder
+			.find_property("bitrate")
+			.is_some_and(|property| property.flags().contains(gst::PARAM_FLAG_MUTABLE_PLAYING))
+		{
+			return false;
+		}
+		encoder.set_property("bitrate", bitrate / 1000);
+		true
+	}
+
 	pub(super) fn set_preview_visible(&self, visible: bool) {
 		self.preview_gate.set_property("drop", !visible);
 	}

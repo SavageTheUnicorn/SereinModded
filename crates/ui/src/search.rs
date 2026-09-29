@@ -27,6 +27,8 @@ fn date_id(value: &str) -> Result<Option<u64>, ()> {
 #[derive(Default)]
 pub struct SearchUi {
 	pub open: bool,
+	page_input: String,
+	page_request: Option<u64>,
 	pins: bool,
 	query: String,
 	channel: Option<Id>,
@@ -40,9 +42,45 @@ pub struct SearchUi {
 	filter_draft: Option<filters::Draft>,
 	search_anchor: Option<egui::Rect>,
 	suggestion_index: usize,
+	formats: crate::markdown::FormatCache,
+	/// Bounded message shells for the current page so the chat media renderers can draw hits.
+	previews: std::collections::HashMap<Id, model::Message>,
+	/// Attachment viewer open on a result: (message, attachment).
+	viewing: Option<(Id, Id)>,
+	pub opening: Option<String>,
+	pub channel_reference: Option<Id>,
+	pub channel_reference_load: Option<Id>,
 }
 
 impl SearchUi {
+	/// Refocus the current query without dropping its page or scroll position.
+	pub fn focus_conversation(&mut self, channel: Id) {
+		if self.open && (self.composing || self.filter_draft.is_some() || self.viewing.is_some()) {
+			return;
+		}
+		if self.channel != Some(channel) || !self.open || self.pins {
+			self.query.clear();
+		}
+		self.channel = Some(channel);
+		self.open = true;
+		self.pins = false;
+		self.focus = true;
+		self.filters_open = false;
+		self.filter_draft = None;
+		self.viewing = None;
+	}
+	pub(super) fn open_extension(&mut self, channel: Id, pins: bool, query: Option<String>) {
+		self.channel = Some(channel);
+		self.open = true;
+		self.pins = pins;
+		self.query = query.unwrap_or_default();
+		self.focus = !pins;
+		self.filters_open = false;
+		self.filter_draft = None;
+		self.pending_submit = false;
+		self.viewing = None;
+	}
+
 	pub fn toggle(&mut self, pins: bool) -> bool {
 		self.open = !self.open || self.pins != pins;
 		self.pins = pins;
@@ -75,6 +113,7 @@ impl SearchUi {
 	pub fn sync(&mut self, ctx: &egui::Context, state: &mut State, commands: &mut Vec<Command>) {
 		if self.open
 			&& self.filter_draft.is_none()
+			&& self.viewing.is_none()
 			&& ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
 		{
 			self.open = false;
@@ -90,6 +129,9 @@ impl SearchUi {
 			}
 		}
 		if !self.open {
+			self.formats.retain(|_| false);
+			self.previews.clear();
+			self.viewing = None;
 			self.filters_open = false;
 			self.filter_draft = None;
 			if state.search.is_some() {
@@ -104,6 +146,18 @@ impl SearchUi {
 			|| (!state.can_search() && state.search.is_some())
 		{
 			commands.push(state.clear_search());
+		}
+		let on_page = |id: Id| {
+			state
+				.search
+				.as_ref()
+				.and_then(|view| view.page.as_ref())
+				.is_some_and(|page| page.hits.iter().any(|hit| hit.id == id))
+		};
+		self.formats.retain(on_page);
+		self.previews.retain(|id, _| on_page(*id));
+		if self.viewing.is_some_and(|(message, _)| !on_page(message)) {
+			self.viewing = None;
 		}
 		self.ime_frame = self.composing;
 		ctx.input(|i| {
@@ -135,23 +189,54 @@ impl SearchUi {
 				ui.set_height(28.0);
 				ui.horizontal_centered(|ui| {
 					ui.spacing_mut().item_spacing.x = 6.0;
-					let input = ui.add(
-						egui::TextEdit::singleline(&mut self.query)
-							.char_limit(256)
-							.frame(egui::Frame::NONE)
-							.hint_text("Search")
-							.desired_width((ui.available_width() - 28.0).max(30.0)),
-					);
-					input.widget_info(|| {
-						egui::WidgetInfo::labeled(
-							egui::WidgetType::TextEdit,
-							true,
-							"Search messages in this conversation",
-						)
-					});
+					// Search is always scoped to this conversation; show its name, not an ID.
+					if let Some(channel) = state.selected.and_then(|id| state.channel(id)) {
+						let name = state.conversation_name(channel);
+						let width = (ui.available_width() * 0.35).clamp(36.0, 110.0);
+						ui.allocate_ui_with_layout(
+							egui::vec2(width, 24.0),
+							egui::Layout::left_to_right(egui::Align::Center),
+							|ui| {
+								ui.add(
+									egui::Label::new(
+										RichText::new(if channel.guild.is_some() {
+											format!("#{name}")
+										} else {
+											name.to_owned()
+										})
+										.size(12.0)
+										.color(colors.muted),
+									)
+									.truncate(),
+								)
+								.on_hover_text(name);
+							},
+						);
+					}
+					let output = egui::TextEdit::singleline(&mut self.query)
+						.id_salt("conversation-search-query")
+						.char_limit(256)
+						.frame(egui::Frame::NONE)
+						.hint_text(crate::i18n::translate("search-header-input-search"))
+						.desired_width((ui.available_width() - 28.0).max(30.0))
+						.show(ui);
+					let input = output
+						.response
+						.response
+						.accessible_name(crate::i18n::translate(
+							"search-pane-search-this-conversation",
+						));
 					if self.focus {
 						input.request_focus();
 						self.focus = false;
+						// Selecting a filter appends to the query; keep the caret at the end
+						// instead of leaving it at its stale position from before the change.
+						let mut cursor_state = output.state;
+						let end = egui::text::CCursor::new(self.query.chars().count());
+						cursor_state
+							.cursor
+							.set_char_range(Some(egui::text::CCursorRange::one(end)));
+						cursor_state.store(ui.ctx(), input.id);
 					}
 					if input.clicked() || input.changed() {
 						self.filters_open = true;
@@ -162,7 +247,14 @@ impl SearchUi {
 						&& input.lost_focus()
 						&& ui.input(|i| i.key_pressed(egui::Key::Enter))
 						&& !self.ime_frame;
-					if icons::button(ui, icons::Icon::Close, 22.0, "Close search").clicked() {
+					if icons::button(
+						ui,
+						icons::Icon::Close,
+						22.0,
+						&crate::i18n::translate("search-header-input-close-search"),
+					)
+					.clicked()
+					{
 						self.open = false;
 						self.filters_open = false;
 					}
@@ -240,11 +332,11 @@ impl SearchUi {
 								ui.label(
 									design::semibold(
 										ui,
-										if key == "from" {
-											"From User"
+										crate::i18n::translate_if_key(if key == "from" {
+											"search-overlays-from-user"
 										} else {
-											"Mentions User"
-										},
+											"search-overlays-mentions-user"
+										}),
 										13.0,
 									)
 									.color(colors.muted),
@@ -289,7 +381,9 @@ impl SearchUi {
 											}
 										}
 										if matching.is_empty() {
-											ui.label("No matching users in this conversation.");
+											ui.label(crate::i18n::translate(
+												"search-overlays-no-matching-users-in-this-conversation",
+											));
 										}
 									});
 								if let Some(id) = chosen {
@@ -309,7 +403,13 @@ impl SearchUi {
 											filters::suggestion_row(
 												ui,
 												"search",
-												&format!("Search for {}", self.query),
+												&format!(
+													"{} {}",
+													crate::i18n::translate(
+														"search-overlays-search-for"
+													),
+													self.query
+												),
 												"",
 											)
 										},
@@ -321,20 +421,42 @@ impl SearchUi {
 								ui.horizontal(|ui| {
 									ui.add_space(10.0);
 									ui.label(
-										design::semibold(ui, "Filters", 13.0).color(colors.muted),
+										design::semibold(
+											ui,
+											crate::i18n::translate("search-overlays-filters"),
+											13.0,
+										)
+										.color(colors.muted),
 									);
 								});
 								for (title, detail, key) in [
-									("From a specific user", "from: user", "from"),
 									(
-										"Includes a specific type of data",
-										"has: link, embed or file",
+										"search-open-filters-from-a-specific-user",
+										"search-open-filters-from-user",
+										"from",
+									),
+									(
+										"search-open-filters-includes-a-specific-type-of-data",
+										"search-open-filters-has-link-embed-or-file",
 										"has",
 									),
-									("Mentions a specific user", "mentions: user", "mentions"),
-									("More filters", "dates, author type, and more", ""),
+									(
+										"search-open-filters-mentions-a-specific-user",
+										"search-open-filters-mentions-user",
+										"mentions",
+									),
+									(
+										"search-open-filters-more-filters",
+										"search-open-filters-dates-author-type-and-more",
+										"",
+									),
 								] {
-									let row = filters::suggestion_row(ui, key, title, detail);
+									let row = filters::suggestion_row(
+										ui,
+										key,
+										&crate::i18n::translate_if_key(title),
+										&crate::i18n::translate_if_key(detail),
+									);
 									if row.clicked() {
 										if key == "from" || key == "mentions" {
 											let query = format!("{} {key}:", self.query.trim());
@@ -370,13 +492,17 @@ impl SearchUi {
 		}
 	}
 	/// Anchored pinned-messages popout under the header pin button, like Discord's.
+	#[allow(clippy::too_many_arguments)]
 	pub fn pins_popout(
 		&mut self,
-		ctx: &egui::Context,
+		ui: &mut egui::Ui,
 		state: &mut State,
 		anchor: egui::Rect,
 		dm: bool,
 		commands: &mut Vec<Command>,
+		avatars: &mut crate::avatars::Avatars,
+		mut media: MediaUi<'_>,
+		profile: &mut crate::profiles::ProfileSession,
 	) {
 		if !(self.open && self.pins) {
 			return;
@@ -386,7 +512,9 @@ impl SearchUi {
 		{
 			commands.push(command);
 		}
-		let colors = design::palette_for(ctx);
+		let ctx = ui.ctx().clone();
+		let viewing = self.viewing.is_some();
+		let colors = design::palette_for(&ctx);
 		let bounds = ctx.content_rect().shrink(8.0);
 		let width = PANE_WIDTH.min(bounds.width());
 		let max_height = (bounds.height() * 0.7).clamp(240.0, 560.0);
@@ -400,7 +528,7 @@ impl SearchUi {
 			.fixed_pos(egui::pos2(x, y))
 			.constrain_to(bounds)
 			.interactable(true)
-			.show(ctx, |ui| {
+			.show(&ctx, |ui| {
 				egui::Frame::new()
 					.fill(colors.sidebar)
 					.stroke(egui::Stroke::new(1.0, colors.border))
@@ -431,14 +559,25 @@ impl SearchUi {
 									ui.spacing_mut().item_spacing.x = 8.0;
 									icons::inline(ui, icons::Icon::Pin, 20.0, colors.muted);
 									ui.label(
-										design::semibold(ui, "Pinned Messages", 16.0)
-											.color(colors.text_strong),
+										design::semibold(
+											ui,
+											crate::i18n::translate(
+												"search-pins-popout-pinned-messages",
+											),
+											16.0,
+										)
+										.color(colors.text_strong),
 									);
 									ui.with_layout(
 										egui::Layout::right_to_left(egui::Align::Center),
 										|ui| {
-											if icons::button(ui, icons::Icon::Close, 28.0, "Close")
-												.clicked()
+											if icons::button(
+												ui,
+												icons::Icon::Close,
+												28.0,
+												&crate::i18n::translate("search-pins-popout-close"),
+											)
+											.clicked()
 											{
 												self.open = false;
 											}
@@ -448,7 +587,9 @@ impl SearchUi {
 														ui,
 														icons::Icon::Reload,
 														28.0,
-														"Reload pins",
+														&crate::i18n::translate(
+															"search-pins-popout-reload-pins",
+														),
 													)
 												})
 												.inner;
@@ -485,37 +626,11 @@ impl SearchUi {
 								.inner_margin(egui::Margin::symmetric(12, 12))
 								.show(ui, |ui| {
 									ui.set_width(ui.available_width());
-									self.pins_content(ui, state, commands);
-								});
-						}
-						// Footer protip.
-						ui.painter().hline(
-							ui.max_rect().x_range(),
-							ui.cursor().top(),
-							egui::Stroke::new(1.0, colors.border),
-						);
-						egui::Frame::new()
-							.fill(colors.base)
-							.corner_radius(egui::CornerRadius {
-								sw: 8,
-								se: 8,
-								..Default::default()
-							})
-							.inner_margin(egui::Margin::symmetric(16, 14))
-							.show(ui, |ui| {
-								ui.set_width(ui.available_width());
-								ui.vertical_centered(|ui| {
-									ui.spacing_mut().item_spacing.y = 2.0;
-									ui.label(design::eyebrow(ui, "Protip", colors.positive));
-									ui.label(
-										RichText::new(
-											"You can pin a message from its context menu.",
-										)
-										.size(13.0)
-										.color(colors.text),
+									self.pins_content(
+										ui, state, commands, avatars, &mut media, profile,
 									);
 								});
-							});
+						}
 					});
 			});
 		let clicked_outside = ctx.input(|i| i.pointer.any_pressed())
@@ -526,9 +641,10 @@ impl SearchUi {
 			ctx.input(|i| i.pointer.interact_pos())
 				.unwrap_or(anchor.center()),
 		);
-		if clicked_outside {
+		if clicked_outside && !viewing {
 			self.open = false;
 		}
+		self.viewer(ui, state, avatars, media.download);
 	}
 	fn pins_empty(ui: &mut egui::Ui, dm: bool) {
 		let colors = design::palette(ui);
@@ -538,44 +654,24 @@ impl SearchUi {
 				ui.set_width(ui.available_width());
 				ui.vertical_centered(|ui| {
 					let (rect, _) =
-						ui.allocate_exact_size(egui::Vec2::splat(96.0), egui::Sense::hover());
+						ui.allocate_exact_size(egui::Vec2::splat(64.0), egui::Sense::hover());
 					let face = colors.muted.gamma_multiply(0.35);
-					ui.painter().circle_filled(rect.center(), 44.0, face);
-					let eye = colors.sidebar;
-					ui.painter()
-						.circle_filled(rect.center() + egui::vec2(-14.0, -4.0), 4.0, eye);
-					ui.painter()
-						.circle_filled(rect.center() + egui::vec2(14.0, -4.0), 4.0, eye);
-					// Frown.
-					let mut points = Vec::with_capacity(12);
-					for i in 0..=11 {
-						let t = i as f32 / 11.0;
-						let angle = std::f32::consts::PI * (1.2 + 0.6 * t);
-						points.push(
-							rect.center()
-								+ egui::vec2(-angle.cos() * 14.0, -angle.sin() * 12.0 + 26.0),
-						);
-					}
-					ui.painter()
-						.add(egui::Shape::line(points, egui::Stroke::new(3.0, eye)));
+					ui.painter().circle_filled(rect.center(), 32.0, face);
 					icons::paint(
 						ui.painter(),
 						icons::Icon::Pin,
-						egui::Rect::from_center_size(
-							rect.center() + egui::vec2(30.0, -34.0),
-							egui::Vec2::splat(30.0),
-						),
+						rect.shrink(16.0),
 						colors.text,
 					);
 					ui.add_space(20.0);
 					ui.label(
 						design::medium(
 							ui,
-							if dm {
-								"This direct message doesn't have\nany pinned messages… yet."
+							crate::i18n::translate_if_key(if dm {
+								"search-pins-empty-this-direct-message-doesn-t-have-any-pinned-messages-yet"
 							} else {
-								"This channel doesn't have\nany pinned messages… yet."
-							},
+								"search-pins-empty-this-channel-doesn-t-have-any-pinned-messages-yet"
+							}),
 							15.0,
 						)
 						.color(colors.text_strong),
@@ -584,7 +680,15 @@ impl SearchUi {
 			});
 	}
 	/// Pinned message cards, load-more control and status lines.
-	fn pins_content(&mut self, ui: &mut egui::Ui, state: &mut State, commands: &mut Vec<Command>) {
+	fn pins_content(
+		&mut self,
+		ui: &mut egui::Ui,
+		state: &mut State,
+		commands: &mut Vec<Command>,
+		avatars: &mut crate::avatars::Avatars,
+		media: &mut MediaUi<'_>,
+		profile: &mut crate::profiles::ProfileSession,
+	) {
 		let colors = design::palette(ui);
 		let allowed = state.can_search();
 		let mut older_pins = false;
@@ -592,9 +696,9 @@ impl SearchUi {
 		ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
 		if !allowed {
 			ui.label(
-				RichText::new(
-					"Pinned messages are unavailable while disconnected or without channel access.",
-				)
+				RichText::new(crate::i18n::translate(
+					"search-pins-content-pinned-messages-are-unavailable-while-disconnected-or-without-channel-ac",
+				))
 				.small()
 				.color(colors.muted),
 			);
@@ -602,11 +706,13 @@ impl SearchUi {
 		if let Some(view) = state.search.as_ref().filter(|view| view.pins) {
 			if view.loading {
 				ui.label(
-					RichText::new(if view.pin_before.is_some() {
-						"Loading older pins…"
-					} else {
-						"Loading pinned messages…"
-					})
+					RichText::new(crate::i18n::translate_if_key(
+						if view.pin_before.is_some() {
+							"search-pins-content-loading-older-pins"
+						} else {
+							"search-pins-content-loading-pinned-messages"
+						},
+					))
 					.small()
 					.color(colors.muted),
 				);
@@ -625,11 +731,13 @@ impl SearchUi {
 					.push_id("older-pins", |ui| {
 						ui.add_enabled(
 							allowed && !view.loading,
-							egui::Button::new(if retry {
-								"Retry older pins"
-							} else {
-								"Older pins"
-							}),
+							egui::Button::new(crate::i18n::translate_if_key(
+								&(if retry {
+									crate::i18n::translate("search-pins-content-retry-older-pins")
+								} else {
+									crate::i18n::translate("search-pins-content-older-pins")
+								}),
+							)),
 						)
 					})
 					.inner
@@ -646,15 +754,24 @@ impl SearchUi {
 								continue;
 							}
 							ui.push_id(hit.id, |ui| {
-								Self::hit_card(ui, hit, allowed, &mut target);
+								self.result_card(
+									ui,
+									state,
+									hit,
+									"",
+									avatars,
+									media,
+									profile,
+									&mut target,
+								);
 							});
 						}
 					});
 				if page.pin_cursor.is_none() && !view.loading && page.partial {
 					ui.label(
-						RichText::new(
-							"More pins may exist, but this page has no usable continuation.",
-						)
+						RichText::new(crate::i18n::translate(
+							"search-pins-content-more-pins-may-exist-but-this-page-has-no-usable",
+						))
 						.small()
 						.color(colors.muted),
 					);
@@ -671,165 +788,193 @@ impl SearchUi {
 			self.open = false;
 		}
 	}
-	fn hit_card(ui: &mut egui::Ui, hit: &model::SearchHit, allowed: bool, target: &mut Option<Id>) {
-		let colors = design::palette(ui);
-		egui::Frame::new()
-			.fill(colors.raised)
-			.stroke(egui::Stroke::new(1.0, colors.border))
-			.corner_radius(8)
-			.inner_margin(egui::Margin::same(10))
-			.show(ui, |ui| {
-				ui.set_width(ui.available_width());
-				ui.horizontal(|ui| {
-					ui.label(design::semibold(ui, &hit.author, 14.0).color(colors.text_strong));
-					ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-						if ui
-							.add_enabled(
-								allowed && hit.id.0 < u64::MAX,
-								egui::Button::new(RichText::new("Jump").size(12.0)),
-							)
-							.on_hover_text("Open this message in the timeline")
-							.clicked()
-						{
-							*target = Some(hit.id);
-						}
-					});
-				});
-				ui.add(
-					egui::Label::new(RichText::new(&hit.excerpt).color(colors.text))
-						.wrap()
-						.selectable(true),
-				);
-			});
-	}
 	/// Results pane rendered where the member list normally lives.
-	pub fn pane(&mut self, ui: &mut egui::Ui, state: &mut State, commands: &mut Vec<Command>) {
+	pub fn pane(
+		&mut self,
+		ui: &mut egui::Ui,
+		state: &mut State,
+		commands: &mut Vec<Command>,
+		avatars: &mut crate::avatars::Avatars,
+		media: MediaUi<'_>,
+		profile: &mut crate::profiles::ProfileSession,
+	) {
 		let colors = design::palette(ui);
 		let allowed = state.can_search();
 		let mut submit = std::mem::take(&mut self.pending_submit) && !self.pins;
-		let mut older = None;
+		let mut media = media;
 		let mut target = None;
 		ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
-		ui.horizontal(|ui| {
-			let title = if self.pins {
-				"Pinned Messages".to_owned()
-			} else {
-				match state.search.as_ref().and_then(|view| view.page.as_ref()) {
-					Some(page) if !state.search.as_ref().is_some_and(|v| v.loading) => {
-						format!(
-							"{} Result{}",
-							page.total,
-							if page.total == 1 { "" } else { "s" }
-						)
+		if self.pins {
+			ui.horizontal(|ui| {
+				ui.label(
+					design::semibold(
+						ui,
+						crate::i18n::translate("search-pane-pinned-messages"),
+						16.0,
+					)
+					.color(colors.text_strong),
+				);
+				ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+					if icons::button(
+						ui,
+						icons::Icon::Close,
+						28.0,
+						&crate::i18n::translate("search-pane-close"),
+					)
+					.clicked()
+					{
+						self.open = false;
 					}
-					_ => "Search".to_owned(),
-				}
-			};
-			ui.label(design::semibold(ui, title, 16.0).color(colors.text_strong));
-			ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-				if !self.pins {
-					ui.menu_button("⚙", |ui| {
-						ui.checkbox(&mut self.hide_highlight, "Hide matching-text highlight");
-					})
-					.response
-					.on_hover_text("Search settings");
-					ui.menu_button("↕ Sort", |ui| {
-						ui.label("Order on this results page");
-						ui.radio_value(&mut self.oldest_first, false, "Newest first");
-						ui.radio_value(&mut self.oldest_first, true, "Oldest first");
-					});
-					if ui.button("Filters").clicked() {
-						self.open_filters();
-					}
-				}
-				if self.pins && icons::button(ui, icons::Icon::Close, 28.0, "Close").clicked() {
-					self.open = false;
-				}
-				if self.pins {
-					let reload = ui.add_enabled(allowed, egui::Button::new("Reload pins"));
+					let reload = ui.add_enabled(
+						allowed,
+						egui::Button::new(crate::i18n::translate("search-pane-reload-pins")),
+					);
 					if self.focus {
 						reload.request_focus();
 						self.focus = false;
 					}
 					submit = reload.clicked();
-				}
+				});
 			});
-		});
-		ui.separator();
-		if !self.pins {
-			ui.horizontal(|ui| {
-				if let Some(view) = &state.search
-					&& let Some(page) = &view.page
-				{
-					if let Some(last) = page.hits.last()
-						&& (page.total > page.hits.len() as u64 || page.partial)
-						&& ui
-							.add_enabled(allowed && !view.loading, egui::Button::new("Older"))
-							.clicked()
-					{
-						older = Some((view.query.clone(), Some(last.id)));
-					}
-					if view.before.is_some()
-						&& ui
-							.add_enabled(allowed && !view.loading, egui::Button::new("Newest"))
-							.clicked()
-					{
-						older = Some((view.query.clone(), None));
-					}
-				}
-			});
-		}
-		if self.pins {
+			ui.separator();
 			if submit && let Some(command) = state.request_pins() {
 				commands.push(command);
 			}
-			self.pins_content(ui, state, commands);
+			self.pins_content(ui, state, commands, avatars, &mut media, profile);
+			self.viewer(ui, state, avatars, media.download);
 			return;
 		}
+		if submit && let Some(command) = state.request_search(self.query.trim().into(), None) {
+			commands.push(command);
+		}
+		let loading = state.search.as_ref().is_some_and(|view| view.loading);
+		let title = match state.search.as_ref().and_then(|view| view.page.as_ref()) {
+			Some(page) if !loading => crate::i18n::translate_args(
+				if page.total == 1 {
+					"search-pane-one-result"
+				} else {
+					"search-pane-many-results"
+				},
+				&[("count", &page.total.to_string())],
+			),
+			_ if loading => crate::i18n::translate("search-pane-searching"),
+			_ => crate::i18n::translate("search-header-input-search"),
+		};
+		let active_query = state
+			.search
+			.as_ref()
+			.map_or(self.query.as_str(), |view| view.query.as_str());
+		let filter_count =
+			model::search_terms(active_query).map_or(0, |(_, filters)| filters.len());
+		ui.allocate_ui_with_layout(
+			egui::vec2(ui.available_width(), CHIP_HEIGHT),
+			egui::Layout::left_to_right(egui::Align::Center),
+			|ui| {
+				ui.label(design::semibold(ui, title, 16.0).color(colors.text_strong));
+				ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+					ui.spacing_mut().item_spacing.x = 8.0;
+					let settings_label = crate::i18n::translate("search-pane-settings");
+					let settings = chip(ui, Chip::icon(icons::Icon::Gear, &settings_label));
+					egui::Popup::menu(&settings).show(|ui| {
+						ui.checkbox(
+							&mut self.hide_highlight,
+							crate::i18n::translate("search-pane-hide-matching-text-highlight"),
+						);
+					});
+					let sort_label = crate::i18n::translate("search-pane-sort");
+					let sort = chip(ui, Chip::new(icons::Icon::SortArrows, &sort_label));
+					egui::Popup::menu(&sort).show(|ui| {
+						ui.label(
+							RichText::new(crate::i18n::translate("search-pane-order-on-this-page"))
+								.color(colors.muted),
+						);
+						ui.radio_value(
+							&mut self.oldest_first,
+							false,
+							crate::i18n::translate("search-pane-newest-first"),
+						);
+						ui.radio_value(
+							&mut self.oldest_first,
+							true,
+							crate::i18n::translate("search-pane-oldest-first"),
+						);
+					});
+					let label = if filter_count > 0 {
+						crate::i18n::translate_args(
+							"search-pane-filter-count",
+							&[("count", &filter_count.to_string())],
+						)
+					} else {
+						crate::i18n::translate("search-overlays-filters")
+					};
+					if chip(ui, Chip::new(icons::Icon::Sliders, &label)).clicked() {
+						self.open_filters();
+					}
+				});
+			},
+		);
+		hairline(ui);
 		if !allowed {
-			ui.label(
-				RichText::new(
-					"Messages are unavailable while disconnected or without channel access.",
-				)
-				.small()
-				.color(colors.muted),
+			design::notice(
+				ui,
+				design::Level::Warning,
+				&crate::i18n::translate(
+					"search-pane-messages-are-unavailable-while-disconnected-or-without-channel-access",
+				),
 			);
 		}
-		if state.search.is_none() {
-			ui.label(
-				RichText::new("Type a query above and press Enter.")
-					.small()
-					.color(colors.muted),
+		let Some(view) = &state.search else {
+			design::empty_state(
+				ui,
+				icons::Icon::Search,
+				&crate::i18n::translate("search-pane-search-this-conversation"),
+				&crate::i18n::translate("search-pane-type-a-query-above-and-press-enter"),
 			);
+			return;
+		};
+		if let Some(error) = view.error {
+			design::notice(ui, design::Level::Error, error);
 		}
-		if let Some(view) = &state.search {
-			if view.loading {
-				ui.label(RichText::new("Searching…").small().color(colors.muted));
+		match &view.page {
+			None if view.loading => {
+				design::empty_state(
+					ui,
+					icons::Icon::Search,
+					&crate::i18n::translate("search-pane-searching"),
+					&crate::i18n::translate("search-pane-looking-for-matching-messages"),
+				);
 			}
-			if let Some(error) = view.error {
-				ui.label(RichText::new(error).color(colors.danger));
-			}
-			if let Some(page) = &view.page {
-				if page.partial {
-					ui.label(
-						RichText::new("Indexing is incomplete; results may be missing.")
-							.small()
-							.color(colors.muted),
-					);
-				}
-				if page.hits.is_empty() {
-					ui.label(
-						RichText::new("No matching messages in this page.").color(colors.muted),
-					);
-				}
+			None => {}
+			Some(page) => {
 				let content_query = model::search_terms(&view.query)
 					.map(|(content, _)| content)
 					.unwrap_or_default();
+				let footer_height = CHIP_HEIGHT + 20.0;
 				egui::ScrollArea::vertical()
 					.id_salt(("search-results", view.request))
 					.auto_shrink([false, false])
+					.max_height((ui.available_height() - footer_height).max(1.0))
 					.show(ui, |ui| {
-						ui.spacing_mut().item_spacing.y = 8.0;
+						ui.spacing_mut().item_spacing.y = 16.0;
+						if page.partial {
+							ui.label(
+								RichText::new(crate::i18n::translate(
+									"search-pane-indexing-is-incomplete-results-may-be-missing",
+								))
+								.small()
+								.color(colors.muted),
+							);
+						}
+						if page.hits.is_empty() {
+							design::empty_state(
+								ui,
+								icons::Icon::Search,
+								&crate::i18n::translate("search-pane-no-results"),
+								&crate::i18n::translate(
+									"search-pane-nothing-on-this-page-matches-the-query",
+								),
+							);
+						}
 						for index in 0..page.hits.len() {
 							let hit = &page.hits[if self.oldest_first {
 								page.hits.len() - 1 - index
@@ -837,7 +982,7 @@ impl SearchUi {
 								index
 							}];
 							ui.push_id(hit.id, |ui| {
-								Self::result_card(
+								self.result_card(
 									ui,
 									state,
 									hit,
@@ -846,19 +991,24 @@ impl SearchUi {
 									} else {
 										&content_query
 									},
-									allowed,
+									avatars,
+									&mut media,
+									profile,
 									&mut target,
 								);
 							});
 						}
+						ui.add_space(4.0);
 					});
 			}
 		}
-		if submit && let Some(command) = state.request_search(self.query.trim().into(), None) {
-			commands.push(command);
-		}
-		if let Some((query, before)) = older
-			&& let Some(command) = state.request_search(query, before)
+		let requested_page = state
+			.search
+			.as_ref()
+			.and_then(|view| self.pager(ui, view, allowed));
+		self.viewer(ui, state, avatars, media.download);
+		if let Some(page) = requested_page
+			&& let Some(command) = state.request_search_page(page)
 		{
 			commands.push(command);
 		}
@@ -866,118 +1016,564 @@ impl SearchUi {
 			&& let Some(command) = state.open_search_hit(target)
 		{
 			commands.push(command);
-			self.open = false;
 		}
 	}
+	fn pager(
+		&mut self,
+		ui: &mut egui::Ui,
+		view: &client_core::search::SearchView,
+		allowed: bool,
+	) -> Option<u32> {
+		let current = view.offset / model::SEARCH_PAGE_SIZE as u32;
+		if self.page_request != Some(view.request) {
+			self.page_request = Some(view.request);
+			self.page_input = (current + 1).to_string();
+		}
+		let pages = view.page_count();
+		let mut requested = None;
+		hairline(ui);
+		ui.horizontal(|ui| {
+			ui.spacing_mut().item_spacing.x = 4.0;
+			ui.add_enabled_ui(allowed && !view.loading, |ui| {
+				if ui
+					.add_enabled_ui(current > 0, |ui| {
+						icons::button(
+							ui,
+							icons::Icon::CaretLeft,
+							24.0,
+							&crate::i18n::translate("search-page-previous"),
+						)
+					})
+					.inner
+					.clicked()
+				{
+					requested = Some((current - 1).min(pages - 1));
+				}
+				if ui.available_width() > 260.0 {
+					ui.label(crate::i18n::translate("search-page-label"));
+				}
+				let input = ui
+					.add(
+						egui::TextEdit::singleline(&mut self.page_input)
+							.id_salt("search-page-number")
+							.desired_width(36.0)
+							.char_limit(3),
+					)
+					.accessible_name(crate::i18n::translate("search-page-label"));
+				self.page_input
+					.retain(|character| character.is_ascii_digit());
+				ui.label(format!("/ {pages}"));
+				let page = self
+					.page_input
+					.parse::<u32>()
+					.ok()
+					.filter(|page| (1..=pages).contains(page));
+				let go = ui
+					.add_enabled_ui(page.is_some(), |ui| {
+						icons::button(
+							ui,
+							icons::Icon::Search,
+							24.0,
+							&crate::i18n::translate("search-page-go"),
+						)
+					})
+					.inner
+					.clicked();
+				let enter = input.lost_focus()
+					&& ui.input(|input| input.key_pressed(egui::Key::Enter))
+					&& !self.ime_frame;
+				if (go || enter)
+					&& let Some(page) = page
+				{
+					requested = Some(page - 1);
+				}
+				if ui
+					.add_enabled_ui(current + 1 < pages, |ui| {
+						icons::button(
+							ui,
+							icons::Icon::ChevronRight,
+							24.0,
+							&crate::i18n::translate("search-page-next"),
+						)
+					})
+					.inner
+					.clicked()
+				{
+					requested = Some(current + 1);
+				}
+				if view.error.is_some()
+					&& icons::button(
+						ui,
+						icons::Icon::Reload,
+						24.0,
+						&crate::i18n::translate("search-page-retry"),
+					)
+					.clicked()
+				{
+					requested = Some(current);
+				}
+			});
+		});
+		requested
+	}
+	fn viewer(
+		&mut self,
+		ui: &mut egui::Ui,
+		state: &State,
+		avatars: &mut crate::avatars::Avatars,
+		download: &mut crate::attachments::DownloadUi,
+	) {
+		if let Some((message, attachment)) = self.viewing {
+			self.viewing = self.previews.get(&message).and_then(|preview| {
+				crate::attachments::viewer(
+					ui,
+					&preview.attachments,
+					attachment,
+					avatars,
+					download,
+					&mut self.opening,
+					state.demo,
+				)
+				.map(|id| (message, id))
+			});
+		}
+	}
+	/// Bounded message shell that lets the chat attachment and embed renderers draw a hit.
+	fn shell(&mut self, hit: &model::SearchHit) {
+		self.previews
+			.entry(hit.id)
+			.or_insert_with(|| model::Message {
+				sticker_items: Vec::new(),
+				flags: 0,
+				ephemeral: false,
+				components: vec![],
+				application_id: None,
+				reactions: None,
+				id: hit.id,
+				channel: hit.channel,
+				author: hit.author.clone(),
+				author_roles: vec![],
+				author_nick: None,
+				content: String::new(),
+				mentions: hit.mentions.clone(),
+				mention_roles: vec![],
+				mention_everyone: false,
+				suppress_notifications: false,
+				edited: false,
+				edited_at: None,
+				revision: 0,
+				nonce: None,
+				reply_to: None,
+				kind: 0,
+				reply_deleted: false,
+				interaction: None,
+				forwarded: false,
+				unsupported: false,
+				extra_content: Default::default(),
+				embeds: hit.embeds.clone(),
+				embeds_suppressed: false,
+				attachments: hit.attachments.clone(),
+			});
+	}
+	#[allow(clippy::too_many_arguments)]
 	fn result_card(
+		&mut self,
 		ui: &mut egui::Ui,
 		state: &State,
 		hit: &model::SearchHit,
 		query: &str,
-		allowed: bool,
+		avatars: &mut crate::avatars::Avatars,
+		media: &mut MediaUi<'_>,
+		profile: &mut crate::profiles::ProfileSession,
 		target: &mut Option<Id>,
 	) {
 		let colors = design::palette(ui);
-		if let Some(channel) = state.channels.iter().find(|c| c.id == hit.channel) {
-			ui.label(
-				design::semibold(
-					ui,
+		ui.spacing_mut().item_spacing.y = 6.0;
+		if !self.pins
+			&& let Some(channel) = state.channel(hit.channel)
+		{
+			channel_heading(ui, state, channel);
+		}
+		// The card senses clicks on its previous-frame rect so child widgets keep priority.
+		let card_id = ui.scope_id().with("card");
+		let previous = ui.data(|data| data.get_temp::<egui::Rect>(card_id));
+		let background = previous.map(|rect| ui.interact(rect, card_id, egui::Sense::click()));
+		let jumpable = state.can_search() && hit.id.0 < u64::MAX;
+		let hot = background.as_ref().is_some_and(|response| {
+			ui.rect_contains_pointer(response.rect) || response.has_focus()
+		});
+		if let Some(response) = &background {
+			response.widget_info(|| {
+				egui::WidgetInfo::labeled(
+					egui::Role::Button,
+					jumpable,
 					format!(
 						"{} {}",
-						if channel.guild.is_none() { "@" } else { "#" },
-						channel.name
+						crate::i18n::translate("search-result-card-jump-to-message-from"),
+						hit.author.name
 					),
-					14.0,
 				)
-				.color(colors.text_strong),
-			);
+			});
+			if response.clicked() && jumpable {
+				*target = Some(hit.id);
+			}
 		}
-		let card = egui::Frame::new()
-			.fill(colors.base)
-			.stroke(egui::Stroke::new(1.0, colors.border))
-			.corner_radius(10)
-			.inner_margin(12)
+		let frame = egui::Frame::new()
+			.fill(if hot { colors.raised } else { colors.base })
+			.stroke(egui::Stroke::new(
+				1.0,
+				if background.as_ref().is_some_and(egui::Response::has_focus) {
+					colors.accent
+				} else {
+					colors.border
+				},
+			))
+			.corner_radius(8)
+			.inner_margin(egui::Margin::symmetric(12, 10))
 			.show(ui, |ui| {
 				ui.set_width(ui.available_width());
 				ui.horizontal_top(|ui| {
-					let (avatar, _) =
-						ui.allocate_exact_size(egui::vec2(36.0, 36.0), egui::Sense::hover());
-					ui.painter()
-						.circle_filled(avatar.center(), 18.0, colors.accent);
-					ui.painter().text(
-						avatar.center(),
-						egui::Align2::CENTER_CENTER,
-						hit.author.chars().next().unwrap_or('?'),
-						egui::FontId::proportional(16.0),
-						egui::Color32::WHITE,
-					);
+					ui.spacing_mut().item_spacing.x = 12.0;
+					avatars.show_plain(ui, &hit.author, 40.0, state.demo);
 					ui.vertical(|ui| {
 						ui.set_width(ui.available_width());
-						ui.horizontal_wrapped(|ui| {
-							ui.label(
-								design::semibold(ui, &hit.author, 15.0).color(colors.text_strong),
-							);
-							// Fixture IDs do not encode a real creation timestamp.
-							if hit.id.0 >= (1 << 22) {
-								let seconds = ((hit.id.0 >> 22) + 1_420_070_400_000) / 1000;
-								if let Ok(utc) =
-									time::OffsetDateTime::from_unix_timestamp(seconds as i64)
-								{
-									let local = crate::local_time::local(utc);
-									ui.label(
-										RichText::new(format!(
-											"{:02}:{:02}",
-											local.hour(),
-											local.minute()
-										))
-										.size(11.0)
-										.color(colors.muted),
+						ui.spacing_mut().item_spacing.y = 2.0;
+						ui.allocate_ui_with_layout(
+							egui::vec2(ui.available_width(), 24.0),
+							egui::Layout::left_to_right(egui::Align::Center),
+							|ui| {
+								ui.spacing_mut().item_spacing.x = 8.0;
+								let name_color = state
+									.forum_author_color(
+										hit.channel,
+										hit.author.id,
+										hit.author.webhook,
+										&[],
+									)
+									.map_or(colors.text_strong, |rgb| {
+										design::role_name_color(
+											rgb,
+											colors.base,
+											colors.text_strong,
+										)
+									});
+								crate::account_badge::name(
+									ui,
+									&hit.author,
+									state.user_display_name(&hit.author),
+									15.0,
+									name_color,
+									egui::Sense::hover(),
+									88.0,
+								);
+								// Fixture IDs do not encode a real creation timestamp.
+								if hit.id.0 >= (1 << 22) {
+									let seconds = ((hit.id.0 >> 22) + 1_420_070_400_000) / 1000;
+									if let Ok(utc) =
+										time::OffsetDateTime::from_unix_timestamp(seconds as i64)
+									{
+										let local = crate::local_time::local(utc);
+										ui.label(
+											RichText::new(format!(
+												"{:02}:{:02}",
+												local.hour(),
+												local.minute()
+											))
+											.size(12.0)
+											.color(colors.muted),
+										);
+									}
+								}
+								if hot && jumpable {
+									ui.with_layout(
+										egui::Layout::right_to_left(egui::Align::Center),
+										|ui| {
+											let mut jump = Chip::text("Jump");
+											jump.height = 24.0;
+											if chip(ui, jump).clicked() {
+												*target = Some(hit.id);
+											}
+										},
+									);
+								}
+							},
+						);
+						let id = ui.scope_id().with(("search-spoilers", &hit.excerpt));
+						let mut revealed = ui.data(|data| data.get_temp::<u32>(id).unwrap_or(0));
+						let mut surface = crate::select::Surface::new(ui, "search-result");
+						let source = crate::mentions::MentionSource {
+							state,
+							channel: hit.channel,
+						};
+						let formatted = self.formats.get(hit.id, &hit.excerpt);
+						if self.channel_reference_load.is_none() {
+							self.channel_reference_load =
+								formatted.missing_channel_reference(state, revealed);
+						}
+						formatted.show_search(
+							ui,
+							&mut self.opening,
+							&hit.mentions,
+							Some(&source),
+							profile,
+							(
+								&state.channels,
+								&mut self.channel_reference,
+								&state.guilds,
+								crate::mentions::known_roles(state, hit.channel),
+							),
+							(avatars, state.demo, &mut revealed),
+							&mut surface,
+							query,
+						);
+						if revealed != 0 {
+							ui.data_mut(|data| data.insert_temp(id, revealed));
+						}
+						if !hit.attachments.is_empty() || !hit.embeds.is_empty() {
+							ui.add_space(4.0);
+							self.shell(hit);
+							let preview = &self.previews[&hit.id];
+							if crate::embeds::has_media_spoilers(preview) {
+								ui.label(
+									RichText::new(crate::i18n::translate(
+										"search-result-card-spoiler-media-open-the-message-to-reveal-it",
+									))
+									.small()
+									.italics()
+									.color(colors.muted),
+								);
+							} else {
+								if !preview.embeds.is_empty() {
+									crate::embeds::show(
+										ui,
+										preview,
+										&mut self.formats,
+										avatars,
+										&mut self.opening,
+										media.download,
+										profile,
+										state,
+									);
+								}
+								if !preview.attachments.is_empty() {
+									crate::attachments::show(
+										ui,
+										preview,
+										avatars,
+										&mut self.viewing,
+										&mut self.opening,
+										media.download,
+										media.audio,
+										media.video,
+										state.demo,
+										&mut surface,
 									);
 								}
 							}
-						});
-						let mut job = egui::text::LayoutJob::default();
-						let normal = egui::TextFormat {
-							font_id: egui::FontId::proportional(14.0),
-							color: colors.text,
-							..Default::default()
-						};
-						let mut rest = hit.excerpt.as_str();
-						if !query.is_empty() {
-							while let Some(index) = rest.find(query) {
-								job.append(&rest[..index], 0.0, normal.clone());
-								job.append(
-									&rest[index..index + query.len()],
-									0.0,
-									egui::TextFormat {
-										background: egui::Color32::from_rgba_unmultiplied(
-											200, 160, 30, 85,
-										),
-										..normal.clone()
-									},
-								);
-								rest = &rest[index + query.len()..];
-							}
 						}
-						job.append(rest, 0.0, normal);
-						ui.add(egui::Label::new(job).wrap().selectable(true));
+						surface.finish(ui);
 					});
 				});
 			});
-		let jump = ui
-			.interact(
-				card.response.rect,
-				ui.scope_id().with("jump-result"),
-				egui::Sense::click(),
-			)
-			.on_hover_text("Jump to this message");
-		jump.widget_info(|| {
-			egui::WidgetInfo::labeled(egui::WidgetType::Button, allowed, "Jump to message")
-		});
-		if allowed && hit.id.0 < u64::MAX && jump.clicked() {
-			*target = Some(hit.id);
+		ui.data_mut(|data| data.insert_temp(card_id, frame.response.rect));
+	}
+}
+
+const CHIP_HEIGHT: f32 = 32.0;
+
+/// Shared download, audio and video controllers borrowed from the timeline for one frame.
+pub struct MediaUi<'a> {
+	pub download: &'a mut crate::attachments::DownloadUi,
+	pub audio: &'a mut crate::audio::AudioUi,
+	pub video: &'a mut crate::video::VideoUi,
+}
+
+/// Compact raised control used by the results header, pager and hover "Jump" action.
+struct Chip<'a> {
+	icon: Option<icons::Icon>,
+	label: Option<&'a str>,
+	/// Accessible name when there is no visible label.
+	tooltip: &'a str,
+	/// Paint the icon after the label instead of before it.
+	trailing: bool,
+	height: f32,
+}
+impl<'a> Chip<'a> {
+	fn new(icon: icons::Icon, label: &'a str) -> Self {
+		Self {
+			icon: Some(icon),
+			label: Some(label),
+			tooltip: label,
+			trailing: false,
+			height: CHIP_HEIGHT,
 		}
 	}
+	fn icon(icon: icons::Icon, tooltip: &'a str) -> Self {
+		Self {
+			icon: Some(icon),
+			label: None,
+			tooltip,
+			trailing: false,
+			height: CHIP_HEIGHT,
+		}
+	}
+	fn text(label: &'a str) -> Self {
+		Self {
+			icon: None,
+			label: Some(label),
+			tooltip: label,
+			trailing: false,
+			height: CHIP_HEIGHT,
+		}
+	}
+}
+fn chip(ui: &mut egui::Ui, chip: Chip<'_>) -> egui::Response {
+	let colors = design::palette(ui);
+	let icon_size = (chip.height * 0.5).round();
+	let padding = (chip.height * 0.3).round();
+	let font = egui::FontId::new(
+		if chip.height < CHIP_HEIGHT {
+			12.0
+		} else {
+			14.0
+		},
+		design::medium_family(ui.ctx()),
+	);
+	let galley = chip.label.map(|label| {
+		ui.painter()
+			.layout_no_wrap(label.to_owned(), font, egui::Color32::WHITE)
+	});
+	let mut width = padding * 2.0;
+	if chip.icon.is_some() {
+		width += icon_size;
+	}
+	if let Some(galley) = &galley {
+		width += galley.size().x;
+		if chip.icon.is_some() {
+			width += 6.0;
+		}
+	}
+	let (rect, response) =
+		ui.allocate_exact_size(egui::vec2(width, chip.height), egui::Sense::click());
+	let enabled = ui.is_enabled();
+	response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, chip.tooltip));
+	let hot = response.hovered() || response.has_focus();
+	let fill = if !enabled {
+		colors.raised.gamma_multiply(0.5)
+	} else if response.is_pointer_button_down_on() {
+		colors.selected
+	} else if hot {
+		colors.hover
+	} else {
+		colors.raised
+	};
+	let text = if enabled {
+		colors.text_strong
+	} else {
+		colors.text_strong.gamma_multiply(0.45)
+	};
+	let painter = ui.painter();
+	painter.rect(
+		rect,
+		8,
+		fill,
+		egui::Stroke::new(1.0, colors.border),
+		egui::StrokeKind::Inside,
+	);
+	if response.has_focus() {
+		painter.rect_stroke(
+			rect.expand(2.0),
+			10,
+			egui::Stroke::new(2.0, colors.accent),
+			egui::StrokeKind::Outside,
+		);
+	}
+	let mut x = rect.left() + padding;
+	let icon_rect = |x: f32| {
+		egui::Rect::from_center_size(
+			egui::pos2(x + icon_size * 0.5, rect.center().y),
+			egui::Vec2::splat(icon_size),
+		)
+	};
+	if let Some(icon) = chip.icon.filter(|_| !chip.trailing) {
+		icons::paint(painter, icon, icon_rect(x), text);
+		x += icon_size + 6.0;
+	}
+	if let Some(galley) = galley {
+		painter.galley_with_override_text_color(
+			egui::pos2(x, rect.center().y - galley.size().y * 0.5),
+			galley.clone(),
+			text,
+		);
+		x += galley.size().x + 6.0;
+	}
+	if let Some(icon) = chip.icon.filter(|_| chip.trailing) {
+		icons::paint(painter, icon, icon_rect(x), text);
+	}
+	if chip.label.is_none() {
+		response.on_hover_text(chip.tooltip)
+	} else {
+		response
+	}
+}
+/// One-pixel separator without the default spacing.
+fn hairline(ui: &mut egui::Ui) {
+	let colors = design::palette(ui);
+	let (rect, _) =
+		ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), egui::Sense::hover());
+	ui.painter().hline(
+		rect.x_range(),
+		rect.center().y,
+		egui::Stroke::new(1.0, colors.border),
+	);
+}
+/// Section heading above a result: where the message lives, and its thread parent or category.
+fn channel_heading(ui: &mut egui::Ui, state: &State, channel: &model::Channel) {
+	let colors = design::palette(ui);
+	let context = channel
+		.parent_id
+		.and_then(|parent| state.channel(parent))
+		.map(|parent| {
+			(
+				if parent.kind == 4 {
+					icons::Icon::Folder
+				} else {
+					icons::channel(parent.kind)
+				},
+				parent.name.as_str(),
+			)
+		});
+	ui.allocate_ui_with_layout(
+		egui::vec2(ui.available_width(), 22.0),
+		egui::Layout::left_to_right(egui::Align::Center),
+		|ui| {
+			ui.spacing_mut().item_spacing.x = 6.0;
+			let total = ui.available_width();
+			icons::inline(ui, icons::channel(channel.kind), 18.0, colors.text);
+			ui.scope(|ui| {
+				ui.set_max_width(if context.is_some() {
+					total * 0.58
+				} else {
+					total - 24.0
+				});
+				ui.add(
+					egui::Label::new(
+						design::semibold(ui, channel.name.as_str(), 15.0).color(colors.text_strong),
+					)
+					.truncate(),
+				);
+			});
+			if let Some((icon, name)) = context {
+				ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+					ui.add(
+						egui::Label::new(RichText::new(name).size(13.0).color(colors.muted))
+							.truncate(),
+					);
+					icons::inline(ui, icon, 14.0, colors.muted);
+				});
+			}
+		},
+	);
 }
 
 #[cfg(test)]
@@ -989,7 +1585,18 @@ mod tests {
 			if !view.pins {
 				view.header_input(ui, state, commands);
 			}
-			view.pane(ui, state, commands);
+			view.pane(
+				ui,
+				state,
+				commands,
+				&mut crate::avatars::Avatars::default(),
+				MediaUi {
+					download: &mut crate::attachments::DownloadUi::default(),
+					audio: &mut crate::audio::AudioUi::default(),
+					video: &mut crate::video::VideoUi::default(),
+				},
+				&mut crate::profiles::ProfileSession::default(),
+			);
 		}
 	}
 	#[test]
@@ -1008,6 +1615,7 @@ mod tests {
 					kind: 3,
 					recipients: vec![],
 					member_list_id: None,
+					tags: None,
 					message_count: None,
 					icon: None,
 					last_message: None,
@@ -1098,8 +1706,19 @@ mod tests {
 					hits: vec![model::SearchHit {
 						id: Id(10),
 						channel: Id(1),
-						author: "Synthetic".into(),
+						author: model::User {
+							kind: model::AccountKind::Human,
+							webhook: false,
+							id: Id(7),
+							name: "Synthetic".into(),
+							avatar: None,
+							discriminator: 0,
+							primary_guild: None,
+						},
+						mentions: vec![],
 						excerpt: "Synthetic pinned message".into(),
+						attachments: vec![],
+						embeds: vec![],
 					}],
 					total: 1,
 					partial: continuation.is_some(),
@@ -1182,6 +1801,7 @@ mod tests {
 				kind: 1,
 				recipients: vec![],
 				member_list_id: None,
+				tags: None,
 				message_count: None,
 				icon: None,
 				last_message: None,
@@ -1240,5 +1860,78 @@ mod tests {
 			output.textures_delta.clear();
 			assert!(state.search.is_none());
 		}
+	}
+	#[test]
+	fn search_results_resolve_payload_mentions_and_queue_unknown_channels() {
+		let channel = model::Channel {
+			id: Id(1),
+			guild: Some(Id(10)),
+			parent_id: None,
+			position: 0,
+			name: "Synthetic".into(),
+			kind: 0,
+			recipients: vec![],
+			member_list_id: None,
+			tags: None,
+			message_count: None,
+			icon: None,
+			last_message: None,
+		};
+		let user = model::User {
+			kind: model::AccountKind::Human,
+			webhook: false,
+			id: Id(42),
+			name: "Mentioned".into(),
+			avatar: None,
+			discriminator: 0,
+			primary_guild: None,
+		};
+		let state = State {
+			demo: true,
+			channels: vec![channel],
+			..State::default()
+		};
+		let hit = model::SearchHit {
+			id: Id(1 << 22),
+			channel: Id(1),
+			author: user.clone(),
+			mentions: vec![user],
+			excerpt: "Hello <@42> in <#99>".into(),
+			attachments: vec![],
+			embeds: vec![],
+		};
+		let ctx = egui::Context::default();
+		let mut view = SearchUi {
+			pins: true,
+			..SearchUi::default()
+		};
+		let mut output = ctx.run_ui(Default::default(), |ui| {
+			view.result_card(
+				ui,
+				&state,
+				&hit,
+				"",
+				&mut crate::avatars::Avatars::default(),
+				&mut MediaUi {
+					download: &mut crate::attachments::DownloadUi::default(),
+					audio: &mut crate::audio::AudioUi::default(),
+					video: &mut crate::video::VideoUi::default(),
+				},
+				&mut crate::profiles::ProfileSession::default(),
+				&mut None,
+			);
+		});
+		let text = output
+			.shapes
+			.iter()
+			.filter_map(|shape| match &shape.shape {
+				egui::Shape::Text(text) => Some(text.galley.text()),
+				_ => None,
+			})
+			.collect::<String>();
+		output.textures_delta.clear();
+		assert!(text.contains("@Mentioned"), "rendered text: {text}");
+		assert!(!text.contains("@42"), "rendered text: {text}");
+		assert_eq!(view.channel_reference_load, Some(Id(99)));
 	}
 }

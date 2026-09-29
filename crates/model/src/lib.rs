@@ -1,15 +1,20 @@
 //! UI-neutral session entities. No filesystem or network dependencies.
 pub mod account;
+pub mod application_commands;
+mod image_sharing;
+pub use image_sharing::ImageShare;
 pub mod archives;
 mod channel_preferences;
 pub mod keybinds;
 pub mod messaging_permissions;
 pub mod notification_preferences;
-pub mod notification_settings;
+pub mod voice_settings;
 pub use channel_preferences::{ChannelPreferences, PreferenceEdit, Shortcut};
 pub use keybinds::{KeyChord, KeybindAction, Keybinds};
 pub mod forum;
 pub mod gifs;
+mod graphics;
+pub use graphics::GpuPreference;
 pub mod guild_folders;
 pub mod permissions;
 mod reading_preferences;
@@ -26,12 +31,16 @@ pub use profile::*;
 pub use system_messages::{Segment, SystemMessage};
 mod attachments;
 pub use attachments::*;
+mod components;
+pub use components::*;
 mod embeds;
 pub use embeds::*;
 mod extra_content;
 pub use extra_content::{ExtraContent, ExtraContentPatch};
 mod mentions;
 pub use mentions::*;
+mod stickers;
+pub use stickers::*;
 mod reactions;
 pub use reactions::*;
 mod search;
@@ -91,6 +100,9 @@ pub struct User {
 	pub name: String,
 	pub avatar: Option<String>,
 	pub discriminator: u16,
+	/// Service-supplied server identity displayed beside this user's name.
+	#[serde(default, skip_serializing)]
+	pub primary_guild: Option<Box<ClanTag>>,
 }
 impl User {
 	pub fn account_label(&self) -> Option<&'static str> {
@@ -102,7 +114,13 @@ impl User {
 		}
 	}
 	pub fn heap_bytes(&self) -> usize {
-		self.name.capacity() + self.avatar.as_ref().map_or(0, String::capacity)
+		self.name.capacity()
+			+ self.avatar.as_ref().map_or(0, String::capacity)
+			+ self.primary_guild.as_ref().map_or(0, |guild| {
+				std::mem::size_of::<ClanTag>()
+					+ guild.tag.capacity()
+					+ guild.badge.as_ref().map_or(0, String::capacity)
+			})
 	}
 	pub fn avatar_key(&self) -> String {
 		if let Some(hash) = self
@@ -126,8 +144,9 @@ impl User {
 			format!("https://cdn.discordapp.com/embed/avatars/{index}.png")
 		} else {
 			let (_, hash) = key.split_once('-').expect("avatar key");
+			let ext = if hash.starts_with("a_") { "gif" } else { "png" };
 			format!(
-				"https://cdn.discordapp.com/avatars/{}/{hash}.png?size=128",
+				"https://cdn.discordapp.com/avatars/{}/{hash}.{ext}?size=128",
 				self.id
 			)
 		}
@@ -141,6 +160,60 @@ pub enum AccountKind {
 	Human = 0,
 	Bot = 1,
 	App = 2,
+}
+/// Locally remembered account for the switcher: identity only, never a token.
+/// Tokens stay in the OS credential store under their own per-account entry.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SavedAccount {
+	pub id: Id,
+	pub name: String,
+	/// Global display name, when the account has one.
+	pub display: Option<String>,
+	pub avatar: Option<String>,
+	pub discriminator: u16,
+	/// Whether the OS credential store holds this account's own entry. Read-only output of
+	/// the roster: writes go through `set_account_token`, so an identity refresh cannot
+	/// claim a token exists. Keeps the client from rewriting an entry it already wrote,
+	/// which on macOS is an access-controlled operation that can prompt for the keychain.
+	pub has_token: bool,
+}
+/// Bounded roster: enough for people juggling alternates, small enough to stay readable.
+pub const MAX_SAVED_ACCOUNTS: usize = 8;
+impl SavedAccount {
+	pub fn is_valid(&self) -> bool {
+		self.id.0 != 0
+			&& (1..=64).contains(&self.name.len())
+			&& self
+				.display
+				.as_ref()
+				.is_none_or(|display| (1..=64).contains(&display.len()))
+			&& self.avatar.as_deref().is_none_or(valid_avatar_hash)
+			&& self.discriminator <= 9999
+	}
+	/// What the switcher shows: display name when set, otherwise the username.
+	pub fn label(&self) -> &str {
+		self.display
+			.as_deref()
+			.filter(|display| !display.is_empty())
+			.unwrap_or(&self.name)
+	}
+	/// Avatar lookups and name rows reuse the ordinary user widgets.
+	pub fn user(&self) -> User {
+		User {
+			kind: AccountKind::Human,
+			webhook: false,
+			id: self.id,
+			name: self.name.clone(),
+			avatar: self.avatar.clone(),
+			discriminator: self.discriminator,
+			primary_guild: None,
+		}
+	}
+	pub fn heap_bytes(&self) -> usize {
+		self.name.capacity()
+			+ self.display.as_ref().map_or(0, String::capacity)
+			+ self.avatar.as_ref().map_or(0, String::capacity)
+	}
 }
 pub fn valid_avatar_hash(hash: &str) -> bool {
 	let hash = hash.strip_prefix("a_").unwrap_or(hash);
@@ -158,6 +231,7 @@ impl InvitePreview {
 }
 #[derive(Clone, PartialEq, Eq)]
 pub struct Guild {
+	pub stickers: Option<Vec<Sticker>>,
 	pub emojis: Option<Vec<CustomEmoji>>,
 	pub id: Id,
 	pub name: String,
@@ -169,6 +243,7 @@ impl Guild {
 			+ self.name.capacity()
 			+ self.icon.as_ref().map_or(0, String::capacity)
 			+ self.emojis.as_ref().map_or(0, custom_emoji_bytes)
+			+ self.stickers.as_ref().map_or(0, sticker_bytes)
 	}
 	pub fn icon_key(&self) -> Option<String> {
 		self.icon
@@ -199,11 +274,14 @@ pub struct Channel {
 	pub member_list_id: Option<String>,
 	/// Thread reply count reported by the service; None for non-threads or unknown.
 	pub message_count: Option<u32>,
+	/// Forum tags offered by a forum or media channel, or applied to one of its posts.
+	pub tags: Option<Box<forum::Tags>>,
 }
 impl Channel {
 	pub fn bytes(&self) -> usize {
 		size_of::<Self>()
 			+ self.name.capacity()
+			+ self.tags.as_ref().map_or(0, |tags| tags.bytes())
 			+ self.icon.as_ref().map_or(0, String::capacity)
 			+ self.member_list_id.as_ref().map_or(0, String::capacity)
 			+ self.recipients.capacity() * size_of::<User>()
@@ -223,10 +301,31 @@ pub struct ChannelPatch {
 	pub position: Patch<i32>,
 	pub kind: Patch<u8>,
 	pub message_count: Patch<u32>,
+	/// Channel updates carry whole objects, so present tags replace the known ones.
+	pub tags: Patch<Box<forum::Tags>>,
+}
+/// The command invocation that produced an application response message.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Interaction {
+	pub user: User,
+	/// Bounded command name without the leading slash; empty when the service omitted it.
+	#[serde(default)]
+	pub command: String,
+}
+impl Interaction {
+	pub fn heap_bytes(&self) -> usize {
+		size_of::<Self>() + self.user.heap_bytes() + self.command.capacity()
+	}
 }
 #[derive(Clone, PartialEq, Eq)]
 pub struct Message {
-	/// Session-only counts; None means a service refresh is needed.
+	pub sticker_items: Vec<Sticker>,
+	/// Original outer message flags, retained for interaction submissions.
+	pub flags: u64,
+	pub ephemeral: bool,
+	pub components: Vec<Component>,
+	pub application_id: Option<Id>,
+	/// Last known counts. None means they have not been loaded yet.
 	pub reactions: Option<Vec<Reaction>>,
 	pub id: Id,
 	pub channel: Id,
@@ -252,6 +351,8 @@ pub struct Message {
 	pub reply_deleted: bool,
 	/// Body is the immutable snapshot attached to a forwarded message.
 	pub forwarded: bool,
+	/// The application command invocation this message answers.
+	pub interaction: Option<Box<Interaction>>,
 	pub unsupported: bool,
 	pub extra_content: ExtraContent,
 	pub embeds: Vec<Embed>,
@@ -290,6 +391,7 @@ impl Message {
 				reaction_bytes(r) + r.capacity().saturating_sub(r.len()) * size_of::<Reaction>()
 			}) + self.content.capacity()
 			+ self.author.heap_bytes()
+			+ self.interaction.as_ref().map_or(0, |i| i.heap_bytes())
 			+ self.author_nick.as_ref().map_or(0, String::capacity)
 			+ self.author_roles.capacity() * size_of::<Id>()
 			+ mention_bytes(&self.mentions)
@@ -301,6 +403,8 @@ impl Message {
 				.capacity()
 				.saturating_sub(self.attachments.len())
 				* size_of::<Attachment>()
+			+ sticker_bytes(&self.sticker_items)
+			+ component_bytes(&self.components)
 			+ embed_bytes(&self.embeds)
 			+ self.embeds.capacity().saturating_sub(self.embeds.len()) * size_of::<Embed>()
 	}
@@ -329,6 +433,10 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for Patch<T> {
 }
 #[derive(Clone)]
 pub struct MessagePatch {
+	pub sticker_items: Patch<Vec<Sticker>>,
+	pub flags: Patch<u64>,
+	pub components: Patch<Vec<Component>>,
+	pub application_id: Patch<Id>,
 	pub extra_content: ExtraContentPatch,
 	pub reactions: Patch<Vec<Reaction>>,
 	pub id: Id,
@@ -388,13 +496,24 @@ impl PresenceStatus {
 			Self::Invisible => "Invisible",
 		}
 	}
+	pub fn parse(wire: &str) -> Option<Self> {
+		match wire {
+			"online" => Some(Self::Online),
+			"idle" => Some(Self::Idle),
+			"dnd" => Some(Self::DoNotDisturb),
+			"invisible" => Some(Self::Invisible),
+			_ => None,
+		}
+	}
 }
 
-/// Desired presence for this login session, not a confirmed public status or saved preference.
+/// This account's chosen status. Discord settings are authoritative. A local row is only the fallback when that read fails.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct OwnPresence {
 	pub status: PresenceStatus,
 	pub custom_status: String,
+	/// Custom-status clear deadline, unix milliseconds. The gateway presence opcode does not carry it.
+	pub expires_at_ms: Option<u64>,
 }
 impl OwnPresence {
 	pub fn valid(&self) -> bool {
@@ -407,6 +526,7 @@ impl OwnPresence {
 pub enum ActivityImage {
 	Asset { application: Id, asset: Id },
 	Proxy(String),
+	Spotify(String),
 	Application(Id),
 }
 impl ActivityImage {
@@ -414,6 +534,7 @@ impl ActivityImage {
 		match self {
 			Self::Asset { application, asset } => application.0 != 0 && asset.0 != 0,
 			Self::Application(id) => id.0 != 0,
+			Self::Spotify(id) => id.len() == 40 && id.bytes().all(|b| b.is_ascii_hexdigit()),
 			Self::Proxy(path) => {
 				!path.is_empty()
 					&& path.len() <= 1024
@@ -432,7 +553,7 @@ impl ActivityImage {
 	}
 	pub fn heap_bytes(&self) -> usize {
 		match self {
-			Self::Proxy(path) => path.capacity(),
+			Self::Proxy(path) | Self::Spotify(path) => path.capacity(),
 			_ => 0,
 		}
 	}
@@ -441,6 +562,7 @@ impl ActivityImage {
 			Self::Asset { application, asset } => format!("activity-{application}-{asset}"),
 			Self::Proxy(path) => format!("embed:https://media.discordapp.net/{path}"),
 			Self::Application(id) => format!("app-icon-{id}"),
+			Self::Spotify(id) => format!("spotify-{id}"),
 		}
 	}
 }
@@ -456,6 +578,8 @@ pub struct RichActivity {
 	pub small_image: Option<ActivityImage>,
 	/// Unix milliseconds, as supplied by the activity producer.
 	pub started_at: Option<u64>,
+	/// Activity end in Unix milliseconds; may be present without a start for a countdown.
+	pub ends_at: Option<u64>,
 }
 pub const MAX_ACTIVITY_TIMESTAMP: u64 = 9_007_199_254_740_991;
 impl RichActivity {
@@ -469,6 +593,9 @@ impl RichActivity {
 			&& self
 				.started_at
 				.is_none_or(|at| at <= MAX_ACTIVITY_TIMESTAMP)
+			&& self.ends_at.is_none_or(|end| {
+				end <= MAX_ACTIVITY_TIMESTAMP && self.started_at.is_none_or(|start| end > start)
+			})
 	}
 	pub fn heap_bytes(&self) -> usize {
 		self.name.capacity()
@@ -501,6 +628,21 @@ fn valid_presence_text(text: &str) -> bool {
 		&& !text.chars().any(char::is_control)
 }
 
+/// Fixed-size client session flags for an already-loaded user.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ClientPlatforms {
+	pub desktop: bool,
+	pub mobile: bool,
+	pub web: bool,
+	pub vr: bool,
+}
+
+impl ClientPlatforms {
+	pub fn any(self) -> bool {
+		self.desktop || self.mobile || self.web || self.vr
+	}
+}
+
 /// Complete, bounded presence values for an already-loaded user.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemberPresence {
@@ -508,6 +650,7 @@ pub struct MemberPresence {
 	pub status: Option<String>,
 	pub custom_status: Option<String>,
 	pub activities: Vec<RichActivity>,
+	pub clients: ClientPlatforms,
 }
 
 impl MemberPresence {
@@ -546,6 +689,7 @@ pub struct Member {
 	/// Custom status text with any unicode emoji; bounded, never a rich activity.
 	pub custom_status: Option<String>,
 	pub activities: Vec<RichActivity>,
+	pub clients: ClientPlatforms,
 }
 impl Member {
 	pub fn valid(&self) -> bool {
@@ -560,6 +704,25 @@ impl Member {
 				.is_none_or(valid_presence_text)
 			&& self.activities.len() <= MAX_RICH_ACTIVITIES
 			&& self.activities.iter().all(RichActivity::valid)
+	}
+	/// Drops presence details this client cannot show, keeping the member row itself.
+	pub fn sanitize_presence(&mut self) {
+		if self
+			.status
+			.as_deref()
+			.is_some_and(|status| !matches!(status, "online" | "idle" | "dnd" | "offline"))
+		{
+			self.status = None;
+		}
+		if self
+			.custom_status
+			.as_deref()
+			.is_some_and(|text| !valid_presence_text(text))
+		{
+			self.custom_status = None;
+		}
+		self.activities.retain(RichActivity::valid);
+		self.activities.truncate(MAX_RICH_ACTIVITIES);
 	}
 	pub fn bytes(&self) -> usize {
 		size_of::<Self>()
@@ -577,13 +740,44 @@ impl Member {
 	}
 }
 #[derive(Clone)]
+pub enum MemberSlot {
+	Person(Member),
+	/// Gateway group id: role snowflake, "online", or "offline".
+	Group(String),
+}
+
+impl MemberSlot {
+	pub fn bytes(&self) -> usize {
+		match self {
+			Self::Person(member) => member.bytes(),
+			Self::Group(id) => id.capacity(),
+		}
+	}
+}
+
+#[derive(Clone)]
 pub struct MemberList {
 	pub guild: Option<Id>,
 	pub channel: Id,
 	pub request: u64,
-	pub rows: Vec<Option<Member>>,
+	/// Absolute index of `slots[0]`.
+	pub start: usize,
+	/// Contiguous window. None is a hole. At most 200 entries.
+	pub slots: Vec<Option<MemberSlot>>,
 	pub total: u64,
+	/// Guild channel lazy list. Scrollbar length is `total`. DMs and threads are false and scroll `slots.len()`.
+	pub lazy: bool,
 	pub freshness: Freshness,
+	/// id -> count from the update's top-level groups array. At most MAX_ROLES + 2.
+	pub groups: Vec<(String, u64)>,
+	/// Ranges last requested for a lazy guild list.
+	pub ranges: Vec<[usize; 2]>,
+}
+
+impl MemberList {
+	pub fn slot_bytes(&self) -> usize {
+		self.slots.iter().flatten().map(MemberSlot::bytes).sum()
+	}
 }
 
 #[cfg(test)]
@@ -625,6 +819,7 @@ mod presence_tests {
 			state: Some("In a party".into()),
 			image: None,
 			small_image: None,
+			ends_at: None,
 			started_at: None,
 		};
 		let mut presence = MemberPresence {
@@ -632,6 +827,7 @@ mod presence_tests {
 			status: None,
 			custom_status: None,
 			activities: vec![activity.clone(); MAX_RICH_ACTIVITIES],
+			clients: ClientPlatforms::default(),
 		};
 		assert!(presence.valid());
 		assert_eq!(
@@ -693,6 +889,14 @@ mod presence_tests {
 		allocated.started_at = Some(MAX_ACTIVITY_TIMESTAMP + 1);
 		assert!(!allocated.valid());
 		allocated.started_at = None;
+		allocated.ends_at = Some(1000);
+		assert!(allocated.valid());
+		allocated.started_at = Some(1000);
+		assert!(!allocated.valid());
+		allocated.started_at = None;
+		allocated.ends_at = Some(MAX_ACTIVITY_TIMESTAMP + 1);
+		assert!(!allocated.valid());
+		allocated.ends_at = None;
 		allocated.small_image = Some(ActivityImage::Proxy("external/../secret".into()));
 		assert!(!allocated.valid());
 	}

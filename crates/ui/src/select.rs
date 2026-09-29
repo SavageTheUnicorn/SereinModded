@@ -12,8 +12,6 @@ use std::sync::Arc;
 pub struct Artwork {
 	pub rect: Rect,
 	pub image: Option<egui::Image<'static>>,
-	/// Shown when the image is not resolved yet.
-	pub fallback: char,
 }
 
 struct Run {
@@ -21,12 +19,23 @@ struct Run {
 	galley_pos: Pos2,
 	galley: Arc<Galley>,
 	rect: Rect,
+	/// One band per wrapped galley row, so a run never covers a neighbour's line.
+	lines: Vec<Rect>,
 	painted: bool,
 }
 
 struct Hole {
 	rect: Rect,
 	clickable: bool,
+}
+
+/// A widget that brings its own galley (fenced code), selected in body order.
+struct Embed {
+	/// How many runs preceded it, so `finish` replays it between them.
+	after: usize,
+	response: Response,
+	galley_pos: Pos2,
+	galley: Arc<Galley>,
 }
 
 struct Overlay {
@@ -38,6 +47,7 @@ struct Overlay {
 pub struct Surface {
 	base: egui::Id,
 	runs: Vec<Run>,
+	embeds: Vec<Embed>,
 	holes: Vec<Hole>,
 	overlays: Vec<Overlay>,
 	cover: Option<Rect>,
@@ -49,6 +59,7 @@ impl Surface {
 		Self {
 			base: ui.scope_id().with(salt),
 			runs: Vec::new(),
+			embeds: Vec::new(),
 			holes: Vec::new(),
 			overlays: Vec::new(),
 			cover: None,
@@ -114,15 +125,36 @@ impl Surface {
 		self.runs.push(Run {
 			band,
 			galley_pos,
+			lines: line_bands(&galley, galley_pos, response.rect),
 			galley,
 			rect: response.rect,
 			painted,
 		});
 	}
 
+	/// Record a widget that laid out its own galley (fenced code), so that `finish` registers
+	/// its selection between the runs around it.
+	///
+	/// egui pairs the two ends of a selection by the order labels are registered in, and
+	/// treats every label registered in between as fully selected. A code block registers
+	/// where it is drawn, in the middle of the body, while the surrounding runs only register
+	/// in `finish`: selecting into a block that way puts the whole message — and every earlier
+	/// run — "between" the two ends. Deferring the block to the same pass keeps both in
+	/// reading order.
+	pub fn embed(&mut self, response: &Response, galley_pos: Pos2, galley: Arc<Galley>) {
+		self.embeds.push(Embed {
+			after: self.runs.len(),
+			response: response.clone(),
+			galley_pos,
+			galley,
+		});
+	}
+
 	/// Tile the block and register selection on the remaining bands.
 	pub fn finish(self, ui: &mut egui::Ui) {
 		let block = block_rect(ui, &self.runs, self.cover);
+		let embeds = self.embeds;
+		let mut embedded = 0;
 		let mut runs = self.runs;
 		if runs.is_empty() && block.is_positive() {
 			runs.push(blank_run(ui, self.base, block));
@@ -140,7 +172,14 @@ impl Surface {
 			pointer.is_some_and(|pos| self.holes.iter().any(|hole| hole.rect.contains(pos)));
 		let menu_open = Popup::is_any_open(ui.ctx());
 		let holes: Vec<Rect> = self.holes.iter().map(|hole| hole.rect).collect();
-		for run in runs {
+		for (position, run) in runs.into_iter().enumerate() {
+			while embeds
+				.get(embedded)
+				.is_some_and(|embed| embed.after <= position)
+			{
+				show_embed(ui, &embeds[embedded], menu_open);
+				embedded += 1;
+			}
 			if !run.rect.is_positive() || !ui.is_rect_visible(run.rect) {
 				continue;
 			}
@@ -156,22 +195,22 @@ impl Surface {
 				}
 				continue;
 			}
-			let pieces = punch(run.rect, &holes);
-			if pieces.is_empty() {
-				continue;
-			}
 			let mut response: Option<Response> = None;
-			for (index, piece) in pieces.iter().enumerate() {
-				let id = if index == 0 {
-					run.band
-				} else {
-					run.band.with(index)
-				};
-				let piece = ui.interact(*piece, id, band_sense());
-				response = Some(match response.take() {
-					Some(prev) => prev.union(piece),
-					None => piece,
-				});
+			let mut index = 0;
+			for line in &run.lines {
+				for piece in punch(*line, &holes) {
+					let id = if index == 0 {
+						run.band
+					} else {
+						run.band.with(index)
+					};
+					index += 1;
+					let piece = ui.interact(piece, id, band_sense());
+					response = Some(match response.take() {
+						Some(prev) => prev.union(piece),
+						None => piece,
+					});
+				}
 			}
 			let Some(response) = response else {
 				continue;
@@ -192,6 +231,9 @@ impl Surface {
 				color,
 				Stroke::NONE,
 			);
+		}
+		for embed in &embeds[embedded..] {
+			show_embed(ui, embed, menu_open);
 		}
 		for over in self.overlays {
 			ui.interact_opt(
@@ -271,7 +313,10 @@ impl egui::Plugin for Pointer {
 		.open_memory(Some(egui::SetOpenCommand::Bool(true)))
 		.kind(egui::PopupKind::Menu)
 		.show(|ui| {
-			if ui.button("Copy").clicked() {
+			if ui
+				.button(crate::i18n::translate("select-on-end-pass-copy"))
+				.clicked()
+			{
 				request_copy(ui.ctx());
 				ui.close();
 			}
@@ -336,6 +381,31 @@ pub fn request_copy(ctx: &egui::Context) {
 
 pub(crate) fn band_sense() -> Sense {
 	Sense::CLICK | Sense::DRAG
+}
+
+/// Paint a deferred widget galley, registering its selection unless a menu owns the pointer.
+fn show_embed(ui: &mut egui::Ui, embed: &Embed, menu_open: bool) {
+	if !embed.response.rect.is_positive() || !ui.is_rect_visible(embed.response.rect) {
+		return;
+	}
+	// The galley carries its own per-token colours; the fallback only covers unstyled glyphs.
+	let color = ui.visuals().text_color();
+	if menu_open {
+		ui.painter().add(TextShape::new(
+			embed.galley_pos,
+			embed.galley.clone(),
+			color,
+		));
+		return;
+	}
+	LabelSelectionState::label_text_selection(
+		ui,
+		&embed.response,
+		embed.galley_pos,
+		embed.galley.clone(),
+		color,
+		Stroke::NONE,
+	);
 }
 
 fn punch(rect: Rect, holes: &[Rect]) -> Vec<Rect> {
@@ -416,38 +486,71 @@ fn block_rect(ui: &egui::Ui, runs: &[Run], cover: Option<Rect>) -> Rect {
 	}
 }
 
+/// Screen-space band per galley row. A wrapped run's bounding rect spans several
+/// lines, and its last line shares a line with whatever follows it: one band for the
+/// whole run would sit on top of those neighbours and steal their selection hits.
+fn line_bands(galley: &Galley, galley_pos: Pos2, rect: Rect) -> Vec<Rect> {
+	if galley.rows.len() < 2 {
+		return vec![rect];
+	}
+	let last = galley.rows.len() - 1;
+	galley
+		.rows
+		.iter()
+		.enumerate()
+		.map(|(index, row)| {
+			let row = row.rect().translate(galley_pos.to_vec2());
+			let top = if index == 0 { rect.top() } else { row.top() };
+			let bottom = if index == last {
+				rect.bottom()
+			} else {
+				row.bottom()
+			};
+			Rect::from_min_max(egui::pos2(row.left(), top), egui::pos2(row.right(), bottom))
+		})
+		.collect()
+}
+
 fn tile(runs: &mut [Run], block: Rect, stitch: bool) {
-	if runs.is_empty() {
+	let mut index: Vec<(usize, usize)> = Vec::new();
+	let mut lines: Vec<Rect> = Vec::new();
+	for (run_index, run) in runs.iter().enumerate() {
+		for (line_index, line) in run.lines.iter().enumerate() {
+			index.push((run_index, line_index));
+			lines.push(*line);
+		}
+	}
+	if lines.is_empty() {
 		return;
 	}
 	let mut rows = Vec::new();
 	let mut start = 0;
-	let mut top = runs[0].rect.top();
-	let mut bottom = runs[0].rect.bottom();
-	for (index, run) in runs.iter().enumerate().skip(1) {
-		let center = run.rect.center().y;
+	let mut top = lines[0].top();
+	let mut bottom = lines[0].bottom();
+	for (line_index, line) in lines.iter().enumerate().skip(1) {
+		let center = line.center().y;
 		if (top..=bottom).contains(&center) {
-			top = top.min(run.rect.top());
-			bottom = bottom.max(run.rect.bottom());
+			top = top.min(line.top());
+			bottom = bottom.max(line.bottom());
 		} else {
-			rows.push(start..index);
-			start = index;
-			top = run.rect.top();
-			bottom = run.rect.bottom();
+			rows.push(start..line_index);
+			start = line_index;
+			top = line.top();
+			bottom = line.bottom();
 		}
 	}
-	rows.push(start..runs.len());
+	rows.push(start..lines.len());
 
 	let last = rows.len() - 1;
 	let mut previous_bottom = block.top();
 	for (row_index, range) in rows.into_iter().enumerate() {
-		let natural_top = runs[range.clone()]
+		let natural_top = lines[range.clone()]
 			.iter()
-			.map(|run| run.rect.top())
+			.map(|line| line.top())
 			.fold(f32::INFINITY, f32::min);
-		let natural_bottom = runs[range.clone()]
+		let natural_bottom = lines[range.clone()]
 			.iter()
-			.map(|run| run.rect.bottom())
+			.map(|line| line.bottom())
 			.fold(f32::NEG_INFINITY, f32::max);
 		let row_top = if row_index == 0 {
 			block.top()
@@ -463,13 +566,22 @@ fn tile(runs: &mut [Run], block: Rect, stitch: bool) {
 		};
 		let first = range.start;
 		let end = range.end;
-		for run in &mut runs[range] {
-			run.rect.min.y = row_top;
-			run.rect.max.y = row_bottom;
+		for line in &mut lines[range] {
+			line.min.y = row_top;
+			line.max.y = row_bottom;
 		}
-		runs[first].rect.min.x = block.left();
-		runs[end - 1].rect.max.x = block.right();
+		lines[first].min.x = block.left();
+		lines[end - 1].max.x = block.right();
 		previous_bottom = row_bottom;
+	}
+
+	for ((run_index, line_index), line) in index.into_iter().zip(lines) {
+		runs[run_index].lines[line_index] = line;
+	}
+	for run in runs {
+		if let Some(rect) = run.lines.iter().copied().reduce(Rect::union) {
+			run.rect = rect;
+		}
 	}
 }
 
@@ -484,6 +596,7 @@ fn blank_run(ui: &egui::Ui, base: egui::Id, block: Rect) -> Run {
 		galley_pos: block.min,
 		galley,
 		rect: block,
+		lines: vec![block],
 		painted: true,
 	}
 }
@@ -496,13 +609,120 @@ fn paint_artwork(ui: &egui::Ui, art: &Artwork) {
 	if let Some(image) = &art.image {
 		let painted = image.calc_size(egui::Vec2::splat(size), image.size());
 		image.paint_at(ui, Rect::from_center_size(art.rect.center(), painted));
-	} else {
-		ui.painter().text(
-			art.rect.center(),
-			egui::Align2::CENTER_CENTER,
-			art.fallback,
-			egui::FontId::proportional(size),
-			ui.visuals().weak_text_color(),
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	const WIDTH: f32 = 220.0;
+
+	/// A body like `text …link` where the leading run wraps across several rows.
+	fn show(ui: &mut egui::Ui) {
+		let mut surface = Surface::new(ui, "body");
+		ui.allocate_ui_with_layout(
+			egui::vec2(ui.available_width(), 0.0),
+			egui::Layout::left_to_right(egui::Align::Min).with_main_wrap(true),
+			|ui| {
+				ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
+				ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+				for (text, link) in [
+					("alpha bravo charlie delta echo foxtrot golf hotel ", false),
+					("https://example.com", true),
+				] {
+					let label = egui::Label::new(text).wrap().selectable(false);
+					let (pos, galley, response) = label.layout_in_ui(ui);
+					surface.run(ui, &response, pos, galley, Vec::new());
+					if link {
+						let overlay = ui.interact(
+							response.rect,
+							response.id.with("link"),
+							egui::Sense::click(),
+						);
+						surface.through(&overlay);
+					}
+				}
+			},
+		);
+		surface.finish(ui);
+	}
+
+	fn input(events: Vec<Event>) -> RawInput {
+		RawInput {
+			screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(WIDTH, 400.0))),
+			events,
+			..Default::default()
+		}
+	}
+
+	fn press(pos: Pos2, pressed: bool) -> Vec<Event> {
+		vec![
+			Event::PointerMoved(pos),
+			Event::PointerButton {
+				pos,
+				button: PointerButton::Primary,
+				pressed,
+				modifiers: Default::default(),
+			},
+		]
+	}
+
+	/// Drag from `from` to `to` and return what a copy would yield.
+	fn drag(from: Pos2, to: Pos2) -> String {
+		let ctx = egui::Context::default();
+		for events in [
+			Vec::new(),
+			press(from, true),
+			vec![Event::PointerMoved(to)],
+			press(to, false),
+			vec![Event::Copy],
+		] {
+			let output = ctx.run_ui(input(events), show);
+			let copied = output
+				.platform_output
+				.commands
+				.iter()
+				.find_map(|command| match command {
+					egui::OutputCommand::CopyText(text) => Some(text.clone()),
+					_ => None,
+				});
+			output.drop_without_applying_deltas();
+			if let Some(copied) = copied {
+				return copied;
+			}
+		}
+		String::new()
+	}
+
+	// Layout is "alpha … foxtrot " / "golf hotel " + "https://example.com", so the
+	// wrapped first run ends on the same visual row as the link.
+
+	#[test]
+	fn a_drag_inside_the_wrapped_row_stops_before_the_link_row() {
+		assert_eq!(
+			drag(Pos2::new(4.0, 7.0), Pos2::new(WIDTH - 4.0, 7.0)),
+			"lpha bravo charlie delta echo foxtrot"
+		);
+	}
+
+	#[test]
+	fn a_drag_on_the_link_row_starts_where_the_pointer_is() {
+		assert_eq!(
+			drag(Pos2::new(4.0, 22.0), Pos2::new(WIDTH - 4.0, 22.0)),
+			"olf hotel https://example.com"
+		);
+	}
+
+	#[test]
+	fn a_drag_across_rows_ends_under_the_pointer() {
+		assert_eq!(
+			drag(Pos2::new(4.0, 7.0), Pos2::new(40.0, 22.0)),
+			"lpha bravo charlie delta echo foxtrot golf ho"
+		);
+		assert_eq!(
+			drag(Pos2::new(120.0, 22.0), Pos2::new(60.0, 7.0)),
+			"o charlie delta echo foxtrot golf hotel https://exa"
 		);
 	}
 }

@@ -30,6 +30,11 @@ fn frame(
 		.fullscreen = Some(fullscreen);
 	ctx.run_ui(input, |ui| {
 		let _ = view.show(ui, state);
+		// Match the desktop's visibility-based player cleanup.
+		let player = view.video();
+		if player.active.is_some() && !player.seen {
+			player.stop();
+		}
 	})
 }
 
@@ -68,6 +73,8 @@ fn main() {
 	ctx.enable_accesskit();
 	ui::design::apply(&ctx);
 	let mut view = ui::MessagingUi::default();
+	// Labels below are English; the default follows the host locale.
+	view.language = ui::i18n::Language::English;
 	let mut state = test_support::video_demo_state();
 	let mut message = state.timeline.get(model::Id(601)).unwrap().clone();
 	message.attachments[0].media.url = Some("https://example.com/synthetic-video.mp4".into());
@@ -100,20 +107,32 @@ fn main() {
 	let output = frame(&ctx, &mut view, &mut state, vec![], false);
 	let enter = button(&output, "Fullscreen");
 	output.drop_without_applying_deltas();
+	view.video().state = ui::VideoState::Playing;
 	frame(&ctx, &mut view, &mut state, pointer(enter, true), false).drop_without_applying_deltas();
 	let output = frame(&ctx, &mut view, &mut state, pointer(enter, false), false);
-	assert!(
-		output.viewport_output[&egui::ViewportId::ROOT]
-			.commands
-			.contains(&egui::ViewportCommand::Fullscreen(true))
-	);
 	output.drop_without_applying_deltas();
-	for _ in 0..2 {
-		let output = frame(&ctx, &mut view, &mut state, vec![], true);
+	assert_eq!(view.video().take_fullscreen_request(), Some(true));
+	assert_eq!(view.video().state, ui::VideoState::Playing);
+	assert!(view.video().command.is_none());
+	// Native fullscreen changes asynchronously and can resize through intermediate sizes.
+	for fullscreen in [false, true, true, false, true] {
+		let output = frame(&ctx, &mut view, &mut state, vec![], fullscreen);
 		let exit = button(&output, "Exit fullscreen (Esc)");
 		assert!(
-			exit.x > 1400.0 && exit.y > 800.0,
+			exit.x > if fullscreen { 1400.0 } else { 800.0 }
+				&& exit.y > if fullscreen { 800.0 } else { 600.0 },
 			"Fullscreen controls fill the viewport: {exit:?}"
+		);
+		assert!(
+			!output
+				.platform_output
+				.accesskit_update
+				.as_ref()
+				.unwrap()
+				.nodes
+				.iter()
+				.any(|(_, node)| node.label() == Some("Send message")),
+			"Fullscreen must render only the player, without the chat composer"
 		);
 		assert!(view.video().seen);
 		assert_eq!(view.video().position, 6.0);
@@ -133,14 +152,11 @@ fn main() {
 		}],
 		true,
 	);
-	assert!(
-		output.viewport_output[&egui::ViewportId::ROOT]
-			.commands
-			.contains(&egui::ViewportCommand::Fullscreen(false))
-	);
 	output.drop_without_applying_deltas();
-	assert_eq!(view.video().state, ui::VideoState::Paused);
+	assert_eq!(view.video().take_fullscreen_request(), Some(false));
+	assert_eq!(view.video().state, ui::VideoState::Playing);
 	assert_eq!(view.video().position, 6.0);
+	view.video().state = ui::VideoState::Paused;
 	let output = frame(&ctx, &mut view, &mut state, vec![], false);
 	let enter = button(&output, "Fullscreen");
 	output.drop_without_applying_deltas();
@@ -164,12 +180,6 @@ fn main() {
 	frame(&ctx, &mut view, &mut state, pointer(open, true), true).drop_without_applying_deltas();
 	let output = frame(&ctx, &mut view, &mut state, pointer(open, false), true);
 	assert!(
-		output.viewport_output[&egui::ViewportId::ROOT]
-			.commands
-			.contains(&egui::ViewportCommand::Fullscreen(false)),
-		"Open original must restore the window before confirmation"
-	);
-	assert!(
 		!output
 			.platform_output
 			.commands
@@ -177,6 +187,11 @@ fn main() {
 			.any(|command| matches!(command, egui::OutputCommand::OpenUrl(_)))
 	);
 	output.drop_without_applying_deltas();
+	assert_eq!(
+		view.video().take_fullscreen_request(),
+		Some(false),
+		"Open original must restore the window before confirmation"
+	);
 	let output = frame(&ctx, &mut view, &mut state, vec![], false);
 	let _ = button(&output, "Open in Browser");
 	assert!(
@@ -209,7 +224,29 @@ fn main() {
 			})
 			.drop_without_applying_deltas();
 	}
+	// Signing out during fullscreen playback still hands the desktop a restore request.
+	view.clear();
+	view.language = ui::i18n::Language::English;
+	frame(&ctx, &mut view, &mut state, vec![], false).drop_without_applying_deltas();
+	let message = state.timeline.get(model::Id(601)).unwrap();
+	let video = view.video();
+	video.active = Some((message.channel, message.id, message.attachments[0].clone()));
+	video.state = ui::VideoState::Paused;
+	let output = frame(&ctx, &mut view, &mut state, vec![], false);
+	let enter = button(&output, "Fullscreen");
+	output.drop_without_applying_deltas();
+	for pressed in [true, false] {
+		frame(&ctx, &mut view, &mut state, pointer(enter, pressed), false)
+			.drop_without_applying_deltas();
+	}
+	assert_eq!(view.video().take_fullscreen_request(), Some(true));
+	view.clear();
+	assert_eq!(
+		view.video().take_fullscreen_request(),
+		Some(false),
+		"Clearing the session must restore the window"
+	);
 	println!(
-		"Offline video UI passed: seek range stays stable during loading; fullscreen fills the viewport; Escape restores playback; Open original exits fullscreen and awaits confirmation."
+		"Offline video UI passed: seek range stays stable during loading; fullscreen fills the viewport; Escape restores playback; Open original exits fullscreen and awaits confirmation; sign-out restores the window."
 	);
 }

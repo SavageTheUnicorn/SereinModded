@@ -8,6 +8,7 @@ use std::sync::{
 };
 
 const READY: &str = "Global voice keybinds are enabled.";
+const DISABLED: &str = "Global keybinds are off. Shortcuts work while Serein is focused.";
 #[cfg(target_os = "linux")]
 const WAYLAND_PENDING: &str = "Approve the global voice keybinds in your desktop's dialog.";
 #[cfg(target_os = "linux")]
@@ -80,28 +81,38 @@ impl Hotkeys {
 	}
 
 	pub fn sync(&mut self, keybinds: &Keybinds, _runtime: &tokio::runtime::Runtime) {
-		let next = [
-			keybinds.chord(KeybindAction::PushToTalk).clone(),
-			keybinds.chord(KeybindAction::ToggleMute).clone(),
-			keybinds.chord(KeybindAction::ToggleDeafen).clone(),
-		];
-		if self.bindings.as_ref() == Some(&next) {
+		let next = keybinds.global_enabled.then(|| {
+			[
+				keybinds.chord(KeybindAction::PushToTalk).clone(),
+				keybinds.chord(KeybindAction::ToggleMute).clone(),
+				keybinds.chord(KeybindAction::ToggleDeafen).clone(),
+			]
+		});
+		if self.bindings == next {
 			return;
 		}
-		self.bindings = Some(next.clone());
+		self.bindings = next.clone();
 		self.unregister_all();
 		self.ptt_down = false;
 		self.pending_toggles = 0;
 
 		#[cfg(target_os = "linux")]
-		if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+		{
 			if let Some(task) = self.portal.take() {
 				task.abort();
 			}
-			self.portal_pending.store(0, Ordering::Relaxed);
-			self.portal_registered.store(0, Ordering::Relaxed);
-			self.portal_ptt_down.store(false, Ordering::Relaxed);
-			self.portal_status.store(1, Ordering::Relaxed);
+			// A cancelled portal task must not publish late input into the new configuration.
+			self.portal_pending = Arc::new(AtomicU8::new(0));
+			self.portal_registered = Arc::new(AtomicU8::new(0));
+			self.portal_ptt_down = Arc::new(AtomicBool::new(false));
+			self.portal_status = Arc::new(AtomicU8::new(1));
+		}
+		let Some(next) = next else {
+			return;
+		};
+
+		#[cfg(target_os = "linux")]
+		if std::env::var_os("WAYLAND_DISPLAY").is_some() {
 			let pending = self.portal_pending.clone();
 			let registered = self.portal_registered.clone();
 			let ptt_down = self.portal_ptt_down.clone();
@@ -140,7 +151,7 @@ impl Hotkeys {
 				failed = true;
 				continue;
 			}
-			if chord.modifiers == 0 {
+			if chord.modifiers == 0 && !is_standalone_global_key(&chord.key) {
 				modifier_required |= index != PUSH_TO_TALK;
 				continue;
 			}
@@ -216,6 +227,9 @@ impl Hotkeys {
 	}
 
 	pub fn status(&self) -> &'static str {
+		if self.bindings.is_none() {
+			return DISABLED;
+		}
 		#[cfg(target_os = "linux")]
 		if std::env::var_os("WAYLAND_DISPLAY").is_some() {
 			return match self.portal_status.load(Ordering::Relaxed) {
@@ -262,9 +276,9 @@ async fn portal(
 			.map(|trigger| NewShortcut::new(id, description).preferred_trigger(trigger.as_str()))
 	})
 	.collect();
-	let modifier_required = bindings[TOGGLE_MUTE..]
-		.iter()
-		.any(|chord| chord.is_valid() && chord.modifiers == 0);
+	let modifier_required = bindings[TOGGLE_MUTE..].iter().any(|chord| {
+		chord.is_valid() && chord.modifiers == 0 && !is_standalone_global_key(&chord.key)
+	});
 	if shortcuts.is_empty() {
 		status.store(if modifier_required { 4 } else { 3 }, Ordering::Relaxed);
 		wake();
@@ -329,7 +343,7 @@ async fn portal(
 
 #[cfg(target_os = "linux")]
 fn portal_trigger(chord: &KeyChord) -> Option<String> {
-	if !chord.is_valid() || chord.modifiers == 0 {
+	if !chord.is_valid() || (chord.modifiers == 0 && !is_standalone_global_key(&chord.key)) {
 		return None;
 	}
 	let mut value = String::new();
@@ -346,8 +360,23 @@ fn portal_trigger(chord: &KeyChord) -> Option<String> {
 	Some(value)
 }
 
+fn is_standalone_global_key(name: &str) -> bool {
+	matches!(
+		name,
+		"PageDown"
+			| "PageUp"
+			| "Insert"
+			| "F1" | "F2"
+			| "F3" | "F4"
+			| "F5" | "F6"
+			| "F7" | "F8"
+			| "F9" | "F10"
+			| "F11" | "F12"
+	)
+}
+
 fn native_hotkey(chord: &KeyChord) -> Option<HotKey> {
-	if !chord.is_valid() || chord.modifiers == 0 {
+	if !chord.is_valid() || (chord.modifiers == 0 && !is_standalone_global_key(&chord.key)) {
 		return None;
 	}
 	let mut value = String::new();
@@ -385,6 +414,9 @@ fn code_name(name: &str) -> Option<&'static str> {
 		"Delete" => Some("Delete"),
 		"Home" => Some("Home"),
 		"End" => Some("End"),
+		"PageDown" => Some("PageDown"),
+		"PageUp" => Some("PageUp"),
+		"Insert" => Some("Insert"),
 		"Slash" => Some("Slash"),
 		"Backtick" => Some("Backquote"),
 		"Minus" => Some("Minus"),
@@ -458,5 +490,12 @@ mod tests {
 		);
 		assert!(native_hotkey(&KeyChord::default()).is_none());
 		assert!(native_hotkey(&KeyChord::new("unknown", model::keybinds::PRIMARY)).is_none());
+		// Plain letter key stays focused-only so typing is not swallowed
+		assert!(native_hotkey(&KeyChord::new("M", 0)).is_none());
+		// Standalone navigation and function keys can be registered globally
+		assert!(native_hotkey(&KeyChord::new("PageDown", 0)).is_some());
+		assert!(native_hotkey(&KeyChord::new("PageUp", 0)).is_some());
+		assert!(native_hotkey(&KeyChord::new("Insert", 0)).is_some());
+		assert!(native_hotkey(&KeyChord::new("F12", 0)).is_some());
 	}
 }

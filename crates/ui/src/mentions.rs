@@ -3,7 +3,10 @@
 use crate::avatars::Avatars;
 use client_core::State;
 use model::{Id, User};
-use std::ops::Range;
+use std::{
+	hash::{Hash, Hasher},
+	ops::Range,
+};
 
 /// Rows shown for people and channels, like Discord's short member list.
 const SHORT_LIMIT: usize = 8;
@@ -43,6 +46,7 @@ enum Candidate {
 	},
 	User {
 		user: User,
+		name: String,
 	},
 	Mass {
 		name: &'static str,
@@ -62,11 +66,16 @@ enum Candidate {
 		server: String,
 	},
 }
+
+pub(crate) fn user_mention_token(user: Id) -> String {
+	format!("<@{user}> ")
+}
+
 impl Candidate {
 	#[cfg(test)]
 	fn id(&self) -> Id {
 		match self {
-			Candidate::User { user } => user.id,
+			Candidate::User { user, .. } => user.id,
 			Candidate::Role { id, .. }
 			| Candidate::Channel { id, .. }
 			| Candidate::Custom { id, .. } => *id,
@@ -76,7 +85,7 @@ impl Candidate {
 	fn token(&self) -> String {
 		match self {
 			Candidate::Role { id, .. } => format!("<@&{id}> "),
-			Candidate::User { user } => format!("<@{}> ", user.id),
+			Candidate::User { user, .. } => user_mention_token(user.id),
 			Candidate::Mass { name } => format!("@{name} "),
 			Candidate::Channel { id, .. } => format!("<#{id}> "),
 			Candidate::Unicode { text, .. } => format!("{text} "),
@@ -119,7 +128,14 @@ pub fn known_users(state: &State, channel: Id) -> Vec<User> {
 		}
 	}
 	if let Some(members) = state.members.as_ref().filter(|m| m.channel == channel) {
-		for member in members.rows.iter().flatten() {
+		for member in members
+			.slots
+			.iter()
+			.flatten()
+			.filter_map(|slot| match slot {
+				model::MemberSlot::Person(m) => Some(m),
+				_ => None,
+			}) {
 			add(&member.user);
 		}
 	}
@@ -133,6 +149,139 @@ pub fn known_users(state: &State, channel: Id) -> Vec<User> {
 	}
 	users
 }
+
+pub struct MentionSource<'a> {
+	pub state: &'a State,
+	pub channel: Id,
+}
+
+fn member(state: &State, channel: Id, id: Id) -> Option<&model::Member> {
+	state
+		.members
+		.as_ref()
+		.filter(|list| list.channel == channel)
+		.and_then(|list| {
+			list.slots
+				.iter()
+				.flatten()
+				.filter_map(|slot| match slot {
+					model::MemberSlot::Person(m) => Some(m),
+					_ => None,
+				})
+				.find(|member| member.user.id == id)
+		})
+}
+
+pub fn find_user<'a>(
+	id: Id,
+	mentions: &'a [User],
+	source: Option<&MentionSource<'a>>,
+) -> Option<&'a User> {
+	if let Some(user) = mentions.iter().find(|user| user.id == id) {
+		return Some(user);
+	}
+	let source = source?;
+	let state = source.state;
+	if state.user.as_ref().is_some_and(|user| user.id == id) {
+		return state.user.as_ref();
+	}
+	if let Some(user) = state.friend(id) {
+		return Some(user);
+	}
+	if let Some(channel) = state.channel(source.channel)
+		&& let Some(user) = channel.recipients.iter().find(|user| user.id == id)
+	{
+		return Some(user);
+	}
+	if let Some(member) = member(state, source.channel, id) {
+		return Some(&member.user);
+	}
+	if let Some(request) = &state.member_search[0].request
+		&& request.channel == source.channel
+		&& state.can_view(source.channel)
+		&& let Some(member) = state.member_search[0]
+			.rows
+			.iter()
+			.find(|member| member.user.id == id)
+	{
+		return Some(&member.user);
+	}
+	state.timeline.iter().find_map(|message| {
+		if message.channel != source.channel {
+			return None;
+		}
+		if message.author.id == id {
+			Some(&message.author)
+		} else {
+			message.mentions.iter().find(|user| user.id == id)
+		}
+	})
+}
+
+pub fn mention_label(id: Id, mentions: &[User], source: Option<&MentionSource<'_>>) -> String {
+	if let Some(source) = source
+		&& let Some(nick) = member(source.state, source.channel, id)
+			.and_then(|member| member.nick.as_deref())
+			.filter(|nick| !nick.is_empty())
+	{
+		return format!("@{nick}");
+	}
+	match find_user(id, mentions, source) {
+		Some(user) => format!(
+			"@{}",
+			source.map_or(user.name.as_str(), |s| s.state.user_display_name(user))
+		),
+		None => format!("@{id}"),
+	}
+}
+
+pub fn presentation_fingerprint(state: &State, message: &model::Message) -> u64 {
+	let mut hasher = std::collections::hash_map::DefaultHasher::new();
+	let source = MentionSource {
+		state,
+		channel: message.channel,
+	};
+	let roles = known_roles(state, message.channel);
+	let mut rest = message.content.as_str();
+	let mut seen = 0usize;
+	while seen < model::MAX_MENTIONS {
+		let Some(start) = rest.find('<') else {
+			break;
+		};
+		rest = &rest[start..];
+		if let Some((id, len)) = model::user_mention_prefix(rest) {
+			mention_label(id, &message.mentions, Some(&source)).hash(&mut hasher);
+			rest = &rest[len..];
+		} else if let Some((id, len)) = model::role_mention_prefix(rest) {
+			let name = roles
+				.iter()
+				.find(|role| role.id == id)
+				.map_or_else(|| format!("unknown-role ({id})"), |role| role.name.clone());
+			format!("@{name}").hash(&mut hasher);
+			rest = &rest[len..];
+		} else if let Some((id, len)) = model::channel_mention_prefix(rest) {
+			let label = match state.channels.iter().find(|channel| channel.id == id) {
+				Some(channel)
+					if channel.guild.is_some()
+						&& matches!(channel.kind, 0 | 5 | 10..=12 | 15 | 16) =>
+				{
+					format!("#{}", channel.name)
+				}
+				Some(_) => String::new(),
+				None => "#unknown-channel".into(),
+			};
+			label.hash(&mut hasher);
+			rest = &rest[len..];
+		} else {
+			let skip = rest.chars().next().map_or(1, char::len_utf8);
+			rest = &rest[skip..];
+			continue;
+		}
+		seen += 1;
+	}
+	hasher.finish()
+}
+
 fn query(draft: &str, cursor: usize) -> Option<(Range<usize>, &str, Kind)> {
 	let end = draft
 		.char_indices()
@@ -157,7 +306,10 @@ fn query(draft: &str, cursor: usize) -> Option<(Range<usize>, &str, Kind)> {
 	match kind {
 		// Discord waits for two shortcode characters so `:)` and `10:30` never open a list.
 		Kind::Emoji => {
-			if query.chars().count() < 2 || !query.chars().all(|c| c.is_alphanumeric() || c == '_')
+			if query.chars().count() < 2
+				|| !query
+					.chars()
+					.all(|c| c.is_alphanumeric() || matches!(c, '_' | '+' | '-'))
 			{
 				return None;
 			}
@@ -196,10 +348,22 @@ fn rank(query: &str, name: &str, id: Id) -> Option<u8> {
 	if query.is_empty() {
 		return Some(1);
 	}
-	let name = name.to_lowercase();
-	if name.starts_with(query) {
+	// Most names are ASCII; compare those in place instead of allocating a lowercase copy.
+	let (prefix, substring) = if name.is_ascii() {
+		let (name, query) = (name.as_bytes(), query.as_bytes());
+		let prefix = name.len() >= query.len() && name[..query.len()].eq_ignore_ascii_case(query);
+		let substring = prefix
+			|| name
+				.windows(query.len())
+				.any(|window| window.eq_ignore_ascii_case(query));
+		(prefix, substring)
+	} else {
+		let name = name.to_lowercase();
+		(name.starts_with(query), name.contains(query))
+	};
+	if prefix {
 		Some(0)
-	} else if name.contains(query) {
+	} else if substring {
 		Some(1)
 	} else if id.0 != 0 && id.to_string().starts_with(query) {
 		Some(2)
@@ -283,7 +447,14 @@ impl Menu {
 				let mut ranked = users
 					.iter()
 					.filter_map(|user| {
-						rank(&query, &user.name, user.id)
+						let label = mention_label(
+							user.id,
+							std::slice::from_ref(user),
+							Some(&MentionSource { state, channel }),
+						);
+						let name = label.strip_prefix('@').unwrap_or(&label);
+						rank(&query, name, user.id)
+							.or_else(|| rank(&query, &user.name, user.id))
 							.or_else(|| {
 								let search = &state.member_search[0];
 								(search.request.as_ref().is_some_and(|r| {
@@ -291,7 +462,15 @@ impl Menu {
 								}) && search.rows.iter().any(|m| m.user.id == user.id))
 								.then_some(0)
 							})
-							.map(|r| ((r, 0, 0), Candidate::User { user: user.clone() }))
+							.map(|r| {
+								(
+									(r, 0, 0),
+									Candidate::User {
+										user: user.clone(),
+										name: name.to_owned(),
+									},
+								)
+							})
 					})
 					.collect::<Vec<_>>();
 				for role in known_roles(state, channel)
@@ -361,7 +540,12 @@ impl Menu {
 					.zip(crate::emoji_picker::shortcodes())
 					.enumerate()
 				{
-					if let Some(rank) = rank(&query, &code[1..code.len() - 1], Id(0)) {
+					let rank = crate::emoji_picker::discord_names()[index]
+						.2
+						.split(',')
+						.filter_map(|alias| rank(&query, alias, Id(0)))
+						.min();
+					if let Some(rank) = rank {
 						push_emoji(&mut out, (rank, 1, index as u64), || Candidate::Unicode {
 							text,
 							code,
@@ -491,9 +675,9 @@ impl Menu {
 									|ui| {
 										ui.add_space(12.0);
 										ui.label(
-											egui::RichText::new(
-												"↑↓ choose · Tab/Enter insert · Esc",
-											)
+											egui::RichText::new(crate::i18n::translate(
+												"mentions-show-choose-tab-enter-insert-esc",
+											))
 											.size(11.0)
 											.color(colors.muted),
 										);
@@ -566,10 +750,10 @@ fn row(
 		_ => None,
 	};
 	let primary = match candidate {
-		Candidate::User { user } => {
+		Candidate::User { user, name } => {
 			let mut child = ui.new_child(egui::UiBuilder::new().max_rect(icon));
 			avatars.show(&mut child, user, 24.0, demo);
-			user.name.clone()
+			name.clone()
 		}
 		Candidate::Mass { .. } | Candidate::Role { .. } => {
 			let name = match candidate {
@@ -660,11 +844,11 @@ fn row(
 	}
 	response.widget_info(|| {
 		egui::WidgetInfo::selected(
-			egui::WidgetType::Button,
+			egui::Role::Button,
 			true,
 			selected,
 			match candidate {
-				Candidate::User { user } => user.name.clone(),
+				Candidate::User { name, .. } => name.clone(),
 				Candidate::Mass { name } => format!("@{name}"),
 				Candidate::Role { name, .. } => format!("@{name}, role"),
 				Candidate::Channel { name, .. } => name.clone(),
@@ -688,6 +872,7 @@ mod tests {
 			guilds: [20, 10]
 				.into_iter()
 				.map(|id| model::Guild {
+					stickers: None,
 					id: Id(id),
 					name: format!("Source{id}"),
 					icon: None,
@@ -723,6 +908,7 @@ mod tests {
 		for guild in &mut state.guilds {
 			guild.emojis.as_mut().unwrap().reverse();
 		}
+		state.invalidate_navigation();
 		menu.refresh(&state, Id(1), ":same", Some(5), &[]);
 		assert_eq!(
 			menu.candidates
@@ -780,6 +966,7 @@ mod tests {
 				kind,
 				recipients: vec![user(42, "Zoe")],
 				member_list_id: None,
+				tags: None,
 				message_count: None,
 				icon: None,
 			});
@@ -787,6 +974,7 @@ mod tests {
 				use model::permissions as p;
 				state.channels.push(channel(42, Some(guild), 0, "Zoe"));
 				state.guilds.push(model::Guild {
+					stickers: None,
 					id: guild,
 					name: "Synthetic guild".into(),
 					icon: None,
@@ -864,6 +1052,7 @@ mod tests {
 			webhook: false,
 			kind: Default::default(),
 			discriminator: 0,
+			primary_guild: None,
 		}
 	}
 	#[test]
@@ -927,6 +1116,7 @@ mod tests {
 			position: 0,
 			recipients: vec![],
 			member_list_id: None,
+			tags: None,
 			message_count: None,
 			icon: None,
 		}
@@ -998,7 +1188,10 @@ mod tests {
 		assert!(query("10:30", 5).is_none());
 		assert!(query("<:wave:9001>", 12).is_none());
 		assert_eq!(query("hi :he", 6), Some((3..6, "he", Kind::Emoji)));
+		assert_eq!(query(":+1", 3), Some((0..3, "+1", Kind::Emoji)));
+		assert_eq!(query(":-1", 3), Some((0..3, "-1", Kind::Emoji)));
 		let guilds = vec![model::Guild {
+			stickers: None,
 			id: Id(9),
 			name: "Guild".into(),
 			icon: None,
@@ -1043,7 +1236,7 @@ mod tests {
 		assert!(
 			menu.candidates
 				.iter()
-				.any(|c| matches!(c, Candidate::Unicode { code, .. } if *code == ":red_heart:"))
+				.any(|c| matches!(c, Candidate::Unicode { code, .. } if *code == ":heart:"))
 		);
 		let mut draft = "hi :he".to_owned();
 		assert_eq!(insert(&mut draft, menu.pick(0).unwrap()), Some(31));
@@ -1051,11 +1244,19 @@ mod tests {
 		let unicode = menu
 			.candidates
 			.iter()
-			.position(|c| matches!(c, Candidate::Unicode { code, .. } if *code == ":red_heart:"))
+			.position(|c| matches!(c, Candidate::Unicode { code, .. } if *code == ":heart:"))
 			.unwrap();
 		let mut draft = "hi :he".to_owned();
 		insert(&mut draft, menu.pick(unicode).unwrap()).unwrap();
 		assert_eq!(draft, "hi ❤️ ");
+		menu.refresh(&state, Id(1), ":+1", Some(3), &[]);
+		assert!(menu.candidates.iter().any(|candidate| matches!(
+			candidate,
+			Candidate::Unicode {
+				text: "👍",
+				code: ":thumbsup:"
+			}
+		)));
 	}
 }
 
@@ -1155,6 +1356,102 @@ pub(crate) fn debug_pointer_check(state: &mut State, channel: Id) {
 
 #[cfg(debug_assertions)]
 pub fn debug_role_mentions_check(state: &mut State) {
+	{
+		let user = state.user.as_ref().unwrap().clone();
+		let channel = Id(1);
+		let mut names = State::default();
+		names.apply(client_core::Envelope {
+			generation: names.generation,
+			event: client_core::Event::UserAction(client_core::user_actions::Event::Friends(Some(
+				vec![(user.clone(), "synthetic.username".into())],
+			))),
+		});
+		let mut author = user.clone();
+		author.id = Id(user.id.0.wrapping_add(1));
+		author.name = "Other".into();
+		let message = model::Message {
+			sticker_items: vec![],
+			id: Id(2),
+			channel,
+			author,
+			content: format!("<@{}>", user.id),
+			edited: false,
+			edited_at: None,
+			revision: 0,
+			nonce: None,
+			reply_to: None,
+			kind: 0,
+			reply_deleted: false,
+			interaction: None,
+			forwarded: false,
+			unsupported: false,
+			extra_content: Default::default(),
+			components: vec![],
+			application_id: None,
+			ephemeral: false,
+			flags: 0,
+			embeds: vec![],
+			attachments: vec![],
+			author_nick: None,
+			author_roles: vec![],
+			mention_roles: vec![],
+			mention_everyone: false,
+			suppress_notifications: false,
+			mentions: vec![user.clone()],
+			reactions: Some(vec![]),
+			embeds_suppressed: false,
+		};
+		for nickname in ["Private name", "Changed name", ""] {
+			let before = presentation_fingerprint(&names, &message);
+			names.apply(client_core::Envelope {
+				generation: names.generation,
+				event: client_core::Event::UserAction(client_core::user_actions::Event::Nickname {
+					user: user.id,
+					text: nickname.into(),
+				}),
+			});
+			let expected = if nickname.is_empty() {
+				user.name.as_str()
+			} else {
+				nickname
+			};
+			assert_ne!(presentation_fingerprint(&names, &message), before);
+			assert_eq!(
+				mention_label(
+					user.id,
+					std::slice::from_ref(&user),
+					Some(&MentionSource {
+						state: &names,
+						channel
+					})
+				),
+				format!("@{expected}")
+			);
+			let mut menu = Menu::default();
+			let mut draft = format!("@{}", expected.split_whitespace().next().unwrap());
+			menu.refresh(
+				&names,
+				channel,
+				&draft,
+				Some(draft.chars().count()),
+				std::slice::from_ref(&user),
+			);
+			assert!(
+				matches!(&menu.candidates[0], Candidate::User { name, .. } if name == expected)
+			);
+			insert(&mut draft, menu.pick(0).unwrap()).unwrap();
+			assert_eq!(draft, user_mention_token(user.id));
+			let original = format!("@{}", user.name.split_whitespace().next().unwrap());
+			menu.refresh(
+				&names,
+				channel,
+				&original,
+				Some(original.chars().count()),
+				std::slice::from_ref(&user),
+			);
+			assert!(!menu.candidates.is_empty());
+		}
+	}
 	let channel = state
 		.channels
 		.iter()
@@ -1174,10 +1471,29 @@ pub fn debug_role_mentions_check(state: &mut State) {
 		id: Id(1548470397144666162),
 		name: "Role check".into(),
 		bits: 0,
-		color: 0,
+		color: 0xe67e22,
 		position: 1,
 		hoist: false,
 	});
+	let mut message = state.timeline.iter().next().unwrap().clone();
+	message.channel = channel;
+	message.mentions.clear();
+	message.mention_everyone = false;
+	message.mention_roles = vec![Id(1548470397144666162)];
+	assert!(!crate::timeline::mentions_viewer(&message, state));
+	state
+		.permissions
+		.guilds
+		.get_mut(&guild)
+		.unwrap()
+		.member
+		.as_mut()
+		.unwrap()
+		.roles
+		.push(Id(1548470397144666162));
+	assert!(crate::timeline::mentions_viewer(&message, state));
+	message.mention_roles = vec![Id(999999)];
+	assert!(!crate::timeline::mentions_viewer(&message, state));
 	let mut menu = Menu::default();
 	let mut draft = "@Role".to_owned();
 	menu.refresh(state, channel, &draft, Some(5), &[]);
@@ -1257,21 +1573,38 @@ pub fn debug_role_mentions_check(state: &mut State) {
 		} else {
 			egui::Visuals::light()
 		});
+		let mut role_color = egui::Color32::TRANSPARENT;
 		let output = ctx.run_ui(Default::default(), |ui| {
+			let colors = crate::design::palette(ui);
+			role_color =
+				crate::design::role_name_color(0xe67e22, colors.mention_bg, colors.mention_text);
+			assert_ne!(role_color, colors.mention_text);
 			let roles = known_roles(state, channel);
-			let mut profile = None;
+			let mut preview = egui::text::LayoutJob::default();
+			let _ = crate::markdown::Formatted::parse(&draft).append_inline_preview(
+				&mut preview,
+				ui,
+				&[],
+				None,
+				roles,
+				&state.channels,
+			);
+			assert_eq!(preview.text, "@Role check");
+			assert_eq!(preview.sections[0].format.color, role_color);
+			let mut profile = crate::profiles::ProfileSession::default();
 			let mut surface = crate::select::Surface::new(ui, "mention-test");
 			parsed.show_references(
 				ui,
 				&mut None,
 				&[],
+				None,
 				&mut profile,
 				(&state.channels, &mut None, &state.guilds, roles),
 				(&mut avatars, true, &mut 0),
 				&mut surface,
 			);
 			surface.finish(ui);
-			assert!(profile.is_none());
+			assert!(profile.open_user().is_none());
 			let galley = composer.galley(
 				ui,
 				&thread_draft,
@@ -1285,7 +1618,7 @@ pub fn debug_role_mentions_check(state: &mut State) {
 			);
 			assert_eq!(galley.job.text, thread_draft);
 		});
-		fn count(shape: &egui::Shape) -> usize {
+		fn count(shape: &egui::Shape, role_color: egui::Color32) -> usize {
 			match shape {
 				egui::Shape::Text(text) => {
 					let value = &text.galley.job.text;
@@ -1293,6 +1626,15 @@ pub fn debug_role_mentions_check(state: &mut State) {
 						assert!(
 							value.contains("Hey guys"),
 							"role and body must share a galley"
+						);
+						assert!(
+							text.galley.rows.iter().any(|row| row
+								.visuals
+								.mesh
+								.vertices
+								.iter()
+								.any(|vertex| vertex.color == role_color)),
+							"role color must reach the painted text"
 						);
 						let row = &text.galley.rows[0];
 						let baseline = row.glyphs.iter().find(|g| g.chr == '@').unwrap().pos.y;
@@ -1308,7 +1650,9 @@ pub fn debug_role_mentions_check(state: &mut State) {
 						"#Thread with spaces" | "#Forum check"
 					))
 				}
-				egui::Shape::Vec(shapes) => shapes.iter().map(count).sum(),
+				egui::Shape::Vec(shapes) => {
+					shapes.iter().map(|shape| count(shape, role_color)).sum()
+				}
 				_ => 0,
 			}
 		}
@@ -1316,7 +1660,7 @@ pub fn debug_role_mentions_check(state: &mut State) {
 			output
 				.shapes
 				.iter()
-				.map(|shape| count(&shape.shape))
+				.map(|shape| count(&shape.shape, role_color))
 				.sum::<usize>(),
 			3,
 			"only the plain role mention should resolve; code stays literal and spoilers stay hidden"

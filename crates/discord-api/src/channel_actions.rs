@@ -1,6 +1,8 @@
 //! Documented channel administration routes and isolated unofficial user settings writes.
 use crate::{DiscordApi, Failure};
-use client_core::channel_actions::{Action, Edit, Mute, Outcome, PostDetails};
+use client_core::channel_actions::{
+	Action, Edit, ForumEdit, Mute, Outcome, PostDetails, REQUIRE_TAG,
+};
 use model::{Id, permissions};
 use reqwest::Method;
 use serde_json::{Value, json};
@@ -69,6 +71,26 @@ fn thread_reference_result(bytes: &[u8], guild: Id, channel: Id) -> Result<Outco
 		permissions: None,
 	})
 }
+fn created_thread_result(bytes: &[u8], guild: Id, parent: Id) -> Result<Outcome, Failure> {
+	let dto: discord_protocol::ChannelDto =
+		discord_protocol::decode(bytes).map_err(|_| Failure::Protocol)?;
+	if dto.parent_id != Some(parent)
+		|| dto.id == parent
+		|| dto.is_obfuscated()
+		|| !dto
+			.name
+			.as_deref()
+			.is_some_and(client_core::channel_actions::valid_name)
+	{
+		return Err(Failure::Protocol);
+	}
+	let channel =
+		discord_protocol::threads::into_thread(dto, guild).map_err(|_| Failure::Protocol)?;
+	Ok(Outcome::Channel {
+		channel: Box::new(channel),
+		permissions: None,
+	})
+}
 // GET channel includes the current user's member object for joined threads.
 fn post_result(bytes: &[u8], guild: Id, channel: Id) -> Result<Outcome, Failure> {
 	let Outcome::Channel {
@@ -77,7 +99,7 @@ fn post_result(bytes: &[u8], guild: Id, channel: Id) -> Result<Outcome, Failure>
 	else {
 		unreachable!()
 	};
-	if target.kind != 11 {
+	if !matches!(target.kind, 10..=12) {
 		return Err(Failure::Protocol);
 	}
 	let value: Value = discord_protocol::decode(bytes).map_err(|_| Failure::Protocol)?;
@@ -187,8 +209,152 @@ fn overwrites_from_value(value: &Value) -> Result<Option<Vec<permissions::Overwr
 		})
 		.transpose()
 }
+fn optional_id(value: &Value) -> Result<Option<Id>, Failure> {
+	match value {
+		Value::Null => Ok(None),
+		Value::String(id) => id
+			.parse()
+			.map(|id| Some(Id(id)))
+			.map_err(|_| Failure::Protocol),
+		_ => Err(Failure::Protocol),
+	}
+}
+fn optional_name(value: &Value) -> Result<Option<String>, Failure> {
+	match value {
+		Value::Null => Ok(None),
+		Value::String(name) if name.is_empty() => Ok(None),
+		Value::String(name) if name.len() <= 128 => Ok(Some(name.clone())),
+		_ => Err(Failure::Protocol),
+	}
+}
+/// Forum settings from a channel object; unknown or missing defaults read as Discord's.
+fn forum_from_value(value: &Value) -> Result<ForumEdit, Failure> {
+	let flags = value
+		.get("flags")
+		.map_or(Some(0), Value::as_u64)
+		.ok_or(Failure::Protocol)?;
+	let mut tags = Vec::new();
+	for tag in value
+		.get("available_tags")
+		.and_then(Value::as_array)
+		.map_or(&[][..], Vec::as_slice)
+	{
+		let id = optional_id(&tag["id"])?.ok_or(Failure::Protocol)?;
+		tags.push(model::forum::Tag {
+			id,
+			name: tag["name"].as_str().ok_or(Failure::Protocol)?.to_owned(),
+			moderated: tag["moderated"].as_bool().unwrap_or(false),
+			emoji_id: optional_id(&tag["emoji_id"])?,
+			emoji_name: optional_name(&tag["emoji_name"])?,
+		});
+	}
+	let reaction = match value.get("default_reaction_emoji") {
+		None | Some(Value::Null) => None,
+		Some(emoji) => Some(model::ReactionEmoji {
+			id: optional_id(&emoji["emoji_id"])?,
+			name: optional_name(&emoji["emoji_name"])?,
+		})
+		.filter(model::ReactionEmoji::valid),
+	};
+	Ok(ForumEdit {
+		tags,
+		require_tag: flags & REQUIRE_TAG != 0,
+		reaction,
+		message_slowmode: value
+			.get("default_thread_rate_limit_per_user")
+			.map_or(Some(0), |n| if n.is_null() { Some(0) } else { n.as_u64() })
+			.filter(|n| *n <= 21600)
+			.ok_or(Failure::Protocol)? as u32,
+		layout: if value["default_forum_layout"].as_u64() == Some(2) {
+			model::forum::Layout::Gallery
+		} else {
+			model::forum::Layout::List
+		},
+		sort: if value["default_sort_order"].as_u64() == Some(1) {
+			model::forum::Sort::Created
+		} else {
+			model::forum::Sort::Activity
+		},
+		match_all: value["default_tag_setting"].as_str() == Some("match_all"),
+		hide_after: value["default_auto_archive_duration"]
+			.as_u64()
+			.map(|n| n as u32)
+			.filter(|n| client_core::channel_actions::HIDE_AFTER.contains(n))
+			.unwrap_or(4320),
+		flags: flags & !REQUIRE_TAG,
+	})
+}
+fn emoji_value(id: Option<Id>, name: Option<&str>) -> Value {
+	json!({"emoji_id": id.map(|id| id.to_string()), "emoji_name": name})
+}
+/// The changed forum fields of one edit, as a documented channel PATCH body.
+fn forum_body(body: &mut Value, before: &ForumEdit, after: &ForumEdit) {
+	if before.tags != after.tags {
+		body["available_tags"] = Value::Array(
+			after
+				.tags
+				.iter()
+				.map(|tag| {
+					let mut row = json!({
+						"name": tag.name.trim(),
+						"moderated": tag.moderated,
+						"emoji_id": tag.emoji_id.map(|id| id.to_string()),
+						"emoji_name": tag.emoji_name,
+					});
+					// A tag without an identifier is created; an omitted one is deleted.
+					if tag.id.0 != 0 {
+						row["id"] = tag.id.to_string().into();
+					}
+					row
+				})
+				.collect(),
+		);
+	}
+	if before.require_tag != after.require_tag || before.flags != after.flags {
+		body["flags"] = (after.flags | if after.require_tag { REQUIRE_TAG } else { 0 }).into();
+	}
+	if before.reaction != after.reaction {
+		body["default_reaction_emoji"] = after.reaction.as_ref().map_or(Value::Null, |emoji| {
+			emoji_value(emoji.id, emoji.name.as_deref())
+		});
+	}
+	if before.message_slowmode != after.message_slowmode {
+		body["default_thread_rate_limit_per_user"] = after.message_slowmode.into();
+	}
+	if before.layout != after.layout {
+		body["default_forum_layout"] = match after.layout {
+			model::forum::Layout::List => 1,
+			model::forum::Layout::Gallery => 2,
+		}
+		.into();
+	}
+	if before.sort != after.sort {
+		body["default_sort_order"] = match after.sort {
+			model::forum::Sort::Activity => 0,
+			model::forum::Sort::Created => 1,
+		}
+		.into();
+	}
+	if before.match_all != after.match_all {
+		// Unofficial field used by Discord's own client.
+		body["default_tag_setting"] = if after.match_all {
+			"match_all"
+		} else {
+			"match_some"
+		}
+		.into();
+	}
+	if before.hide_after != after.hide_after {
+		body["default_auto_archive_duration"] = after.hide_after.into();
+	}
+}
 fn edit_from_value(value: &Value) -> Result<Edit, Failure> {
 	let edit = Edit {
+		forum: if matches!(value["type"].as_u64(), Some(15 | 16)) {
+			Some(Box::new(forum_from_value(value)?))
+		} else {
+			None
+		},
 		overwrites: overwrites_from_value(value)?.ok_or(Failure::Protocol)?,
 		name: value["name"].as_str().ok_or(Failure::Protocol)?.to_owned(),
 		topic: match value.get("topic") {
@@ -262,7 +428,10 @@ impl DiscordApi {
 		if guild.0 == 0 || channel.0 == 0 || !action.valid() {
 			return Err(Failure::Protocol);
 		}
-		if matches!(action, Action::Mute(_) | Action::Notifications(_)) {
+		if matches!(
+			action,
+			Action::Mute(_) | Action::Notifications(_) | Action::HideMuted(_)
+		) {
 			return self
 				.channel_notification_action(guild, channel, action)
 				.await;
@@ -327,13 +496,32 @@ impl DiscordApi {
 		) || (matches!(action, Action::Delete)
 			&& serde_json::from_slice::<Value>(&bytes)
 				.ok()
-				.is_some_and(|v| v["type"] == 11))
+				.is_some_and(|v| matches!(v["type"].as_u64(), Some(10..=12))))
 		{
 			return self.post_action(guild, channel, action, &bytes).await;
 		}
 		let source = channel_value(&bytes, guild, Some(channel))?;
 		// Validate full overwrite metadata before copying it to a creation request.
 		channel_result(&bytes, guild, Some(channel))?;
+		if let Action::CreateThread { name, message } = action {
+			if !matches!(source["type"].as_u64(), Some(0 | 5)) {
+				return Err(Failure::Protocol);
+			}
+			// Documented thread creation: from one message, or standalone in the channel.
+			let path = match message {
+				Some(message) => format!("/channels/{channel}/messages/{message}/threads"),
+				None => format!("/channels/{channel}/threads"),
+			};
+			let mut body = json!({"name": name, "auto_archive_duration": 4320});
+			if message.is_none() {
+				body["type"] = json!(11);
+			}
+			let bytes = self
+				.request_limited(Method::POST, &path, Some(body), MAX_CHANNEL_BYTES)
+				.await
+				.map_err(write_failure)?;
+			return created_thread_result(&bytes, guild, channel).map_err(write_failure);
+		}
 		let (method, path, body) = match action {
 			Action::Reference => unreachable!("handled before channel settings validation"),
 			Action::Load => {
@@ -342,14 +530,24 @@ impl DiscordApi {
 			Action::Edit { before, after } => {
 				let current = edit_from_value(&source)?;
 				let mut body = json!({});
-				if before.topic != after.topic && after.topic.chars().count() > 1024 {
+				let forum = matches!(source["type"].as_u64(), Some(15 | 16));
+				// Forum post guidelines allow 4096 characters; a text channel topic 1024.
+				if before.topic != after.topic
+					&& after.topic.chars().count() > if forum { 4096 } else { 1024 }
+				{
 					return Err(Failure::Protocol);
 				}
-				if !matches!(source["type"].as_u64(), Some(0 | 5))
+				if !matches!(source["type"].as_u64(), Some(0 | 5 | 15 | 16))
 					&& (before.topic != after.topic
 						|| before.slowmode != after.slowmode
 						|| before.nsfw != after.nsfw)
 				{
+					return Err(Failure::Protocol);
+				}
+				// An edit without forum settings (an extension's, say) leaves them untouched.
+				let forum_changed =
+					before.forum.is_some() && after.forum.is_some() && before.forum != after.forum;
+				if forum_changed && !forum {
 					return Err(Failure::Protocol);
 				}
 				if (before.overwrites != after.overwrites
@@ -358,6 +556,7 @@ impl DiscordApi {
 					|| (before.topic != after.topic && current.topic != before.topic)
 					|| (before.slowmode != after.slowmode && current.slowmode != before.slowmode)
 					|| (before.nsfw != after.nsfw && current.nsfw != before.nsfw)
+					|| (forum_changed && current.forum != before.forum)
 				{
 					return Err(Failure::ProtocolAt(
 						"Channel settings changed; reopen the editor before saving",
@@ -379,6 +578,11 @@ impl DiscordApi {
 				}
 				if before.nsfw != after.nsfw {
 					body["nsfw"] = after.nsfw.into();
+				}
+				if let (Some(before), Some(after)) = (&before.forum, &after.forum)
+					&& forum_changed
+				{
+					forum_body(&mut body, before, after);
 				}
 				if body.as_object().is_some_and(|o| o.is_empty()) {
 					return channel_result(&bytes, guild, Some(channel));
@@ -508,7 +712,7 @@ impl DiscordApi {
 			)
 			.await?;
 		let parent_value = channel_value(&parent_bytes, guild, Some(parent))?;
-		if !matches!(parent_value["type"].as_u64(), Some(15 | 16)) {
+		if !matches!(parent_value["type"].as_u64(), Some(0 | 5 | 15 | 16)) {
 			return Err(Failure::Protocol);
 		}
 		if matches!(action, Action::PostLoad) {
@@ -632,6 +836,23 @@ impl DiscordApi {
 		channel: Id,
 		action: &Action,
 	) -> Result<Outcome, Failure> {
+		if let Action::HideMuted(hide) = action {
+			let bytes = self
+				.request_limited(
+					Method::PATCH,
+					&format!("/users/@me/guilds/{guild}/settings"),
+					Some(json!({"hide_muted_channels": hide})),
+					512 * 1024,
+				)
+				.await
+				.map_err(write_failure)?;
+			let setting: discord_protocol::notifications::Setting =
+				discord_protocol::decode(&bytes).map_err(|_| Failure::Ambiguous)?;
+			if setting.guild_id != Some(guild) || setting.hide_muted_channels != Some(*hide) {
+				return Err(Failure::Ambiguous);
+			}
+			return Ok(Outcome::HideMuted(*hide));
+		}
 		let mut requested_until = None;
 		let override_body = match action {
 			Action::Notifications(level) => json!({"message_notifications":level}),
@@ -913,6 +1134,7 @@ mod tests {
 				slowmode: 30,
 				nsfw: true,
 				overwrites: edit_from_value(&source()).unwrap().overwrites,
+				forum: None,
 			},
 			after: Edit {
 				name: "rename".into(),
@@ -920,6 +1142,7 @@ mod tests {
 				slowmode: 30,
 				nsfw: true,
 				overwrites: edit_from_value(&source()).unwrap().overwrites,
+				forum: None,
 			},
 		};
 		let (result, ()) = tokio::join!(api.channel_action(Id(2), Id(3), &edit), server);

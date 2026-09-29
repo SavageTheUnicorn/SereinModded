@@ -33,6 +33,7 @@ fn ready(state: &mut State) {
 					recipients: vec![],
 					last_message: None,
 					member_list_id: None,
+					tags: None,
 					message_count: None,
 					icon: None,
 				})
@@ -109,9 +110,13 @@ pub fn run(duration: Duration) {
 			apply(
 				&mut state,
 				Event::Patch(MessagePatch {
+					sticker_items: Patch::Absent,
 					id: Id(base + 2),
 					channel,
 					content: Patch::Value("Edited during load".into()),
+					components: model::Patch::Absent,
+					flags: model::Patch::Absent,
+					application_id: model::Patch::Absent,
 					extra_content: Default::default(),
 					reactions: Patch::Absent,
 					mentions: Patch::Absent,

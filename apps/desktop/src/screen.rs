@@ -284,7 +284,7 @@ impl Screen {
 					self.status = if ui.screen.sources.is_empty() {
 						"No shareable screens or windows were found"
 					} else if cfg!(target_os = "linux") {
-						"Share Screen opens your desktop’s screen/window picker"
+						"Choose the system picker or, on X11, explicitly share the entire desktop"
 					} else {
 						"Choose a screen or window"
 					};
@@ -419,8 +419,9 @@ impl Screen {
 		}
 		if let Some(live) = &self.live {
 			live.worker.set_preview_visible(
-				state.selected == Some(live.context.channel)
-					&& !ctx.input(|input| input.viewport().minimized.unwrap_or(false)),
+				ui.screen.preview.is_none()
+					|| (state.selected == Some(live.context.channel)
+						&& !ctx.input(|input| input.viewport().minimized.unwrap_or(false))),
 			);
 			if let Some(frame) = live.worker.take_preview() {
 				let image = egui::ColorImage::from_rgba_unmultiplied(
@@ -432,6 +433,11 @@ impl Screen {
 				} else {
 					ui.screen.preview =
 						Some(ctx.load_texture("local-screen", image, egui::TextureOptions::LINEAR));
+					let cue = model::notification_preferences::Sound::ScreenShareOn;
+					if ui.notification_options.allows(cue) {
+						ui.notification_preview = Some(cue);
+						ctx.request_repaint();
+					}
 				}
 			}
 		} else {
@@ -492,7 +498,8 @@ impl Screen {
 		let wake = ctx.clone();
 		let identity = pending.identity;
 		let task = runtime.spawn(async move {
-			let result = discord_voice::run_stream(credentials, identity, video, |event| {
+			let (status_send, status_wake) = (send.clone(), wake.clone());
+			let result = discord_voice::run_stream(credentials, identity, video, move |event| {
 				let status = match event {
 					Status::Connecting => "Connecting screen-share transport…",
 					Status::Discovering => "Checking screen-share network…",
@@ -503,8 +510,8 @@ impl Screen {
 						return Ok(());
 					}
 				};
-				send.send_replace(Some(Notice::Status(status)));
-				wake.request_repaint();
+				status_send.send_replace(Some(Notice::Status(status)));
+				status_wake.request_repaint();
 				Ok(())
 			})
 			.await;
@@ -643,6 +650,7 @@ mod tests {
 			channel: Id(20),
 			guild: Some(Id(10)),
 			connected_at: Some(Instant::now()),
+			channel_started_at: None,
 			server_muted: false,
 			server_deafened: false,
 			request: 7,

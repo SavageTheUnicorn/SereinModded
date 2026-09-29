@@ -13,6 +13,7 @@ enum Page {
 	Profile,
 	Engagement,
 	Emoji,
+	Stickers,
 	Members,
 	Roles,
 	Invites,
@@ -24,6 +25,7 @@ impl Page {
 		match self {
 			Self::Profile | Self::Engagement => state.can_manage_guild(guild),
 			Self::Emoji => state.can_open_emoji_settings(guild),
+			Self::Stickers => state.can_open_sticker_settings(guild),
 			Self::Members => state.can_open_member_settings(guild),
 			Self::Roles => state.can_open_role_settings(guild),
 			Self::Invites => state.can_open_invite_settings(guild),
@@ -33,14 +35,15 @@ impl Page {
 	}
 	fn label(self) -> &'static str {
 		match self {
-			Self::Profile => "Server Profile",
-			Self::Engagement => "Engagement",
-			Self::Emoji => "Emoji",
-			Self::Members => "Members",
-			Self::Roles => "Roles",
-			Self::Invites => "Invites",
-			Self::Integrations => "Integrations",
-			Self::AuditLog => "Audit Log",
+			Self::Profile => "server-settings-page-profile",
+			Self::Engagement => "server-settings-page-engagement",
+			Self::Emoji => "server-settings-page-emoji",
+			Self::Stickers => "server-settings-page-stickers",
+			Self::Members => "server-settings-page-members",
+			Self::Roles => "server-settings-page-roles",
+			Self::Invites => "server-settings-page-invites",
+			Self::Integrations => "server-settings-page-integrations",
+			Self::AuditLog => "server-settings-page-audit-log",
 		}
 	}
 }
@@ -61,8 +64,11 @@ pub(super) struct Editor {
 	icon_pending: bool,
 	icon_error: Option<&'static str>,
 	form_error: Option<&'static str>,
+	delete: bool,
+	delete_name: String,
 	emoji_picker: crate::emoji_picker::Picker,
 	pub(super) admin: crate::server_admin::Admin,
+	stickers: crate::server_stickers::StickersUi,
 	roles: crate::server_roles::RolesUi,
 	invites: crate::server_invites::InvitesUi,
 	integrations: crate::server_integrations::IntegrationsUi,
@@ -136,6 +142,8 @@ impl MessagingUi {
 			Page::Invites
 		} else if page == "members" {
 			Page::Members
+		} else if page == "stickers" {
+			Page::Stickers
 		} else {
 			Page::Emoji
 		};
@@ -156,6 +164,8 @@ impl MessagingUi {
 			self.server_settings.integrations.load(state, guild)
 		} else if page == Page::Invites {
 			self.server_settings.invites.load(state, guild)
+		} else if page == Page::Stickers {
+			self.server_settings.stickers.load(state, guild)
 		} else {
 			self.server_settings
 				.admin
@@ -164,6 +174,27 @@ impl MessagingUi {
 	}
 	pub fn accepts_server_emoji_drops(&self) -> bool {
 		self.server_settings.is_open() && self.server_settings.page == Page::Emoji
+	}
+	pub fn take_server_sticker_request(&mut self) -> Option<(u64, Id, u64)> {
+		let (generation, guild) = self.server_settings.scope?;
+		if !self.server_settings.stickers.take_request() {
+			return None;
+		}
+		self.server_sticker_sequence = self.server_sticker_sequence.wrapping_add(1);
+		self.server_settings.stickers.request = self.server_sticker_sequence;
+		Some((generation, guild, self.server_sticker_sequence))
+	}
+	pub fn accept_server_sticker(
+		&mut self,
+		ctx: &egui::Context,
+		scope: (u64, Id, u64),
+		result: Result<Option<crate::server_stickers::PreparedSticker>, &'static str>,
+	) {
+		if self.server_settings.scope == Some((scope.0, scope.1))
+			&& self.server_settings.stickers.request == scope.2
+		{
+			self.server_settings.stickers.accept(ctx, result);
+		}
 	}
 	pub fn queue_server_emoji_drop(&mut self, paths: Vec<std::path::PathBuf>) {
 		if self.accepts_server_emoji_drops() {
@@ -195,6 +226,7 @@ impl MessagingUi {
 				|| self.server_settings.submitted
 				|| self.server_settings.icon_pending)
 			|| self.server_settings.admin.has_changes()
+			|| self.server_settings.stickers.has_changes()
 			|| self.server_settings.roles.has_changes()
 			|| self.server_settings.invites.busy()
 			|| self.server_settings.integrations.has_changes()
@@ -207,6 +239,9 @@ impl MessagingUi {
 			}
 			if state.can_open_emoji_settings(guild) {
 				return self.preview_server_admin(state, guild, "emoji");
+			}
+			if state.can_open_sticker_settings(guild) {
+				return self.preview_server_admin(state, guild, "stickers");
 			}
 			if state.can_open_integration_settings(guild) {
 				return self.preview_server_admin(state, guild, "integrations");
@@ -319,6 +354,7 @@ impl Editor {
 		ctx: &egui::Context,
 		state: &mut State,
 		avatars: &mut Avatars,
+		profile: &mut crate::profiles::ProfileSession,
 		commands: &mut Vec<Command>,
 	) {
 		let Some((generation, guild)) = self.scope else {
@@ -327,6 +363,7 @@ impl Editor {
 		if generation != state.generation
 			|| !(state.can_manage_guild(guild)
 				|| state.can_open_emoji_settings(guild)
+				|| state.can_open_sticker_settings(guild)
 				|| state.can_open_member_settings(guild)
 				|| state.can_open_role_settings(guild)
 				|| state.can_open_integration_settings(guild)
@@ -353,6 +390,8 @@ impl Editor {
 				Page::Roles
 			} else if state.can_open_emoji_settings(guild) {
 				Page::Emoji
+			} else if state.can_open_sticker_settings(guild) {
+				Page::Stickers
 			} else if state.can_open_member_settings(guild) {
 				Page::Members
 			} else if state.can_open_integration_settings(guild) {
@@ -361,6 +400,7 @@ impl Editor {
 				Page::AuditLog
 			};
 			self.admin = crate::server_admin::Admin::default();
+			self.stickers = crate::server_stickers::StickersUi::default();
 			self.roles = crate::server_roles::RolesUi::default();
 			self.invites = crate::server_invites::InvitesUi::default();
 			self.integrations = crate::server_integrations::IntegrationsUi::default();
@@ -391,6 +431,11 @@ impl Editor {
 		}
 		if matches!(self.page, Page::Emoji | Page::Members)
 			&& let Some(command) = self.admin.load(state, guild, self.page == Page::Members)
+		{
+			commands.push(command);
+		}
+		if self.page == Page::Stickers
+			&& let Some(command) = self.stickers.load(state, guild)
 		{
 			commands.push(command);
 		}
@@ -471,6 +516,7 @@ impl Editor {
 								Page::Profile,
 								Page::Engagement,
 								Page::Emoji,
+								Page::Stickers,
 								Page::Members,
 								Page::Roles,
 								Page::Invites,
@@ -480,12 +526,13 @@ impl Editor {
 								if !page.allowed(state, guild) {
 									continue;
 								}
-								if matches!(
-									page,
-									Page::Emoji
-										| Page::Members | Page::Integrations
-										| Page::AuditLog
-								) || (page == Page::Roles
+								if page == Page::Emoji
+									|| (page == Page::Stickers
+										&& !Page::Emoji.allowed(state, guild))
+									|| matches!(
+										page,
+										Page::Members | Page::Integrations | Page::AuditLog
+									) || (page == Page::Roles
 									&& !Page::Members.allowed(state, guild))
 								{
 									ui.add_space(16.0);
@@ -493,15 +540,15 @@ impl Editor {
 									ui.add_space(12.0);
 									ui.label(design::eyebrow(
 										ui,
-										if page == Page::AuditLog {
-											"MODERATION"
+										crate::i18n::translate_if_key(if page == Page::AuditLog {
+											"server-settings-show-moderation"
 										} else if page == Page::Integrations {
-											"APPS"
-										} else if page == Page::Emoji {
-											"EXPRESSION"
+											"server-settings-show-apps"
+										} else if matches!(page, Page::Emoji | Page::Stickers) {
+											"server-settings-show-expression"
 										} else {
-											"PEOPLE"
-										},
+											"server-settings-show-people"
+										}),
 										colors.muted,
 									));
 								}
@@ -509,6 +556,16 @@ impl Editor {
 									.clicked()
 								{
 									self.page = page;
+								}
+							}
+							if state.can_delete_server(guild) {
+								ui.add_space(16.0);
+								ui.separator();
+								ui.add_space(12.0);
+								if delete_server_button(ui).clicked() {
+									state.clear_server_action_result(guild);
+									self.delete = true;
+									self.delete_name.clear();
 								}
 							}
 						});
@@ -539,6 +596,7 @@ impl Editor {
 									Page::Profile,
 									Page::Engagement,
 									Page::Emoji,
+									Page::Stickers,
 									Page::Members,
 									Page::Roles,
 									Page::Invites,
@@ -548,10 +606,20 @@ impl Editor {
 									if !page.allowed(state, guild) {
 										continue;
 									}
-									ui.selectable_value(&mut self.page, page, page.label());
+									ui.selectable_value(
+										&mut self.page,
+										page,
+										crate::i18n::translate_if_key(page.label()),
+									);
 								}
 								close = close_control(ui).clicked();
 							});
+							if state.can_delete_server(guild) && delete_server_button(ui).clicked()
+							{
+								state.clear_server_action_result(guild);
+								self.delete = true;
+								self.delete_name.clear();
+							}
 						}
 						if self.dirty() || state.server_settings.saving {
 							egui::Panel::bottom("server-settings-save")
@@ -567,14 +635,14 @@ impl Editor {
 						// wrapping them again would nest two scroll areas over one list.
 						if self.scrolling_page() {
 							ui.set_width(ui.available_width());
-							self.page_body(ui, state, guild, avatars, commands);
+							self.page_body(ui, state, guild, avatars, profile, commands);
 						} else {
 							egui::ScrollArea::vertical()
 								.id_salt(("server-settings-content", self.page as u8))
 								.auto_shrink([false, false])
 								.show(ui, |ui| {
 									ui.set_width(ui.available_width());
-									self.page_body(ui, state, guild, avatars, commands);
+									self.page_body(ui, state, guild, avatars, profile, commands);
 									ui.add_space(24.0);
 								});
 						}
@@ -590,6 +658,7 @@ impl Editor {
 			if self.dirty()
 				|| state.server_settings.saving
 				|| self.admin.has_changes()
+				|| self.stickers.has_changes()
 				|| self.roles.has_changes()
 				|| self.integrations.has_changes()
 				|| self.invites.busy()
@@ -599,6 +668,7 @@ impl Editor {
 			} else {
 				self.scope = None;
 				self.roles = crate::server_roles::RolesUi::default();
+				self.stickers = crate::server_stickers::StickersUi::default();
 				self.invites = crate::server_invites::InvitesUi::default();
 				self.integrations = crate::server_integrations::IntegrationsUi::default();
 				self.audit_log = crate::server_audit_log::AuditLogUi::default();
@@ -634,6 +704,97 @@ impl Editor {
 				None => {}
 			}
 		}
+		if self.delete {
+			self.delete_dialog(ctx, state, guild, commands);
+		}
+	}
+
+	fn delete_dialog(
+		&mut self,
+		ctx: &egui::Context,
+		state: &mut State,
+		guild: Id,
+		commands: &mut Vec<Command>,
+	) {
+		let Some(name) = state.guild(guild).map(|guild| guild.name.clone()) else {
+			self.delete = false;
+			return;
+		};
+		if !state.can_delete_server(guild) {
+			self.delete = false;
+			return;
+		}
+		let pending = state.server_action_pending();
+		let reason = state.delete_server_reason(guild);
+		let mut delete = false;
+		let mut close = false;
+		let response = dialog::Dialog::new(
+			"delete-server",
+			format!(
+				"{} '{name}'",
+				crate::i18n::translate("server-settings-delete-dialog-delete")
+			),
+		)
+		.subtitle(format!(
+			"{} {name}? {}",
+			crate::i18n::translate("server-settings-delete-dialog-are-you-sure-you-want-to-delete"),
+			crate::i18n::translate("server-settings-delete-dialog-this-action-cannot-be-undone")
+		))
+		.danger()
+		.width(520.0)
+		.show(ctx, |d| {
+			d.content(|ui| {
+				let label = dialog::label(ui, "server-settings-delete-dialog-enter-server-name");
+				dialog::input(
+					ui,
+					egui::TextEdit::singleline(&mut self.delete_name)
+						.char_limit(100)
+						.desired_width(f32::INFINITY),
+				)
+				.labelled_by(label.id);
+				if let Some(reason) = reason {
+					dialog::notice(ui, dialog::Level::Warning, reason);
+				} else if let Some(status) = state.server_action_status(guild) {
+					dialog::notice(ui, dialog::Level::Error, status);
+				}
+				if state.demo {
+					dialog::hint(
+						ui,
+						"server-settings-delete-dialog-offline-preview-no-server-changes",
+					);
+				}
+			});
+			d.footer(|ui| {
+				ui.add_enabled_ui(
+					!pending && reason.is_none() && self.delete_name == name,
+					|ui| {
+						delete = dialog::action(
+							ui,
+							if pending {
+								"server-settings-delete-dialog-deleting"
+							} else {
+								"server-settings-delete-dialog-delete-server"
+							},
+							dialog::Action::Danger,
+						)
+						.clicked();
+					},
+				);
+				close |= dialog::action(
+					ui,
+					"server-settings-delete-dialog-cancel",
+					dialog::Action::Neutral,
+				)
+				.clicked();
+			});
+		});
+		if delete && let Some(command) = state.delete_server(guild) {
+			commands.push(command);
+		}
+		if (close || response.close) && !pending {
+			self.delete = false;
+			self.delete_name.clear();
+		}
 	}
 
 	/// Pages whose own virtualized list scrolls; they must not sit inside a second scroll area.
@@ -652,6 +813,7 @@ impl Editor {
 		state: &mut State,
 		guild: Id,
 		avatars: &mut Avatars,
+		profile: &mut crate::profiles::ProfileSession,
 		commands: &mut Vec<Command>,
 	) {
 		match self.page {
@@ -671,6 +833,10 @@ impl Editor {
 				self.roles.show(ui, state, guild, avatars, commands);
 				return;
 			}
+			Page::Stickers => {
+				self.stickers.show(ui, state, guild, avatars, commands);
+				return;
+			}
 			Page::Emoji | Page::Members => {
 				self.admin.show(
 					ui,
@@ -678,6 +844,7 @@ impl Editor {
 					guild,
 					self.page == Page::Members,
 					avatars,
+					profile,
 					commands,
 				);
 				return;
@@ -687,8 +854,11 @@ impl Editor {
 		if let Some(error) = state.server_settings.error {
 			dialog::notice(ui, dialog::Level::Error, error);
 			if !state.server_settings.pending
-				&& ui.button("Reload server settings").clicked()
-				&& let Some(command) = state.load_server_settings(guild)
+				&& ui
+					.button(crate::i18n::translate(
+						"server-settings-page-body-reload-server-settings",
+					))
+					.clicked() && let Some(command) = state.load_server_settings(guild)
 			{
 				commands.push(command);
 			}
@@ -697,12 +867,19 @@ impl Editor {
 			if state.server_settings.pending {
 				ui.horizontal(|ui| {
 					ui.spinner();
-					ui.label("Loading server settings…");
+					ui.label(crate::i18n::translate(
+						"server-settings-page-body-loading-server-settings",
+					));
 				});
 			} else if !state.gateway_connected && !state.demo {
-				ui.weak("Reconnect to load server settings.");
-			} else if ui.button("Load server settings").clicked()
-				&& let Some(command) = state.load_server_settings(guild)
+				ui.weak(crate::i18n::translate(
+					"server-settings-page-body-reconnect-to-load-server-settings",
+				));
+			} else if ui
+				.button(crate::i18n::translate(
+					"server-settings-page-body-load-server-settings",
+				))
+				.clicked() && let Some(command) = state.load_server_settings(guild)
 			{
 				commands.push(command);
 			}
@@ -718,45 +895,21 @@ impl Editor {
 	}
 
 	fn save_bar(&mut self, ui: &mut egui::Ui, state: &mut State, commands: &mut Vec<Command>) {
-		let colors = design::palette(ui);
-		let mut save = false;
-		ui.horizontal(|ui| {
-			ui.spacing_mut().item_spacing.x = 8.0;
-			let available = !state.server_settings.pending && !self.icon_pending;
-			ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-				ui.add_enabled_ui(
-					available
-						&& !state.server_settings.needs_refresh
-						&& (state.demo || state.gateway_connected),
-					|ui| {
-						save =
-							dialog::action(ui, "Save Changes", dialog::Action::Primary).clicked();
-					},
-				);
-				ui.add_enabled_ui(available, |ui| {
-					if dialog::action(ui, "Reset", dialog::Action::Neutral).clicked() {
-						self.reset();
-					}
-				});
-				ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-					ui.add(
-						egui::Label::new(
-							design::medium(
-								ui,
-								if state.server_settings.saving {
-									"Saving changes…"
-								} else {
-									"Careful — you have unsaved changes!"
-								},
-								14.0,
-							)
-							.color(colors.text_strong),
-						)
-						.truncate(),
-					);
-				});
-			});
-		});
+		let available = !state.server_settings.pending && !self.icon_pending;
+		let (save, reset) = design::save_bar(
+			ui,
+			state
+				.server_settings
+				.saving
+				.then_some("server-settings-save-bar-saving-changes"),
+			available
+				&& !state.server_settings.needs_refresh
+				&& (state.demo || state.gateway_connected),
+			available,
+		);
+		if reset {
+			self.reset();
+		}
 		if save && let (Some(baseline), Some(draft)) = (&self.baseline, &self.draft) {
 			let mut edit = Edit::between(baseline, draft);
 			if let Some(traits) = &mut edit.traits {
@@ -784,12 +937,16 @@ impl Editor {
 			dialog::notice(
 				ui,
 				dialog::Level::Warning,
-				"Reload the server settings before saving again. Your edits will be kept.",
+				"server-settings-save-bar-reload-the-server-settings-before-saving-again-your-edits-will",
 			);
 		}
 		if !state.demo && !state.gateway_connected {
 			ui.add_space(8.0);
-			dialog::notice(ui, dialog::Level::Warning, "Reconnect to save changes.");
+			dialog::notice(
+				ui,
+				dialog::Level::Warning,
+				"server-settings-save-bar-reconnect-to-save-changes",
+			);
 		}
 		if let Some(error) = self.form_error {
 			ui.add_space(8.0);
@@ -830,28 +987,45 @@ impl Editor {
 		let colors = design::palette(ui);
 		// Column spacing must not leak into the swatch, trait and button rows.
 		ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
-		ui.label(design::semibold(ui, "Server Profile", 20.0).color(colors.text_strong));
-		ui.label("Customize how your server appears in invite links and, if enabled, in Server Discovery and Announcement Channel messages.");
+		ui.label(
+			design::semibold(
+				ui,
+				crate::i18n::translate("server-settings-profile-form-server-profile"),
+				20.0,
+			)
+			.color(colors.text_strong),
+		);
+		ui.label(crate::i18n::translate(
+			"server-settings-profile-form-customize-how-your-server-appears-in-invite-links-and-if",
+		));
 		ui.add_space(24.0);
-		let name_label = design::label(ui, "Name");
+		let name_label = design::label(
+			ui,
+			&crate::i18n::translate("server-settings-profile-form-name"),
+		);
 		design::input(
 			ui,
 			egui::TextEdit::singleline(&mut draft.name).char_limit(100),
 		)
 		.labelled_by(name_label.id);
 		design::divider(ui);
-		design::label(ui, "Icon");
-		ui.weak("We recommend an image of at least 512×512.");
+		design::label(
+			ui,
+			&crate::i18n::translate("server-settings-profile-form-icon"),
+		);
+		ui.weak(crate::i18n::translate(
+			"server-settings-profile-form-we-recommend-an-image-of-at-least-512512",
+		));
 		ui.horizontal_wrapped(|ui| {
 			if ui
 				.add_enabled_ui(!self.icon_pending, |ui| {
 					design::button(
 						ui,
-						if self.icon_pending {
-							"Preparing icon…"
+						&crate::i18n::translate_if_key(if self.icon_pending {
+							"server-settings-profile-form-preparing-icon"
 						} else {
-							"Change Server Icon"
-						},
+							"server-settings-profile-form-change-server-icon"
+						}),
 						design::ButtonKind::Primary,
 					)
 				})
@@ -865,7 +1039,13 @@ impl Editor {
 			if ui
 				.add_enabled_ui(
 					draft.icon.is_some() || matches!(self.icon, Patch::Value(_)),
-					|ui| design::button(ui, "Remove Icon", design::ButtonKind::Outline),
+					|ui| {
+						design::button(
+							ui,
+							&crate::i18n::translate("server-settings-profile-form-remove-icon"),
+							design::ButtonKind::Outline,
+						)
+					},
 				)
 				.inner
 				.clicked()
@@ -880,7 +1060,10 @@ impl Editor {
 			design::notice(ui, design::Level::Error, error);
 		}
 		design::divider(ui);
-		design::label(ui, "Banner");
+		design::label(
+			ui,
+			&crate::i18n::translate("server-settings-profile-form-banner"),
+		);
 		let swatches = [
 			0x2153dc, 0xf916a0, 0xed171a, 0xef7912, 0xf1cd29, 0x763a94, 0x04adf1, 0x46dcca,
 			0x496b00, 0x282828,
@@ -903,7 +1086,7 @@ impl Editor {
 					let name = format!("Banner color #{color:06X}");
 					response.widget_info(|| {
 						egui::WidgetInfo::selected(
-							egui::WidgetType::RadioButton,
+							egui::Role::RadioButton,
 							ui.is_enabled(),
 							draft.banner_color == Some(color),
 							&name,
@@ -917,8 +1100,13 @@ impl Editor {
 			});
 		}
 		design::divider(ui);
-		design::label(ui, "Traits");
-		ui.weak("Add up to 5 traits to show off your server's interests and personality.");
+		design::label(
+			ui,
+			&crate::i18n::translate("server-settings-profile-form-traits"),
+		);
+		ui.weak(crate::i18n::translate(
+			"server-settings-profile-form-add-up-to-5-traits-to-show-off-your-server",
+		));
 		let columns = if ui.available_width() >= 480.0 {
 			3
 		} else if ui.available_width() >= 330.0 {
@@ -950,13 +1138,17 @@ impl Editor {
 											.desired_width((cell_width - 90.0).max(24.0))
 											.frame(egui::Frame::NONE),
 									)
-									.on_hover_text("Trait name");
+									.on_hover_text(crate::i18n::translate(
+										"server-settings-profile-form-trait-name",
+									));
 									if !entry.label.is_empty()
 										&& crate::icons::button(
 											ui,
 											crate::icons::Icon::Close,
 											18.0,
-											"Remove trait",
+											&crate::i18n::translate(
+												"server-settings-profile-form-remove-trait",
+											),
 										)
 										.clicked()
 									{
@@ -982,12 +1174,19 @@ impl Editor {
 		}
 		draft.traits = traits;
 		design::divider(ui);
-		let description_label = design::label(ui, "Description");
-		ui.weak("How did your server get started? Why should people join?");
+		let description_label = design::label(
+			ui,
+			&crate::i18n::translate("server-settings-profile-form-description"),
+		);
+		ui.weak(crate::i18n::translate(
+			"server-settings-profile-form-how-did-your-server-get-started-why-should-people-join",
+		));
 		design::input(
 			ui,
 			egui::TextEdit::multiline(&mut draft.description)
-				.hint_text("Tell the world a bit about this server.")
+				.hint_text(crate::i18n::translate(
+					"server-settings-profile-form-tell-the-world-a-bit-about-this-server",
+				))
 				.char_limit(300)
 				.desired_width(f32::INFINITY)
 				.desired_rows(4),
@@ -1037,15 +1236,29 @@ impl Editor {
 					ui.label(design::semibold(ui, &draft.name, 16.0));
 					ui.horizontal_wrapped(|ui| {
 						if let Some(count) = draft.online_count {
-							ui.colored_label(colors.positive, format!("● {count} Online"));
+							ui.colored_label(
+								colors.positive,
+								format!(
+									"● {count} {}",
+									crate::i18n::translate("server-settings-preview-online")
+								),
+							);
 						}
 						if let Some(count) = draft.member_count {
-							ui.weak(format!("● {count} Members"));
+							ui.weak(format!(
+								"● {count} {}",
+								crate::i18n::translate("server-settings-preview-members")
+							));
 						}
 					});
 					let seconds = ((draft.guild.0 >> 22) + 1_420_070_400_000) / 1000;
 					if let Ok(date) = time::OffsetDateTime::from_unix_timestamp(seconds as i64) {
-						ui.weak(format!("Est. {} {}", date.month(), date.year()));
+						ui.weak(format!(
+							"{} {} {}",
+							crate::i18n::translate("server-settings-preview-established"),
+							date.month(),
+							date.year()
+						));
 					}
 					ui.horizontal_wrapped(|ui| {
 						for entry in &draft.traits {
@@ -1109,11 +1322,23 @@ fn gradient(ui: &mut egui::Ui, rect: egui::Rect, color: u32, radius: u8) {
 fn engagement(ui: &mut egui::Ui, state: &State, draft: &mut Settings) {
 	ui.set_max_width(850.0);
 	ui.spacing_mut().item_spacing.y = 8.0;
-	ui.label(design::semibold(ui, "Engagement", 20.0));
-	ui.label("Manage settings that help keep your server active.");
+	ui.label(design::semibold(
+		ui,
+		crate::i18n::translate("server-settings-engagement-engagement"),
+		20.0,
+	));
+	ui.label(crate::i18n::translate(
+		"server-settings-engagement-manage-settings-that-help-keep-your-server-active",
+	));
 	ui.add_space(32.0);
-	ui.label(design::semibold(ui, "System Messages", 21.0));
-	ui.label("Configure system event messages sent to your server.");
+	ui.label(design::semibold(
+		ui,
+		crate::i18n::translate("server-settings-engagement-system-messages"),
+		21.0,
+	));
+	ui.label(crate::i18n::translate(
+		"server-settings-engagement-configure-system-event-messages-sent-to-your-server",
+	));
 	for (bit, text) in [
 		(
 			0,
@@ -1137,16 +1362,27 @@ fn engagement(ui: &mut egui::Ui, state: &State, draft: &mut Settings) {
 		}
 	}
 	ui.add_space(12.0);
-	design::label(ui, "System Messages Channel");
-	ui.weak("This is the channel we send system event messages to.");
+	design::label(
+		ui,
+		&crate::i18n::translate("server-settings-engagement-system-messages-channel"),
+	);
+	ui.weak(crate::i18n::translate(
+		"server-settings-engagement-this-is-the-channel-we-send-system-event-messages-to",
+	));
 	channel_picker(ui, state, draft.guild, &mut draft.system_channel_id, false);
 	design::divider(ui);
-	ui.label(design::semibold(ui, "Activity Feed Settings", 21.0));
-	ui.label("Shows a feed of activity from games and connected apps in this server.");
+	ui.label(design::semibold(
+		ui,
+		crate::i18n::translate("server-settings-engagement-activity-feed-settings"),
+		21.0,
+	));
+	ui.label(crate::i18n::translate(
+		"server-settings-engagement-shows-a-feed-of-activity-from-games-and-connected-apps",
+	));
 	let mut enabled = draft.activity_feed.unwrap_or(false);
 	if design::switch(
 		ui,
-		"Display Activity Feed in this server",
+		"server-settings-engagement-display-activity-feed-in-this-server",
 		None,
 		&mut enabled,
 	)
@@ -1155,22 +1391,38 @@ fn engagement(ui: &mut egui::Ui, state: &State, draft: &mut Settings) {
 		draft.activity_feed = Some(enabled);
 	}
 	if draft.activity_feed.is_none() {
-		ui.weak("Server default");
+		ui.weak(crate::i18n::translate(
+			"server-settings-engagement-server-default",
+		));
 	}
 	design::divider(ui);
-	design::label(ui, "Default Notification Settings");
-	ui.weak("This will determine whether members who have not explicitly set their notification settings receive a notification for every message sent in this server or not.");
-	ui.radio_value(&mut draft.default_message_notifications, 0, "All Messages");
+	design::label(
+		ui,
+		&crate::i18n::translate("server-settings-engagement-default-notification-settings"),
+	);
+	ui.weak(crate::i18n::translate(
+		"server-settings-engagement-this-will-determine-whether-members-who-have-not-explicitly-set",
+	));
+	ui.radio_value(
+		&mut draft.default_message_notifications,
+		0,
+		crate::i18n::translate("server-settings-engagement-all-messages"),
+	);
 	ui.radio_value(
 		&mut draft.default_message_notifications,
 		1,
-		"Only @mentions",
+		crate::i18n::translate("server-settings-engagement-only-mentions"),
 	);
-	ui.weak("We highly recommend setting this to only @mentions for a Community Server.");
+	ui.weak(crate::i18n::translate(
+		"server-settings-engagement-we-highly-recommend-setting-this-to-only-mentions-for-a",
+	));
 	design::divider(ui);
 	if ui.available_width() >= 500.0 {
 		ui.columns(2, |columns| {
-			design::label(&mut columns[0], "Inactive Channel");
+			design::label(
+				&mut columns[0],
+				&crate::i18n::translate("server-settings-engagement-inactive-channel"),
+			);
 			channel_picker(
 				&mut columns[0],
 				state,
@@ -1178,20 +1430,31 @@ fn engagement(ui: &mut egui::Ui, state: &State, draft: &mut Settings) {
 				&mut draft.afk_channel_id,
 				true,
 			);
-			design::label(&mut columns[1], "Inactive Timeout");
+			design::label(
+				&mut columns[1],
+				&crate::i18n::translate("server-settings-engagement-inactive-timeout"),
+			);
 			columns[1].add_enabled_ui(draft.afk_channel_id.is_some(), |ui| {
 				timeout_picker(ui, &mut draft.afk_timeout)
 			});
 		});
 	} else {
-		design::label(ui, "Inactive Channel");
+		design::label(
+			ui,
+			&crate::i18n::translate("server-settings-engagement-inactive-channel"),
+		);
 		channel_picker(ui, state, draft.guild, &mut draft.afk_channel_id, true);
-		design::label(ui, "Inactive Timeout");
+		design::label(
+			ui,
+			&crate::i18n::translate("server-settings-engagement-inactive-timeout"),
+		);
 		ui.add_enabled_ui(draft.afk_channel_id.is_some(), |ui| {
 			timeout_picker(ui, &mut draft.afk_timeout)
 		});
 	}
-	ui.weak("Automatically move members to this channel and mute them when they have been idle for longer than the inactive timeout. This does not affect browsers.");
+	ui.weak(crate::i18n::translate(
+		"server-settings-engagement-automatically-move-members-to-this-channel-and-mute-them-when",
+	));
 }
 fn channel_picker(
 	ui: &mut egui::Ui,
@@ -1213,45 +1476,105 @@ fn channel_picker(
 				}
 		})
 		.collect();
-	let name = selected
-		.and_then(|id| choices.iter().find(|channel| channel.id == id))
-		.map_or(
-			if selected.is_some() {
-				"Unavailable channel"
+	let muted = design::palette(ui).muted;
+	let current = selected.and_then(|id| choices.iter().find(|channel| channel.id == id));
+	let label = current.map_or_else(
+		|| {
+			crate::i18n::translate_if_key(if selected.is_some() {
+				"server-settings-channel-picker-unavailable-channel"
 			} else if voice {
-				"No Inactive Channel"
+				"server-settings-channel-picker-no-inactive-channel"
 			} else {
-				"No System Messages Channel"
-			},
-			|channel| channel.name.as_str(),
-		);
+				"server-settings-channel-picker-no-system-messages-channel"
+			})
+		},
+		|channel| channel.name.clone(),
+	);
+	let mut label = egui::Atoms::new(label);
+	if let Some(channel) = current {
+		label.push_left(crate::icons::atom(
+			crate::icons::channel(channel.kind),
+			16.0,
+			muted,
+		));
+	}
 	let empty = choices.is_empty();
 	egui::ComboBox::from_id_salt(("server-channel", voice))
-		.selected_text(name)
+		.selected_text(label)
 		.width(ui.available_width())
 		.show_ui(ui, |ui| {
-			ui.selectable_value(selected, None, "None");
+			ui.selectable_value(
+				selected,
+				None,
+				crate::i18n::translate("server-settings-channel-picker-none"),
+			);
 			for channel in choices {
 				ui.selectable_value(
 					selected,
 					Some(channel.id),
-					format!("{} {}", if voice { "♪" } else { "#" }, channel.name),
+					(
+						crate::icons::atom(crate::icons::channel(channel.kind), 16.0, muted),
+						channel.name.as_str(),
+					),
 				);
 			}
 		});
 	if empty {
-		ui.weak("No accessible channels available.");
+		ui.weak(crate::i18n::translate(
+			"server-settings-channel-picker-no-accessible-channels-available",
+		));
 	}
 }
 fn timeout_picker(ui: &mut egui::Ui, timeout: &mut u32) {
 	egui::ComboBox::from_id_salt("server-afk-timeout")
-		.selected_text(format!("{} minutes", *timeout / 60))
+		.selected_text(format!(
+			"{} {}",
+			*timeout / 60,
+			crate::i18n::translate("server-settings-timeout-picker-minutes")
+		))
 		.width(ui.available_width())
 		.show_ui(ui, |ui| {
 			for seconds in [60, 300, 900, 1800, 3600] {
-				ui.selectable_value(timeout, seconds, format!("{} minutes", seconds / 60));
+				ui.selectable_value(
+					timeout,
+					seconds,
+					format!(
+						"{} {}",
+						seconds / 60,
+						crate::i18n::translate("server-settings-timeout-picker-minutes")
+					),
+				);
 			}
 		});
+}
+
+fn delete_server_button(ui: &mut egui::Ui) -> egui::Response {
+	let label = crate::i18n::translate("server-settings-delete-server-button-delete-server");
+	let colors = design::palette(ui);
+	let (rect, response) =
+		ui.allocate_exact_size(egui::vec2(ui.available_width(), 34.0), egui::Sense::click());
+	response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), &label));
+	if response.hovered() || response.has_focus() {
+		ui.painter()
+			.rect_filled(rect, 8, colors.danger.gamma_multiply(0.16));
+	}
+	ui.painter().text(
+		egui::pos2(rect.left() + 12.0, rect.center().y),
+		egui::Align2::LEFT_CENTER,
+		&label,
+		egui::FontId::new(15.0, design::medium_family(ui.ctx())),
+		colors.danger,
+	);
+	crate::icons::paint(
+		ui.painter(),
+		crate::icons::Icon::Trash,
+		egui::Rect::from_center_size(
+			egui::pos2(rect.right() - 17.0, rect.center().y),
+			egui::Vec2::splat(18.0),
+		),
+		colors.danger,
+	);
+	response
 }
 
 /// Floating "unsaved changes" strip Discord pins over the settings content.
@@ -1268,57 +1591,4 @@ fn save_bar_frame(ctx: &egui::Context, colors: design::Palette) -> egui::Frame {
 			top: 8,
 			bottom: 8,
 		})
-}
-
-#[cfg(test)]
-mod tests {
-	use super::*;
-
-	#[test]
-	fn profile_columns_stay_inside_available_width() {
-		for width in [360.0, 700.0, 844.0] {
-			let ctx = egui::Context::default();
-			design::apply(&ctx);
-			let state = test_support::demo_state();
-			let settings = Settings {
-				guild: state.guilds[0].id,
-				name: "A long synthetic server name ".repeat(3),
-				description: "A long description that wraps within the form and preview. "
-					.repeat(4),
-				traits: (0..5)
-					.map(|_| Trait {
-						label: "A long trait".repeat(7),
-						emoji: None,
-					})
-					.collect(),
-				..Default::default()
-			};
-			let mut editor = Editor {
-				draft: Some(settings),
-				..Default::default()
-			};
-			let mut avatars = Avatars::default();
-			let output = ctx.run_ui(
-				egui::RawInput {
-					screen_rect: Some(egui::Rect::from_min_size(
-						egui::Pos2::ZERO,
-						egui::vec2(width, 1800.0),
-					)),
-					..Default::default()
-				},
-				|ui| {
-					ui.set_width(width);
-					ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
-					let right = ui.max_rect().right();
-					editor.profile(ui, &state, &mut avatars);
-					assert!(
-						ui.min_rect().right() <= right + 1.0,
-						"profile overflow at {width}: {:?}",
-						ui.min_rect()
-					);
-				},
-			);
-			output.drop_without_applying_deltas();
-		}
-	}
 }

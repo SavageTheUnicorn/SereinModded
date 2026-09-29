@@ -17,9 +17,13 @@ fn name(state: &State, channel: Id, user: Id) -> Option<&str> {
 				.filter(|members| members.channel == channel)
 				.and_then(|members| {
 					members
-						.rows
+						.slots
 						.iter()
 						.flatten()
+						.filter_map(|slot| match slot {
+							model::MemberSlot::Person(m) => Some(m),
+							_ => None,
+						})
 						.find(|member| member.user.id == user)
 				})
 				.map(|member| member.nick.as_deref().unwrap_or(&member.user.name))
@@ -110,32 +114,52 @@ fn label(state: &State, channel: Id, now: Instant) -> Option<String> {
 	segments(state, channel, now).map(|parts| parts.into_iter().map(|(text, _)| text).collect())
 }
 
-/// Reserved height under the composer. Idle frames keep it, so typing never moves messages.
-const ROW_HEIGHT: f32 = 18.0;
+/// Height the timeline reserves for the indicator above the composer. The conversation keeps
+/// the gap on idle frames, so typing never moves messages.
+pub(super) const OVERLAY_HEIGHT: f32 = 22.0;
 const TEXT_SIZE: f32 = 12.5;
 const DOT_RADIUS: f32 = 2.5;
 const DOT_STEP: f32 = 7.0;
 const DOT_PERIOD: f64 = 1.2;
 
-pub(super) fn show(ui: &mut egui::Ui, state: &State, channel: Id, now: Instant) {
+/// Whether the indicator has anything to say for this conversation right now.
+pub(super) fn active(state: &State, channel: Id, now: Instant) -> bool {
+	segments(state, channel, now).is_some()
+}
+
+/// Paints the indicator into `rect`, which the timeline reserves above the composer.
+pub(super) fn overlay(
+	ui: &mut egui::Ui,
+	rect: egui::Rect,
+	state: &State,
+	channel: Id,
+	now: Instant,
+) {
 	let colors = crate::design::palette(ui);
-	let (rect, response) = ui.allocate_exact_size(
-		egui::vec2(ui.available_width(), ROW_HEIGHT),
-		egui::Sense::hover(),
-	);
 	let Some(segments) = segments(state, channel, now) else {
 		return;
 	};
 	if !ui.is_rect_visible(rect) {
 		return;
 	}
+	let response = ui.interact(
+		rect,
+		ui.make_persistent_id("typing-indicator"),
+		egui::Sense::hover(),
+	);
 	let painter = ui.painter_at(rect);
-	// Three pulsing dots, Discord style; the animation runs only while someone is typing.
+	// Three pulsing dots, Discord style; the animation runs only while someone is typing and
+	// this window has focus. A background window paints them at rest and asks for no frames.
+	let focused = ui.input(|input| input.focused);
 	let time = ui.input(|input| input.time);
 	let dots_left = rect.left() + DOT_RADIUS + 2.0;
 	for index in 0..3 {
 		let phase = (time / DOT_PERIOD - f64::from(index) * 0.18).fract();
-		let pulse = (0.5 - 0.5 * (phase * std::f64::consts::TAU).cos()) as f32;
+		let pulse = if focused {
+			(0.5 - 0.5 * (phase * std::f64::consts::TAU).cos()) as f32
+		} else {
+			0.5
+		};
 		let center = egui::pos2(dots_left + index as f32 * DOT_STEP, rect.center().y);
 		painter.circle_filled(
 			center,
@@ -176,13 +200,15 @@ pub(super) fn show(ui: &mut egui::Ui, state: &State, channel: Id, now: Instant) 
 	painter.galley(text_pos, galley, colors.muted);
 	response.widget_info(|| {
 		let text: String = segments.iter().map(|(text, _)| text.as_str()).collect();
-		egui::WidgetInfo::labeled(egui::WidgetType::Label, true, text)
+		egui::WidgetInfo::labeled(egui::Role::Label, true, text)
 	});
 	if let Some(deadline) = state.typing_deadline(now) {
 		// Keep the dots moving until the earliest deadline, then go idle without repaints.
+		// Unfocused, only the expiry itself is worth a frame; the dots hold still until then.
 		let frame = std::time::Duration::from_millis(80);
+		let delay = deadline.saturating_duration_since(now);
 		ui.ctx()
-			.request_repaint_after(deadline.saturating_duration_since(now).min(frame));
+			.request_repaint_after(if focused { delay.min(frame) } else { delay });
 	}
 }
 
@@ -206,6 +232,7 @@ mod tests {
 				webhook: false,
 				kind: Default::default(),
 				discriminator: 0,
+				primary_guild: None,
 			}),
 			channels: vec![Channel {
 				id: Id(10),
@@ -216,6 +243,7 @@ mod tests {
 				name: "Synthetic typing conversation".into(),
 				last_message: None,
 				member_list_id: None,
+				tags: None,
 				message_count: None,
 				icon: None,
 				recipients: vec![
@@ -226,6 +254,7 @@ mod tests {
 						webhook: false,
 						kind: Default::default(),
 						discriminator: 0,
+						primary_guild: None,
 					},
 					User {
 						id: Id(2),
@@ -234,6 +263,7 @@ mod tests {
 						webhook: false,
 						kind: Default::default(),
 						discriminator: 0,
+						primary_guild: None,
 					},
 					User {
 						id: Id(3),
@@ -242,6 +272,7 @@ mod tests {
 						webhook: false,
 						kind: Default::default(),
 						discriminator: 0,
+						primary_guild: None,
 					},
 				],
 			}],
@@ -271,7 +302,7 @@ mod tests {
 		assert!(!text.contains('\n'));
 		assert!(text.chars().count() < 160);
 		assert!(label(&state, Id(11), now).is_none());
-		for width in [160.0, 760.0] {
+		for (width, focused) in [(160.0, true), (760.0, true), (760.0, false)] {
 			let ctx = egui::Context::default();
 			let mut row_height = None;
 			for expired in [false, true] {
@@ -283,6 +314,7 @@ mod tests {
 				for pass in 0..5 {
 					let output = ctx.run_ui(
 						egui::RawInput {
+							focused,
 							screen_rect: Some(egui::Rect::from_min_size(
 								egui::Pos2::ZERO,
 								egui::vec2(width, 100.0),
@@ -290,11 +322,13 @@ mod tests {
 							..Default::default()
 						},
 						|ui| {
-							show(ui, &state, Id(10), instant);
-							assert!(ui.min_rect().width() <= width);
-							let height = ui.min_rect().height();
-							assert!(height > 0.0);
-							assert_eq!(*row_height.get_or_insert(height), height);
+							let rect = egui::Rect::from_min_size(
+								egui::pos2(0.0, 100.0 - OVERLAY_HEIGHT),
+								egui::vec2(width, OVERLAY_HEIGHT),
+							);
+							overlay(ui, rect, &state, Id(10), instant);
+							assert!(rect.width() <= width);
+							assert_eq!(*row_height.get_or_insert(rect.height()), rect.height());
 						},
 					);
 					assert!(output.platform_output.commands.is_empty());
@@ -307,8 +341,15 @@ mod tests {
 						let delay = output.viewport_output[&egui::ViewportId::ROOT].repaint_delay;
 						if expired {
 							assert_eq!(delay, Duration::MAX);
+						} else if focused {
+							// Animation frames only while the window has focus.
+							assert!(delay > Duration::ZERO && delay <= Duration::from_millis(80));
 						} else {
-							assert!(delay > Duration::ZERO && delay <= Duration::from_secs(10));
+							assert!(
+								delay > Duration::from_millis(80)
+									&& delay <= Duration::from_secs(10),
+								"an unfocused window must not ask for animation frames"
+							);
 						}
 					}
 					output.drop_without_applying_deltas();

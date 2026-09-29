@@ -13,4 +13,7 @@ pub struct Warnings {
 	pub sessions: bool,
 	pub presence: bool,
 	pub emojis: bool,
+	pub stickers: bool,
+	/// Malformed or conflicting channels, DMs, contacts or members were dropped.
+	pub entries: bool,
 }

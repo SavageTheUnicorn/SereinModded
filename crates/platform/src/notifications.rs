@@ -5,15 +5,37 @@ use std::sync::{
 	mpsc::{self, Receiver, SyncSender},
 };
 
-// notify-rust 4.18 does not export its Windows handle. Dismissal uses our app ID;
-// only a success marker is needed there, without retaining callback receivers.
+// Windows delivers activation through its callback; other platforms retain one cancellable future.
 #[cfg(target_os = "windows")]
 type NotificationHandle = ();
 #[cfg(not(target_os = "windows"))]
-use notify_rust::NotificationHandle;
+struct NotificationHandle {
+	response: Option<std::pin::Pin<Box<dyn std::future::Future<Output = ()>>>>,
+	close: Box<dyn FnOnce()>,
+}
+
+#[derive(Clone)]
+struct Activation {
+	send: SyncSender<(u64, model::Id)>,
+	generation: u64,
+	channel: Option<model::Id>,
+	wake: Arc<dyn Fn() + Send + Sync>,
+	restore: Arc<dyn Fn() + Send + Sync>,
+}
+impl Activation {
+	fn clicked(&self) {
+		if let Some(channel) = self.channel
+			&& self.send.try_send((self.generation, channel)).is_ok()
+		{
+			(self.restore)();
+			(self.wake)();
+		}
+	}
+}
 
 // Eight bounded commands; overflow drops an alert, never message state.
 const QUEUE_ITEMS: usize = 8;
+const GENERIC_BODY: &str = "You have a new message.";
 const TITLE_BYTES: usize = 256;
 const BODY_BYTES: usize = 512;
 const IMAGE_PATH_BYTES: usize = 512;
@@ -59,27 +81,6 @@ impl Status {
 	}
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Kind {
-	Message,
-	Streaming,
-	UpcomingEvent,
-	Reaction,
-	FriendsOnline,
-	ProfileUpdates,
-}
-impl Kind {
-	fn body(self) -> &'static str {
-		match self {
-			Self::Message => "You have a new message.",
-			Self::Streaming => "Someone you know started streaming.",
-			Self::UpcomingEvent => "A server event is starting.",
-			Self::Reaction => "Someone reacted to your message.",
-			Self::FriendsOnline => "A friend came online.",
-			Self::ProfileUpdates => "A friend updated their profile.",
-		}
-	}
-}
 struct Alert {
 	title: Box<str>,
 	body: Box<str>,
@@ -88,24 +89,37 @@ struct Alert {
 
 struct Command {
 	generation: u64,
+	channel: Option<model::Id>,
 	alert: Option<Alert>,
 }
 
 /// Created without OS calls or a thread. The worker starts only when the device setting is enabled.
 pub struct Notifications {
+	activated: Receiver<(u64, model::Id)>,
+	activation_send: SyncSender<(u64, model::Id)>,
 	send: Option<SyncSender<Command>>,
 	generation: Arc<AtomicU64>,
 	status: Arc<AtomicU64>,
 	wake: Arc<dyn Fn() + Send + Sync>,
+	restore: Arc<dyn Fn() + Send + Sync>,
 }
 
 impl Notifications {
-	pub fn new(wake: impl Fn() + Send + Sync + 'static) -> Self {
+	/// `restore` runs on the notification thread when a click needs the window shown; a hidden
+	/// window may receive no frames until then.
+	pub fn new(
+		wake: impl Fn() + Send + Sync + 'static,
+		restore: impl Fn() + Send + Sync + 'static,
+	) -> Self {
+		let (activation_send, activated) = mpsc::sync_channel(QUEUE_ITEMS);
 		Self {
+			activated,
+			activation_send,
 			send: None,
 			generation: Arc::new(AtomicU64::new(0)),
 			status: Arc::new(AtomicU64::new(0)),
 			wake: Arc::new(wake),
+			restore: Arc::new(restore),
 		}
 	}
 
@@ -131,9 +145,11 @@ impl Notifications {
 			let current = Arc::clone(&self.generation);
 			let status = Arc::clone(&self.status);
 			let wake = Arc::clone(&self.wake);
+			let restore = Arc::clone(&self.restore);
+			let activated = self.activation_send.clone();
 			if std::thread::Builder::new()
 				.name("serein-notifications".into())
-				.spawn(move || worker(receive, current, status, wake))
+				.spawn(move || worker(receive, current, status, wake, restore, activated))
 				.is_err()
 			{
 				self.status
@@ -146,6 +162,7 @@ impl Notifications {
 		if let Some(send) = &self.send {
 			let _ = send.try_send(Command {
 				generation,
+				channel: None,
 				alert: None,
 			});
 		}
@@ -169,6 +186,7 @@ impl Notifications {
 		if let Some(send) = &self.send {
 			let _ = send.try_send(Command {
 				generation,
+				channel: None,
 				alert: None,
 			});
 		}
@@ -176,16 +194,37 @@ impl Notifications {
 
 	/// Queue a privacy-preserving generic alert. False means disabled, unavailable or overloaded.
 	pub fn notify(&self) -> bool {
-		self.notify_kind(Kind::Message)
-	}
-	pub fn notify_kind(&self, kind: Kind) -> bool {
 		self.enqueue(Alert {
 			title: "Serein".into(),
-			body: kind.body().into(),
+			body: GENERIC_BODY.into(),
 			image_path: None,
 		})
 	}
 	pub fn notify_message(&self, title: String, body: String, image_path: Option<String>) -> bool {
+		self.message(None, title, body, image_path)
+	}
+	pub fn notify_channel(
+		&self,
+		channel: model::Id,
+		title: String,
+		body: String,
+		image_path: Option<String>,
+	) -> bool {
+		self.message(Some(channel), title, body, image_path)
+	}
+	pub fn take_activation(&self) -> Option<model::Id> {
+		let current = self.generation.load(Ordering::Acquire);
+		self.activated.try_iter().find_map(|(generation, channel)| {
+			(current & 1 != 0 && current == generation).then_some(channel)
+		})
+	}
+	fn message(
+		&self,
+		channel: Option<model::Id>,
+		title: String,
+		body: String,
+		image_path: Option<String>,
+	) -> bool {
 		if title.len() > TITLE_BYTES
 			|| body.len() > BODY_BYTES
 			|| image_path
@@ -194,13 +233,19 @@ impl Notifications {
 		{
 			return false;
 		}
-		self.enqueue(Alert {
-			title: title.into_boxed_str(),
-			body: body.into_boxed_str(),
-			image_path: image_path.map(String::into_boxed_str),
-		})
+		self.enqueue_channel(
+			Alert {
+				title: title.into_boxed_str(),
+				body: body.into_boxed_str(),
+				image_path: image_path.map(String::into_boxed_str),
+			},
+			channel,
+		)
 	}
 	fn enqueue(&self, alert: Alert) -> bool {
+		self.enqueue_channel(alert, None)
+	}
+	fn enqueue_channel(&self, alert: Alert, channel: Option<model::Id>) -> bool {
 		if !matches!(self.status(), Status::Ready | Status::QueueFull) {
 			return false;
 		}
@@ -208,6 +253,7 @@ impl Notifications {
 		let Some(send) = &self.send else { return false };
 		match send.try_send(Command {
 			generation,
+			channel,
 			alert: Some(alert),
 		}) {
 			Ok(()) => true,
@@ -260,11 +306,39 @@ fn worker(
 	current: Arc<AtomicU64>,
 	status: Arc<AtomicU64>,
 	wake: Arc<dyn Fn() + Send + Sync>,
+	restore: Arc<dyn Fn() + Send + Sync>,
+	activated: SyncSender<(u64, model::Id)>,
 ) {
 	let mut generation = 0;
 	let mut outcome = Status::Disabled;
-	let mut outstanding = None;
-	while let Ok(command) = receive.recv() {
+	let mut outstanding: Option<NotificationHandle> = None;
+	loop {
+		#[cfg(not(target_os = "windows"))]
+		if let Some(handle) = &mut outstanding
+			&& let Some(response) = &mut handle.response
+			&& response
+				.as_mut()
+				.poll(&mut std::task::Context::from_waker(std::task::Waker::noop()))
+				.is_ready()
+		{
+			handle.response = None;
+		}
+		#[cfg(not(target_os = "windows"))]
+		let waiting = outstanding
+			.as_ref()
+			.is_some_and(|handle| handle.response.is_some());
+		#[cfg(target_os = "windows")]
+		let waiting = false;
+		let command = if waiting {
+			match receive.recv_timeout(std::time::Duration::from_millis(100)) {
+				Ok(command) => command,
+				Err(mpsc::RecvTimeoutError::Timeout) => continue,
+				Err(mpsc::RecvTimeoutError::Disconnected) => break,
+			}
+		} else {
+			let Ok(command) = receive.recv() else { break };
+			command
+		};
 		let active = current.load(Ordering::Acquire);
 		if active != generation {
 			close(&mut outstanding);
@@ -291,7 +365,14 @@ fn worker(
 		}
 		// Keep at most one notification/response handle, including in OS history where supported.
 		close(&mut outstanding);
-		outcome = match show(command.alert.as_ref().expect("checked above")) {
+		let activation = Activation {
+			send: activated.clone(),
+			generation,
+			channel: command.channel,
+			wake: Arc::clone(&wake),
+			restore: Arc::clone(&restore),
+		};
+		outcome = match show(command.alert.as_ref().expect("checked above"), activation) {
 			Ok(handle) => {
 				outstanding = Some(handle);
 				Status::Ready
@@ -367,16 +448,49 @@ fn windows_shortcut_exists() -> bool {
 	})
 }
 
-fn show(alert: &Alert) -> Result<NotificationHandle, ()> {
+fn show(alert: &Alert, activation: Activation) -> Result<NotificationHandle, ()> {
 	#[cfg(target_os = "macos")]
 	{
 		// The blocking wrapper mistakes a busy AppKit run loop for a stopped one.
 		// Await the OS completion on this worker; never block the native UI thread.
-		futures_lite::future::block_on(notification(alert).show_async()).map_err(|_| ())
+		let native = mac_usernotifications::Notification::from(&notification(alert));
+		let handle = futures_lite::future::block_on(native.send()).map_err(|_| ())?;
+		let id = handle.notification_id().to_owned();
+		Ok(NotificationHandle {
+			response: Some(Box::pin(async move {
+				if handle
+					.response()
+					.await
+					.is_ok_and(|response| response.is_default_action())
+				{
+					activation.clicked();
+				}
+			})),
+			close: Box::new(move || {
+				futures_lite::future::block_on(mac_usernotifications::close_delivered(&id))
+			}),
+		})
 	}
 	#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 	{
-		notification(alert).show().map_err(|_| ())
+		let handle = Arc::new(notification(alert).show().map_err(|_| ())?);
+		let response_handle = Arc::clone(&handle);
+		Ok(NotificationHandle {
+			response: Some(Box::pin(async move {
+				response_handle
+					.wait_for_action_async(|response| {
+						if response.is_default_action() {
+							activation.clicked();
+						}
+					})
+					.await;
+			})),
+			close: Box::new(move || {
+				if let Ok(handle) = Arc::try_unwrap(handle) {
+					handle.close();
+				}
+			}),
+		})
 	}
 	#[cfg(target_os = "windows")]
 	{
@@ -384,6 +498,10 @@ fn show(alert: &Alert) -> Result<NotificationHandle, ()> {
 		let mut toast = Toast::new("cz.viceverse.serein")
 			.title(&alert.title)
 			.text1(&alert.body)
+			.on_activated(move |_| {
+				activation.clicked();
+				Ok(())
+			})
 			.sound(None);
 		if let Some(path) = &alert.image_path
 			&& std::path::Path::new(path.as_ref()).is_file()
@@ -406,6 +524,8 @@ fn notification(alert: &Alert) -> notify_rust::Notification {
 		.summary(&alert.title)
 		.body(&alert.body)
 		.timeout(5_000);
+	#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+	notification.action("default", "Open channel");
 	if let Some(path) = &alert.image_path
 		&& std::path::Path::new(path.as_ref()).is_file()
 	{
@@ -420,7 +540,8 @@ fn notification(alert: &Alert) -> notify_rust::Notification {
 fn close(outstanding: &mut Option<NotificationHandle>) {
 	#[cfg(not(target_os = "windows"))]
 	if let Some(handle) = outstanding.take() {
-		handle.close();
+		drop(handle.response);
+		(handle.close)();
 	}
 	#[cfg(target_os = "windows")]
 	if outstanding.take().is_some() {
@@ -428,6 +549,32 @@ fn close(outstanding: &mut Option<NotificationHandle>) {
 		let _ = ToastNotificationManager::History()
 			.and_then(|history| history.ClearWithId(&HSTRING::from("cz.viceverse.serein")));
 	}
+}
+
+/// Synthetic handoff check: never sends an OS notification or starts a worker.
+#[cfg(debug_assertions)]
+pub fn debug_activation_check(channel: model::Id) -> model::Id {
+	let mut notifications = Notifications::new(|| {}, || {});
+	notifications.generation.store(1, Ordering::Release);
+	let click = Activation {
+		send: notifications.activation_send.clone(),
+		generation: 1,
+		channel: Some(channel),
+		wake: Arc::clone(&notifications.wake),
+		restore: Arc::clone(&notifications.restore),
+	};
+	click.clicked();
+	let selected = notifications
+		.take_activation()
+		.expect("click retains its channel");
+	assert_eq!(selected, channel);
+	click.clicked();
+	notifications.dismiss();
+	assert_eq!(notifications.take_activation(), None);
+	click.clicked();
+	notifications.clear();
+	assert_eq!(notifications.take_activation(), None);
+	selected
 }
 
 #[cfg(test)]
@@ -471,12 +618,12 @@ mod tests {
 	fn disabled_is_lazy_and_fixed_queue_is_bounded_and_invalidated() {
 		let alert = notification(&Alert {
 			title: "Serein".into(),
-			body: Kind::Message.body().into(),
+			body: GENERIC_BODY.into(),
 			image_path: None,
 		});
 		assert_eq!(alert.summary, "Serein");
 		assert_eq!(alert.body, "You have a new message.");
-		let mut notifications = Notifications::new(|| {});
+		let mut notifications = Notifications::new(|| {}, || {});
 		assert_eq!(notifications.status(), Status::Disabled);
 		assert!(notifications.send.is_none());
 		assert!(!notifications.notify());
@@ -519,20 +666,24 @@ mod tests {
 		publish(&notifications.status, 1, Status::Unavailable);
 		assert_eq!(notifications.status.load(Ordering::Acquire), active_status);
 		assert_eq!(notifications.status(), Status::Disabled);
-	}
-	#[test]
-	fn message_alert_payload_is_bounded_and_retains_preview() {
-		let mut notifications = Notifications::new(|| {});
-		let (send, receive) = mpsc::sync_channel(QUEUE_ITEMS);
-		notifications.send = Some(send);
-		notifications.generation.store(1, Ordering::Release);
-		notifications
-			.status
-			.store(encoded(1, Status::Ready), Ordering::Release);
-		assert!(notifications.notify_message("A sender".into(), "Hello there".into(), None));
-		let alert = receive.try_recv().unwrap().alert.unwrap();
-		assert_eq!((&*alert.title, &*alert.body), ("A sender", "Hello there"));
-		assert!(!notifications.notify_message("x".repeat(TITLE_BYTES + 1), "Message".into(), None));
-		assert!(receive.try_recv().is_err());
+
+		{
+			let mut notifications = Notifications::new(|| {}, || {});
+			let (send, receive) = mpsc::sync_channel(QUEUE_ITEMS);
+			notifications.send = Some(send);
+			notifications.generation.store(1, Ordering::Release);
+			notifications
+				.status
+				.store(encoded(1, Status::Ready), Ordering::Release);
+			assert!(notifications.notify_message("A sender".into(), "Hello there".into(), None));
+			let alert = receive.try_recv().unwrap().alert.unwrap();
+			assert_eq!((&*alert.title, &*alert.body), ("A sender", "Hello there"));
+			assert!(!notifications.notify_message(
+				"x".repeat(TITLE_BYTES + 1),
+				"Message".into(),
+				None
+			));
+			assert!(receive.try_recv().is_err());
+		}
 	}
 }

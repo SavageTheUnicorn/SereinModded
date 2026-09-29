@@ -41,9 +41,7 @@ impl Layout {
 		let mut key = DefaultHasher::new();
 		text.hash(&mut key);
 		width.to_bits().hash(&mut key);
-		ui.ctx()
-			.fonts(|fonts| fonts.definitions().font_data.len())
-			.hash(&mut key);
+		crate::fonts::revision(ui.ctx()).hash(&mut key);
 		ui.ctx().pixels_per_point().to_bits().hash(&mut key);
 		egui::TextStyle::Body.resolve(ui.style()).hash(&mut key);
 		let colors = crate::design::palette(ui);
@@ -150,7 +148,6 @@ impl Layout {
 			} else {
 				let grapheme = tail.graphemes(true).next().expect("nonempty tail");
 				image = emoji::image(ui.ctx(), grapheme, size);
-				// Recognition must not depend on the startup worker: never flash font emoji.
 				artwork = image.is_some() || emoji::lookup(grapheme).is_some();
 				grapheme.len()
 			};
@@ -262,14 +259,6 @@ impl Layout {
 						image.calc_size(egui::Vec2::splat(inline.width), image.size()),
 					),
 				);
-			} else {
-				painter.text(
-					rect.center(),
-					egui::Align2::CENTER_CENTER,
-					"?",
-					egui::FontId::proportional(inline.width),
-					ui.visuals().weak_text_color(),
-				);
 			}
 		}
 	}
@@ -356,6 +345,7 @@ mod tests {
 			webhook: false,
 			kind: Default::default(),
 			discriminator: 0,
+			primary_guild: None,
 		}]
 	}
 
@@ -559,7 +549,14 @@ mod tests {
 					"emoji-9001".into(),
 					Some(egui::ColorImage::filled(dimensions, Color32::WHITE)),
 				);
-				message.show_with_images(ui, &mut None, &[], &mut None, (&mut avatars, false, &[]));
+				message.show_with_images(
+					ui,
+					&mut None,
+					&[],
+					None,
+					&mut crate::profiles::ProfileSession::default(),
+					(&mut avatars, false, &[]),
+				);
 				let mut layouter = |ui: &egui::Ui, buffer: &dyn egui::TextBuffer, width| {
 					layout.galley(
 						ui,

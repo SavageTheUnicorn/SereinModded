@@ -1,4 +1,4 @@
-use crate::UserDto;
+use crate::{MentionList, UserDto};
 use model::{Id, SearchHit, SearchPage};
 use serde::{
 	Deserialize, Deserializer,
@@ -29,7 +29,13 @@ pub(crate) struct Hit {
 	channel_id: Id,
 	author: UserDto,
 	#[serde(default)]
+	mentions: MentionList,
+	#[serde(default)]
 	content: String,
+	#[serde(default)]
+	attachments: crate::attachments::AttachmentList,
+	#[serde(default)]
+	embeds: crate::embeds::EmbedList,
 	#[serde(default)]
 	hit: Option<bool>,
 }
@@ -86,17 +92,24 @@ impl Reply {
 
 impl Hit {
 	pub(crate) fn into_hit(self) -> SearchHit {
-		// No Markdown, media fetch or spoiler reveal in snapshot previews.
-		let excerpt = if self.content.contains("||") {
-			"Spoiler content - open message to reveal".into()
+		let excerpt = if self.content.len() > 8192 {
+			"Message exceeds preview limit - open message to read".into()
 		} else {
-			self.content.chars().take(256).collect()
+			self.content
 		};
 		SearchHit {
 			id: self.id,
 			channel: self.channel_id,
-			author: self.author.into_model().name,
+			author: self.author.into_model(),
+			mentions: self
+				.mentions
+				.0
+				.into_iter()
+				.map(UserDto::into_model)
+				.collect(),
 			excerpt,
+			attachments: self.attachments.0,
+			embeds: crate::embeds::bounded(self.embeds.0),
 		}
 	}
 }
@@ -106,14 +119,15 @@ mod tests {
 	use super::*;
 	use serde_json::json;
 	#[test]
-	fn search_hits_are_scoped_bounded_and_spoilers_never_leak_into_snippets() {
+	fn search_hits_are_scoped_bounded_and_preserve_rich_text() {
 		let hit = |id: u64, channel: u64, content: &str| json!({"id":id.to_string(),"channel_id":channel.to_string(),"author":{"id":"7","username":"Synthetic"},"content":content});
 		let decode =
 			|value: serde_json::Value| crate::decode::<Reply>(&serde_json::to_vec(&value).unwrap());
 		let mut context = hit(2, 1, "context");
 		context["hit"] = json!(false);
-		let mut matched = hit(3, 1, "hidden ||synthetic spoiler||");
+		let mut matched = hit(3, 1, "hidden ||synthetic spoiler|| <@42>");
 		matched["hit"] = json!(true);
+		matched["mentions"] = json!([{"id":"42","username":"Mentioned"}]);
 		let page = decode(
 			json!({"total_results":8,"messages":[[context,matched]],"doing_deep_historical_index":true}),
 		)
@@ -123,7 +137,8 @@ mod tests {
 		assert_eq!(page.hits.len(), 1);
 		assert_eq!(page.hits[0].id, Id(3));
 		assert!(page.partial);
-		assert!(!page.hits[0].excerpt.contains("synthetic spoiler"));
+		assert_eq!(page.hits[0].excerpt, "hidden ||synthetic spoiler|| <@42>");
+		assert_eq!(page.hits[0].mentions[0].name, "Mentioned");
 		for value in [
 			json!({"total_results":1}),
 			json!({"total_results":1,"messages":[[hit(3,2,"wrong channel")]]}),
@@ -145,7 +160,7 @@ mod tests {
 			.unwrap()
 			.into_page(Id(1), None)
 			.unwrap();
-		assert_eq!(page.hits[0].excerpt.len(), 256);
+		assert!(page.hits[0].excerpt.contains("exceeds preview limit"));
 		assert!(page.bytes() < model::MAX_SEARCH_BYTES);
 		assert!(model::valid_search_query("synthetic & ? 日本語"));
 		assert!(!model::valid_search_query("\n"));

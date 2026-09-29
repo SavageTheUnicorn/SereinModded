@@ -11,13 +11,21 @@ pub struct Relationship {
 	pub nickname: model::Patch<String>,
 	#[serde(default)]
 	pub user: Option<crate::UserDto>,
-	#[serde(default)]
+	#[serde(default, deserialize_with = "crate::lossy::null_default")]
 	pub is_spam_request: bool,
+	#[serde(default, deserialize_with = "crate::lossy::null_default")]
+	pub user_ignored: bool,
 }
-#[derive(Deserialize)]
-pub struct Snapshot(
-	#[serde(deserialize_with = "crate::read_state::entries")] pub Vec<Relationship>,
-);
+/// Busy accounts can hold thousands of requests and blocks: past the bound, or on a malformed
+/// row, entries are dropped and `.1` reports it instead of rejecting the login.
+pub struct Snapshot(pub Vec<Relationship>, pub bool);
+pub const MAX_RELATIONSHIPS: usize = 10_000;
+impl<'de> Deserialize<'de> for Snapshot {
+	fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+		let rows = crate::lossy::Lossy::<Relationship, MAX_RELATIONSHIPS, true>::deserialize(d)?;
+		Ok(Self(rows.items, rows.skipped))
+	}
+}
 impl Snapshot {
 	pub fn nicknames(&self) -> Vec<(Id, String)> {
 		self.0
@@ -36,24 +44,20 @@ impl Snapshot {
 		let users: std::collections::BTreeMap<_, _> = users.iter().map(|u| (u.id, u)).collect();
 		self.0
 			.iter()
-			.filter(|r| matches!(r.kind, 3 | 4))
+			.filter(|r| matches!(r.kind, 3 | 4) && r.id.0 != 0)
 			.map(|r| {
+				// A mismatched or malformed profile is shown like a missing one.
 				let profile = r.user.as_ref().or_else(|| users.get(&r.id).copied());
-				let (user, name) = if let Some(user) = profile {
-					if user.id != r.id {
-						return Err(crate::DecodeError);
-					}
-					friend(user.clone())?
+				let (user, name) = if let Some(profile) = valid_profile(r, profile) {
+					profile
 				} else {
-					if r.id.0 == 0 {
-						return Err(crate::DecodeError);
-					}
 					(
 						model::User {
 							id: r.id,
 							name: "Unknown user".into(),
 							avatar: None,
 							discriminator: 0,
+							primary_guild: None,
 							webhook: false,
 							kind: Default::default(),
 						},
@@ -66,6 +70,21 @@ impl Snapshot {
 	}
 	pub fn entries(&self) -> Vec<(Id, bool)> {
 		self.0.iter().map(|r| (r.id, r.kind == 2)).collect()
+	}
+	pub fn restricted(
+		&self,
+		users: &[crate::UserDto],
+	) -> Result<Vec<(model::User, String, bool)>, crate::DecodeError> {
+		let users: std::collections::BTreeMap<_, _> = users.iter().map(|u| (u.id, u)).collect();
+		self.0
+			.iter()
+			.filter(|r| r.kind == 2 || r.user_ignored)
+			.filter_map(|r| {
+				let profile = r.user.as_ref().or_else(|| users.get(&r.id).copied());
+				valid_profile(r, profile)
+					.map(|(user, username)| Ok((user, username, r.user_ignored && r.kind != 2)))
+			})
+			.collect()
 	}
 	pub fn spam_incoming_ids(&self) -> Vec<Id> {
 		self.0
@@ -81,19 +100,22 @@ impl Snapshot {
 		let users: std::collections::BTreeMap<_, _> = users.iter().map(|u| (u.id, u)).collect();
 		let mut friends = Vec::new();
 		for relationship in self.0.iter().filter(|r| r.kind == 1) {
-			if let Some(user) = relationship
+			let profile = relationship
 				.user
 				.as_ref()
-				.or_else(|| users.get(&relationship.id).copied())
-			{
-				if user.id != relationship.id {
-					return Err(crate::DecodeError);
-				}
-				friends.push(friend(user.clone())?);
-			}
+				.or_else(|| users.get(&relationship.id).copied());
+			friends.extend(valid_profile(relationship, profile));
 		}
 		Ok(friends)
 	}
+}
+fn valid_profile(
+	relationship: &Relationship,
+	profile: Option<&crate::UserDto>,
+) -> Option<(model::User, String)> {
+	profile
+		.filter(|user| user.id == relationship.id)
+		.and_then(|user| friend(user.clone()).ok())
 }
 pub fn friend(user: crate::UserDto) -> Result<(model::User, String), crate::DecodeError> {
 	if user.id.0 == 0
@@ -132,15 +154,24 @@ mod tests {
 		)
 		.unwrap();
 		assert_eq!(rows.entries(), vec![(Id(1), true), (Id(2), false)]);
-		assert!(crate::decode::<Snapshot>(br#"[{"id":"1"}]"#).is_err());
-		let large = format!("[{}]", vec![r#"{"id":"1","type":2}"#; 4001].join(","));
-		assert!(crate::decode::<Snapshot>(large.as_bytes()).is_err());
-		let rows:Snapshot=crate::decode(br#"[{"id":"2","type":1},{"id":"3","type":2,"user":{"id":"3","username":"blocked"}},{"id":"4","type":3}]"#).unwrap();
+		let malformed = crate::decode::<Snapshot>(br#"[{"id":"1"},{"id":"2","type":1}]"#).unwrap();
+		assert!(malformed.1 && malformed.0.len() == 1);
+		let large = format!(
+			"[{}]",
+			vec![r#"{"id":"1","type":2}"#; MAX_RELATIONSHIPS + 1].join(",")
+		);
+		let large = crate::decode::<Snapshot>(large.as_bytes()).unwrap();
+		assert!(large.1 && large.0.len() == MAX_RELATIONSHIPS);
+		let rows:Snapshot=crate::decode(br#"[{"id":"2","type":1},{"id":"3","type":2,"user":{"id":"3","username":"blocked"}},{"id":"4","type":3},{"id":"5","type":1,"user_ignored":true,"user":{"id":"5","username":"ignored"}}]"#).unwrap();
 		let users=crate::decode::<Vec<crate::UserDto>>(br#"[{"id":"2","username":"friend_name","global_name":"Friend display"},{"id":"4","username":"pending"}]"#).unwrap();
 		let friends = rows.friends(&users).unwrap();
-		assert_eq!(friends.len(), 1);
+		assert_eq!(friends.len(), 2);
 		assert_eq!(friends[0].0.name, "Friend display");
 		assert_eq!(friends[0].1, "friend_name");
+		let restricted = rows.restricted(&users).unwrap();
+		assert_eq!(restricted.len(), 2);
+		assert_eq!((restricted[0].0.id, restricted[0].2), (Id(3), false));
+		assert_eq!((restricted[1].0.id, restricted[1].2), (Id(5), true));
 		let requests = rows.requests(&users).unwrap();
 		assert_eq!(requests.len(), 1);
 		assert!(requests[0].2);
@@ -156,6 +187,9 @@ mod tests {
 		let invalid: Snapshot =
 			crate::decode(br#"[{"id":"2","type":1,"user":{"id":"3","username":"wrong"}}]"#)
 				.unwrap();
-		assert!(invalid.friends(&[]).is_err());
+		assert!(
+			invalid.friends(&[]).unwrap().is_empty(),
+			"A mismatched profile is never attributed to the relationship"
+		);
 	}
 }

@@ -8,6 +8,9 @@ fn main() {
 	let mut theme = package.theme.unwrap();
 	assert_eq!(theme.style, extensions::ThemeStyle::default());
 	theme.style = extensions::ThemeStyle {
+		transparency_blur: Some(true),
+		transparency: Some(30),
+		blur: Some(60),
 		body_size: Some(18),
 		heading_size: Some(26),
 		button_size: Some(17),
@@ -19,6 +22,7 @@ fn main() {
 		widget_radius: Some(10),
 		window_radius: Some(16),
 		menu_radius: Some(12),
+		..Default::default()
 	};
 	let overlay = extensions::Theme {
 		style: extensions::ThemeStyle {
@@ -31,9 +35,14 @@ fn main() {
 	merged.overlay(&overlay);
 	assert_eq!(merged.style.button_size, Some(19));
 	assert_eq!(merged.style.body_size, Some(18));
+	assert_eq!(merged.style.transparency_blur, Some(true));
+	assert_eq!(merged.style.transparency, Some(30));
 	assert_eq!(merged.dark, theme.dark);
 	theme.validate().unwrap();
 	ui::design::set_extension_theme(Some(&theme));
+	assert!(!ui::design::window_effects().0);
+	ui::design::set_window_effects(true, 15, 50);
+	assert_eq!(ui::design::window_effects(), (true, 30, 60));
 	ui::design::apply(&ctx);
 	for appearance in [egui::Theme::Dark, egui::Theme::Light] {
 		let style = ctx.style_of(appearance);
@@ -54,6 +63,9 @@ fn main() {
 		assert_eq!(style.visuals.menu_corner_radius, 12.into());
 	}
 	let mut invalid = theme.clone();
+	invalid.style.transparency = Some(101);
+	assert!(invalid.validate().is_err());
+	invalid.style.transparency = Some(30);
 	invalid.style.body_size = Some(0);
 	assert!(invalid.validate().is_err());
 	invalid = theme;
@@ -72,9 +84,15 @@ fn main() {
 			.widgets
 			.inactive
 			.corner_radius,
-		4.into()
+		8.into()
 	);
 	ui::design::set_extension_theme(None);
+	assert_eq!(ui::design::window_effects(), (true, 15, 50));
+	ui::design::set_window_effects(true, 30, 60);
+	let see_through = ui::design::colors(true, ui::design::Variant::Standard);
+	assert!(see_through.chat.a() < 255);
+	assert!(see_through.sidebar.a() < 255);
+	ui::design::set_window_effects(false, 15, 50);
 	ui::design::apply(&ctx);
 	assert_eq!(
 		ctx.style_of(egui::Theme::Dark).spacing.button_padding,

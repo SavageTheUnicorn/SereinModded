@@ -3,8 +3,8 @@
 use model::{Attachment, Id, Message};
 
 const CORNER: u8 = 8;
-const MAX_WIDTH: f32 = 420.0;
-const MAX_HEIGHT: f32 = 320.0;
+const MAX_WIDTH: f32 = crate::avatars::media::MEDIA_MAX_WIDTH;
+const MAX_HEIGHT: f32 = crate::avatars::media::MEDIA_MAX_HEIGHT;
 const BAR_HEIGHT: f32 = 60.0;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -43,6 +43,8 @@ pub struct VideoUi {
 	controls_focused: bool,
 	/// Keep the viewport's previous mode so leaving playback restores the window.
 	fullscreen: Option<(egui::Context, bool, egui::Id)>,
+	/// Native window transition for the desktop to apply after this UI frame.
+	pub(super) fullscreen_request: Option<bool>,
 }
 impl Default for VideoUi {
 	fn default() -> Self {
@@ -59,6 +61,7 @@ impl Default for VideoUi {
 			shade: None,
 			controls_focused: false,
 			fullscreen: None,
+			fullscreen_request: None,
 		}
 	}
 }
@@ -74,11 +77,15 @@ impl VideoUi {
 		self.seen = false;
 		self.command = Some(VideoCommand::Stop);
 	}
-	fn exit_fullscreen(&mut self) {
+	pub(super) fn exit_fullscreen(&mut self) {
 		if let Some((ctx, previous, focus)) = self.fullscreen.take() {
-			ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(previous));
+			self.fullscreen_request = Some(previous);
 			ctx.memory_mut(|memory| memory.request_focus(focus));
+			ctx.request_repaint();
 		}
+	}
+	pub fn take_fullscreen_request(&mut self) -> Option<bool> {
+		self.fullscreen_request.take()
 	}
 	pub(super) fn is_fullscreen(&self) -> bool {
 		self.fullscreen.is_some()
@@ -92,11 +99,15 @@ impl VideoUi {
 		opening: &mut Option<String>,
 		demo: bool,
 	) {
+		// A modal sizing pass is invisible; it must not stop the active decoder.
+		self.seen = true;
 		let screen = ctx.content_rect();
 		let id = egui::Id::unique("video-fullscreen");
 		let overlay = egui::Modal::new(id)
 			.area(
-				egui::Modal::default_area(id).anchor(egui::Align2::LEFT_TOP, screen.min.to_vec2()),
+				egui::Modal::default_area(id)
+					.anchor(egui::Align2::LEFT_TOP, egui::Vec2::ZERO)
+					.fade_in(false),
 			)
 			.backdrop_color(egui::Color32::BLACK)
 			.frame(egui::Frame::NONE)
@@ -230,24 +241,17 @@ impl VideoUi {
 		} else {
 			stage_size(attachment, width)
 		};
-		let (stage, mut response) = ui.allocate_exact_size(size, egui::Sense::click());
+		let (stage, mut response) = ui.allocate_exact_size(size, egui::Sense::hover());
 		if active && self.is_fullscreen() && !fullscreen {
 			return response;
 		}
-		let label = match state {
-			VideoState::Loading => "Cancel",
-			VideoState::Playing => "Pause",
-			VideoState::Paused => "Resume",
-			VideoState::Ended => "Replay",
-			VideoState::Failed(_) => "Retry",
-			VideoState::Idle => "Play",
-		};
-		response.widget_info(|| {
-			egui::WidgetInfo::labeled(
-				egui::WidgetType::Button,
-				ui.is_enabled(),
-				format!("{label} video {}", attachment.filename),
-			)
+		let label = crate::i18n::translate_if_key(match state {
+			VideoState::Loading => "video-show-player-cancel",
+			VideoState::Playing => "video-show-player-pause",
+			VideoState::Paused => "video-show-player-resume",
+			VideoState::Ended => "video-show-player-replay",
+			VideoState::Failed(_) => "video-show-player-retry",
+			VideoState::Idle => "video-show-player-play",
 		});
 		let painter = ui.painter().with_clip_rect(stage);
 		painter.rect_filled(stage, CORNER, egui::Color32::BLACK);
@@ -266,6 +270,30 @@ impl VideoUi {
 		let show_controls = active
 			&& state != VideoState::Idle
 			&& (hovered || state != VideoState::Playing || self.controls_focused);
+		// The controls are painted over the stage. Keep playback interaction out of both
+		// overlay bands so a control click cannot also become a play/pause click.
+		let action_top = (stage.top() + 44.0).min(stage.bottom());
+		let action_bottom =
+			(stage.bottom() - if show_controls { BAR_HEIGHT } else { 0.0 }).max(action_top);
+		let action = ui.interact(
+			egui::Rect::from_min_max(
+				egui::pos2(stage.left(), action_top),
+				egui::pos2(stage.right(), action_bottom),
+			),
+			response.id.with("playback"),
+			egui::Sense::click(),
+		);
+		action.widget_info(|| {
+			egui::WidgetInfo::labeled(
+				egui::Role::Button,
+				ui.is_enabled(),
+				format!(
+					"{label} {} {}",
+					crate::i18n::translate("video-show-player-video"),
+					attachment.filename
+				),
+			)
+		});
 		let center = if show_controls {
 			stage.center() - egui::vec2(0.0, BAR_HEIGHT * 0.25)
 		} else {
@@ -373,9 +401,10 @@ impl VideoUi {
 			painter.rect_filled(badge, 4, egui::Color32::from_black_alpha(150));
 			painter.galley(badge.min + egui::vec2(6.0, 3.0), galley, white);
 		}
-		if response.clicked() {
+		if action.clicked() {
 			self.toggle(message, attachment, state);
 		}
+		response = action | response;
 		let mut controls_focused = false;
 		let context_click = ui.input(|i| {
 			i.pointer.button_down(egui::PointerButton::Secondary)
@@ -431,10 +460,19 @@ impl VideoUi {
 							.show_value(false)
 							.trailing_fill(true),
 					);
-					seek.widget_info(|| egui::WidgetInfo::slider(can_seek, position, "Seek video"));
+					seek.widget_info(|| {
+						egui::WidgetInfo::slider(
+							can_seek,
+							position,
+							crate::i18n::translate("video-show-player-seek-video"),
+						)
+					});
 					controls_focused |= seek.has_focus();
 					response |= seek.clone();
-					if seek.on_hover_text("Seek video").changed() && !context_click {
+					if seek
+						.on_hover_text(crate::i18n::translate("video-show-player-seek-video"))
+						.changed() && !context_click
+					{
 						self.command = Some(VideoCommand::Seek(position));
 					}
 					ui.horizontal(|ui| {
@@ -511,7 +549,7 @@ impl VideoUi {
 							};
 							button.widget_info(|| {
 								egui::WidgetInfo::labeled(
-									egui::WidgetType::Button,
+									egui::Role::Button,
 									ui.is_enabled(),
 									label,
 								)
@@ -524,17 +562,12 @@ impl VideoUi {
 									white,
 								);
 							} else {
-								for (x, y) in [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)] {
-									let corner = rect.center() + egui::vec2(x * 7.0, y * 7.0);
-									ui.painter().add(egui::Shape::line(
-										vec![
-											corner - egui::vec2(x * 5.0, 0.0),
-											corner,
-											corner - egui::vec2(0.0, y * 5.0),
-										],
-										egui::Stroke::new(1.5, white),
-									));
-								}
+								crate::icons::paint(
+									ui.painter(),
+									crate::icons::Icon::Fullscreen,
+									rect.shrink(1.0),
+									white,
+								);
 							}
 							controls_focused |= button.has_focus();
 							if button.has_focus() {
@@ -558,8 +591,7 @@ impl VideoUi {
 									let previous =
 										ui.input(|i| i.viewport().fullscreen.unwrap_or(false));
 									self.fullscreen = Some((ui.ctx().clone(), previous, button_id));
-									ui.ctx()
-										.send_viewport_cmd(egui::ViewportCommand::Fullscreen(true));
+									self.fullscreen_request = Some(true);
 								}
 							}
 							ui.spacing_mut().slider_width =
@@ -579,7 +611,12 @@ impl VideoUi {
 							});
 							controls_focused |= volume.has_focus();
 							response |= volume.clone();
-							if volume.on_hover_text("Video volume").changed() && !context_click {
+							if volume
+								.on_hover_text(crate::i18n::translate(
+									"video-show-player-video-volume",
+								))
+								.changed() && !context_click
+							{
 								self.volume = volume_value;
 								self.command = Some(VideoCommand::Volume(self.volume));
 							}
@@ -618,11 +655,11 @@ impl VideoUi {
 						)
 					})
 					.inner
-					.on_disabled_hover_text(if demo {
-						"Downloads are disabled for synthetic attachments"
+					.on_disabled_hover_text(crate::i18n::translate_if_key(if demo {
+						"video-show-player-downloads-are-disabled-for-synthetic-attachments"
 					} else {
-						"A download is already active"
-					})
+						"video-show-player-a-download-is-already-active"
+					}))
 					.clicked()
 				{
 					download.request = Some(attachment.clone());
@@ -667,12 +704,20 @@ impl Drop for VideoUi {
 	}
 }
 fn stage_size(attachment: &Attachment, width: f32) -> egui::Vec2 {
-	let ratio = if attachment.media.width > 0 && attachment.media.height > 0 {
-		attachment.media.width as f32 / attachment.media.height as f32
+	let width = width.clamp(1.0, MAX_WIDTH);
+	let (native_width, native_height) = if attachment.media.width > 0 && attachment.media.height > 0
+	{
+		(
+			attachment.media.width as f32,
+			attachment.media.height as f32,
+		)
 	} else {
-		16.0 / 9.0
+		(16.0, 9.0)
 	};
-	egui::vec2(width, (width / ratio.clamp(0.5, 3.0)).min(MAX_HEIGHT))
+	let scale = (width / native_width)
+		.min(MAX_HEIGHT / native_height)
+		.min(1.0);
+	(egui::vec2(native_width, native_height) * scale).max(egui::vec2(1.0, 1.0))
 }
 /// Stage plus the spacing after each attachment; all controls are overlays or menu actions.
 pub(super) fn estimated_height(attachment: &Attachment, width: f32) -> f32 {

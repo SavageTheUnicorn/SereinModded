@@ -1,8 +1,6 @@
 //! Unofficial normal-user profile response; see docs/profiles.md for source evidence.
 use crate::{DecodeError, UserDto};
-use model::{
-	ClanTag, GuildProfile, Id, ProfileBadge, ProfileConnection, ProfileGuild, UserProfile,
-};
+use model::{GuildProfile, Id, ProfileBadge, ProfileConnection, ProfileGuild, UserProfile};
 use serde::{
 	Deserialize, Deserializer,
 	de::{SeqAccess, Visitor},
@@ -28,6 +26,9 @@ pub fn encode_edit(changes: &model::ProfileEdit) -> Result<serde_json::Value, De
 	if let Some(color) = changes.accent_color {
 		fields.insert("accent_color".into(), serde_json::json!(color));
 	}
+	if let Some(avatar) = &changes.avatar {
+		fields.insert("avatar".into(), serde_json::json!(avatar));
+	}
 	Ok(serde_json::Value::Object(fields))
 }
 #[derive(Deserialize)]
@@ -47,6 +48,8 @@ struct ProfileDto {
 	connected_accounts: Small<Connection, 16>,
 	#[serde(default)]
 	mutual_guilds: Small<MutualGuild, 50>,
+	#[serde(default)]
+	mutual_friends: Small<UserDto, 50>,
 }
 #[derive(Deserialize)]
 struct ProfileUser {
@@ -58,32 +61,6 @@ struct ProfileUser {
 	banner: Option<String>,
 	#[serde(default)]
 	accent_color: Option<u32>,
-	/// Current name of the displayed server tag object; `clan` is its older name.
-	#[serde(default)]
-	primary_guild: Option<ClanDto>,
-	#[serde(default)]
-	clan: Option<ClanDto>,
-}
-#[derive(Deserialize, Default)]
-#[serde(default)]
-struct ClanDto {
-	identity_guild_id: Option<GuildId>,
-	identity_enabled: Option<bool>,
-	tag: Option<String>,
-	badge: Option<String>,
-}
-impl ClanDto {
-	fn into_model(self, limited: &mut bool) -> Option<ClanTag> {
-		if self.identity_enabled == Some(false) {
-			return None;
-		}
-		let tag = self.tag.filter(|t| !t.trim().is_empty())?;
-		Some(ClanTag {
-			guild: self.identity_guild_id?.id(),
-			tag: text(tag, 8, limited),
-			badge: hash(self.badge),
-		})
-	}
 }
 #[derive(Deserialize, Default)]
 #[serde(default)]
@@ -132,6 +109,8 @@ struct Badge {
 struct Connection {
 	#[serde(rename = "type")]
 	kind: String,
+	#[serde(default)]
+	id: String,
 	name: String,
 	#[serde(default)]
 	verified: bool,
@@ -160,7 +139,14 @@ impl<'de, T: Deserialize<'de>, const N: usize> Deserialize<'de> for Small<T, N> 
 		impl<'de, T: Deserialize<'de>, const N: usize> Visitor<'de> for Items<T, N> {
 			type Value = Small<T, N>;
 			fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-				f.write_str("bounded profile list")
+				f.write_str("bounded profile list or null")
+			}
+			fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+				// Restricted profiles can retain identity while withholding these lists.
+				Ok(Small {
+					limited: true,
+					..Small::default()
+				})
 			}
 			fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
 				let mut list = Small::default();
@@ -180,7 +166,7 @@ impl<'de, T: Deserialize<'de>, const N: usize> Deserialize<'de> for Small<T, N> 
 				Ok(list)
 			}
 		}
-		deserializer.deserialize_seq(Items::<T, N>(std::marker::PhantomData))
+		deserializer.deserialize_any(Items::<T, N>(std::marker::PhantomData))
 	}
 }
 fn text(value: String, chars: usize, limited: &mut bool) -> String {
@@ -220,6 +206,7 @@ pub fn decode_profile(bytes: &[u8], guild: Option<Id>) -> Result<UserProfile, De
 		|| dto.guild_badges.limited
 		|| dto.connected_accounts.limited
 		|| dto.mutual_guilds.limited
+		|| dto.mutual_friends.limited
 		|| dto.user_profile.is_none();
 	let username = text(dto.user.user.username.clone(), 128, &mut limited);
 	let global_name = dto
@@ -282,13 +269,10 @@ pub fn decode_profile(bytes: &[u8], guild: Option<Id>) -> Result<UserProfile, De
 			};
 			(top <= 0xff_ffff && bottom <= 0xff_ffff).then_some([top, bottom])
 		});
-	let clan = dto
-		.user
-		.primary_guild
-		.or(dto.user.clan)
-		.and_then(|clan| clan.into_model(&mut limited));
+	let user = dto.user.user.into_model();
+	let clan = user.primary_guild.as_deref().cloned();
 	let mut profile = UserProfile {
-		user: dto.user.user.into_model(),
+		user,
 		username,
 		global_name,
 		banner: hash(metadata.banner.or(dto.user.banner)),
@@ -309,6 +293,7 @@ pub fn decode_profile(bytes: &[u8], guild: Option<Id>) -> Result<UserProfile, De
 			.into_iter()
 			.map(|c| ProfileConnection {
 				kind: text(c.kind, 16, &mut limited),
+				id: text(c.id, 128, &mut limited),
 				name: text(c.name, 128, &mut limited),
 				verified: c.verified,
 			})
@@ -322,6 +307,12 @@ pub fn decode_profile(bytes: &[u8], guild: Option<Id>) -> Result<UserProfile, De
 				nick: g.nick.map(|n| text(n, 128, &mut limited)),
 			})
 			.collect(),
+		mutual_friends: dto
+			.mutual_friends
+			.items
+			.into_iter()
+			.map(UserDto::into_model)
+			.collect(),
 		guild,
 		theme_colors,
 		clan,
@@ -332,6 +323,8 @@ pub fn decode_profile(bytes: &[u8], guild: Option<Id>) -> Result<UserProfile, De
 		profile.limited = true;
 		if profile.mutual_guilds.pop().is_some() {
 			profile.mutual_guilds.shrink_to_fit();
+		} else if profile.mutual_friends.pop().is_some() {
+			profile.mutual_friends.shrink_to_fit();
 		} else if profile.badges.pop().is_some() {
 			profile.badges.shrink_to_fit();
 		} else {
@@ -348,12 +341,44 @@ mod tests {
 	use super::*;
 	use serde_json::json;
 	#[test]
+	fn partial_profiles_preserve_identity_and_reject_malformed_lists() {
+		let base = json!({"user":{"id":"1","username":"synthetic","global_name":"Display","avatar":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"user_profile":{},"badges":[],"guild_badges":[],"connected_accounts":[],"mutual_guilds":[],"mutual_friends":[]});
+		assert!(
+			!decode_profile(base.to_string().as_bytes(), None)
+				.unwrap()
+				.limited
+		);
+		for field in [
+			"badges",
+			"guild_badges",
+			"connected_accounts",
+			"mutual_guilds",
+			"mutual_friends",
+		] {
+			let mut value = base.clone();
+			value[field] = serde_json::Value::Null;
+			let profile = decode_profile(value.to_string().as_bytes(), None).unwrap();
+			assert_eq!(profile.username, "synthetic");
+			assert_eq!(profile.user.name, "Display");
+			assert_eq!(
+				profile.user.avatar.as_deref(),
+				Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+			);
+			assert!(profile.limited);
+			assert!(profile.valid());
+			for invalid in [json!({}), json!(false), json!(1), json!(""), json!([null])] {
+				value[field] = invalid;
+				assert!(decode_profile(value.to_string().as_bytes(), None).is_err());
+			}
+		}
+	}
+	#[test]
 	fn profile_metadata_is_bounded_and_guild_identity_is_checked() {
 		let value = json!({"user":{"id":"1","username":"name","global_name":"Display","avatar":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","bio":"global bio","primary_guild":{"identity_guild_id":"2","identity_enabled":true,"tag":"SRN","badge":"ffffffffffffffffffffffffffffffff"}},
             "user_profile":{"bio":"About me","pronouns":"they/them","banner":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","accent_color":123,"theme_colors":[1193046,16777215]},
             "guild_member":{"roles":["8","7"],"nick":"Server name","avatar":"cccccccccccccccccccccccccccccccc","joined_at":"2026-01-01T00:00:00Z"},
             "guild_member_profile":{"guild_id":2,"banner":"dddddddddddddddddddddddddddddddd","bio":"Server bio"},
-            "badges":[{"id":"badge","description":"Synthetic badge","icon":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"}],"connected_accounts":[{"type":"github","name":"synthetic","verified":true}],"mutual_guilds":[{"id":"2","nick":"Server name"}]});
+            "badges":[{"id":"badge","description":"Synthetic badge","icon":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"}],"connected_accounts":[{"type":"github","name":"synthetic","verified":true}],"mutual_guilds":[{"id":"2","nick":"Server name"}],"mutual_friends":[{"id":"3","username":"friend","global_name":"Mutual Friend","avatar":"abababababababababababababababab"}]});
 		let profile = decode_profile(value.to_string().as_bytes(), Some(Id(2))).unwrap();
 		assert_eq!(profile.user.name, "Display");
 		assert_eq!(profile.username, "name");
@@ -370,6 +395,8 @@ mod tests {
 		assert_eq!(profile.theme_colors, Some([0x123456, 0xffffff]));
 		let clan = profile.clan.as_ref().unwrap();
 		assert_eq!((clan.guild, clan.tag.as_str()), (Id(2), "SRN"));
+		assert_eq!(profile.user.primary_guild.as_deref(), Some(clan));
+		assert_eq!(profile.mutual_friends[0].name, "Mutual Friend");
 		assert_eq!(
 			clan.badge_key().as_deref(),
 			Some("clan-2-ffffffffffffffffffffffffffffffff")

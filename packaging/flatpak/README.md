@@ -59,7 +59,9 @@ flatpak uninstall --user cz.viceverse.serein
 ### Sandbox Permissions
 
 The sandbox grants network, graphics, Wayland and X11 access, audio and
-specific Secret Service/notification D-Bus names. X11 access is required as an
+specific Secret Service/notification D-Bus names and `org.kde.StatusNotifierWatcher`
+for the tray. A StatusNotifier host must be running; no additional bus-name ownership
+or blanket session-bus permission is required. X11 access is required as an
 automatic clipboard fallback on Wayland compositors without the data-control
 protocol. Files are selected through
 the existing desktop portal; home and session-bus access are not granted.
@@ -76,8 +78,24 @@ and PipeWire; optional system audio monitors individual applications through nat
 libpulse and the existing PulseAudio socket. Serein's playback and applications without
 a usable identity are excluded. No additional sandbox permissions are needed.
 The camera adapter uses direct V4L2, with no camera portal; camera capture is
-unavailable under these permissions. Host game IPC is also isolated. Do not grant
-blanket devices/home access to hide these limitations.
+unavailable under these permissions. Do not grant blanket devices/home access to hide
+these limitations.
+
+Game Activity binds `discord-ipc-N` in the sandbox's private `$XDG_RUNTIME_DIR`,
+which the host sees as `$XDG_RUNTIME_DIR/.flatpak/cz.viceverse.serein/xdg-run`
+(the same layout as the Vesktop Flatpak). Leftovers from a crash are replaced on
+the next start. Host games need a link, either for the current session:
+`ln -sf "$XDG_RUNTIME_DIR"/{.flatpak/cz.viceverse.serein/xdg-run,}/discord-ipc-0`,
+or on every login:
+
+```sh
+mkdir -p ~/.config/user-tmpfiles.d
+echo 'L %t/discord-ipc-0 - - - - .flatpak/cz.viceverse.serein/xdg-run/discord-ipc-0' > ~/.config/user-tmpfiles.d/discord-rpc.conf
+systemctl --user enable --now systemd-tmpfiles-setup.service
+```
+
+Flatpak games additionally need `--filesystem=xdg-run/.flatpak/cz.viceverse.serein:create`
+and `--filesystem=xdg-run/discord-ipc-0`. The loopback WebSocket transport needs no setup.
 
 References: [Flatpak sandbox permissions](https://docs.flatpak.org/en/latest/sandbox-permissions.html),
 [Cargo vendoring](https://doc.rust-lang.org/cargo/commands/cargo-vendor.html),

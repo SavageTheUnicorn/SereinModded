@@ -2,9 +2,27 @@
 use client_core::{
 	Event, State,
 	auth::Failure,
-	channel_actions::{Action, Edit, Mute, Outcome, PostDetails},
+	channel_actions::{Action, Edit, ForumEdit, Mute, Outcome, PostDetails},
 };
-use model::Id;
+use model::{Channel, Id};
+
+/// The forum settings a fixture channel carries, as the service would report them.
+fn forum_settings(source: &Channel) -> Option<Box<ForumEdit>> {
+	if !matches!(source.kind, 15 | 16) {
+		return None;
+	}
+	let tags = source.tags.as_deref().cloned().unwrap_or_default();
+	Some(Box::new(ForumEdit {
+		tags: tags.available,
+		require_tag: tags.required,
+		reaction: tags.reaction,
+		layout: tags.layout,
+		sort: tags.sort,
+		match_all: tags.match_all,
+		hide_after: 4320,
+		..ForumEdit::default()
+	}))
+}
 
 pub fn execute(
 	state: &State,
@@ -29,6 +47,7 @@ pub fn execute(
 							.get(&channel)
 							.and_then(|p| p.overwrites.clone())
 							.unwrap_or_default(),
+						forum: forum_settings(source),
 						..Edit::default()
 					}
 				}))
@@ -75,6 +94,21 @@ pub fn execute(
 				}
 			}
 			Action::Delete => Outcome::Deleted,
+			Action::CreateThread { name, .. } => {
+				*next_id += 1;
+				let mut thread = source.clone();
+				thread.id = Id(*next_id);
+				thread.kind = 11;
+				thread.parent_id = Some(source.id);
+				thread.name = name;
+				thread.last_message = None;
+				thread.message_count = Some(0);
+				thread.icon = None;
+				Outcome::Channel {
+					channel: Box::new(thread),
+					permissions: None,
+				}
+			}
 			Action::Mute(mute) => Outcome::Preferences {
 				muted: Some(mute != Mute::Unmute),
 				level: None,
@@ -94,6 +128,7 @@ pub fn execute(
 				level: Some(level),
 				mute_until: None,
 			},
+			Action::HideMuted(hide) => Outcome::HideMuted(hide),
 			action => {
 				let mut updated = source.clone();
 				let permission_source = if matches!(action, Action::Create { .. }) {
@@ -123,6 +158,22 @@ pub fn execute(
 					Action::Edit { after, .. } => {
 						updated.name = after.name;
 						edited_overwrites = Some(after.overwrites);
+						if let Some(forum) = after.forum {
+							let mut tags = updated.tags.take().unwrap_or_default();
+							tags.available = forum.tags;
+							for tag in &mut tags.available {
+								if tag.id.0 == 0 {
+									*next_id += 1;
+									tag.id = Id(*next_id);
+								}
+							}
+							tags.required = forum.require_tag;
+							tags.reaction = forum.reaction;
+							tags.layout = forum.layout;
+							tags.sort = forum.sort;
+							tags.match_all = forum.match_all;
+							updated.tags = (!tags.is_empty()).then_some(tags);
+						}
 					}
 					Action::Duplicate { name }
 					| Action::Create { name, .. }
@@ -237,5 +288,70 @@ mod tests {
 		let created = Id(next_id);
 		run(&mut state, created, Action::Delete, &mut next_id);
 		assert!(state.channel(created).is_none());
+	}
+
+	#[test]
+	fn offline_threads_are_started_from_a_message_and_closed_from_the_channel_list() {
+		let mut state = test_support::chat_demo_state();
+		state
+			.permissions
+			.replace(test_support::permission_snapshot(&state))
+			.unwrap();
+		let mut next_id = 300_000;
+		let parent = Id(20);
+		assert!(state.can_create_thread(parent));
+		let starter = state
+			.timeline
+			.iter()
+			.find(|message| message.channel == parent)
+			.map(|message| message.id)
+			.expect("the fixture channel has messages");
+		let client_core::Command::ChannelAction {
+			guild,
+			channel,
+			request,
+			action,
+		} = state
+			.request_channel_action(
+				parent,
+				Action::CreateThread {
+					name: "Synthetic thread".into(),
+					message: Some(starter),
+				},
+			)
+			.expect("a thread may be started here")
+		else {
+			panic!("channel command")
+		};
+		let event = execute(&state, guild, channel, request, action, &mut next_id);
+		state.apply(client_core::Envelope {
+			generation: state.generation,
+			event,
+		});
+		let thread = Id(next_id);
+		let created = state.channel(thread).expect("the thread joined navigation");
+		assert_eq!(created.parent_id, Some(parent));
+		assert_eq!(created.kind, 11);
+		assert!(
+			state.is_thread_channel(thread) && state.can_manage_post(thread),
+			"a text-channel thread supports the same close/delete actions as a forum post"
+		);
+		let client_core::Command::ChannelAction {
+			guild,
+			channel,
+			request,
+			action,
+		} = state
+			.request_channel_action(thread, Action::Delete)
+			.expect("a managed thread can be deleted")
+		else {
+			panic!("channel command")
+		};
+		let event = execute(&state, guild, channel, request, action, &mut next_id);
+		state.apply(client_core::Envelope {
+			generation: state.generation,
+			event,
+		});
+		assert!(state.channel(thread).is_none());
 	}
 }

@@ -4,7 +4,8 @@ Release builds target native packages for Ubuntu 26.04 (`apt`), Fedora 43/44 (`d
 openSUSE Tumbleweed (`zypper`) and Arch (`pacman`), plus a
 [Flatpak bundle](../flatpak/README.md) for distributions with a compatible Flatpak runtime.
 The [AppImage](../appimage/README.md) supports in-app updates on Linux x86_64 with
-the documented host GTK4/WebKit6 runtime; its release build targets Ubuntu 26.04.
+the documented host GTK4/WebKit6 runtime; its release build targets Ubuntu 24.04
+for glibc 2.39 compatibility.
 Download the file labelled for your distribution from
 [Releases](https://github.com/ViceVerse-cz/Serein/releases), then use its actual filename:
 
@@ -58,6 +59,10 @@ cargo xtask package --format arch   # Arch; makepkg must run without root
 cargo xtask package --format dir    # dist/linux-root/usr, for the Flatpak SDK build
 cargo xtask package --format appimage # requires packaging/appimage/install-tools.sh first
 ```
+
+Arch packaging also accepts derivatives such as CachyOS and EndeavourOS when their
+`/etc/os-release` lists `arch` in `ID_LIKE`. Packages use the build host's installed
+dependency versions; this does not guarantee compatibility with other Arch derivatives.
 
 `install-build-deps.sh` installs build dependencies as root on the explicitly
 supported CI distributions. It is intended for fresh build containers. Normal
