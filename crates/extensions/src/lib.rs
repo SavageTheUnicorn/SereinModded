@@ -721,6 +721,20 @@ impl Invocation {
 
 impl Output {
 	pub fn validate(&self, manifest: &Manifest, input: &Invocation) -> Result<(), Error> {
+		let surface = manifest
+			.actions
+			.iter()
+			.find(|action| action.id == input.action)
+			.map(|action| action.surface)
+			.ok_or(Error::Invalid)?;
+		if surface == Surface::Tick
+			&& (self.preserve_deleted_messages
+				|| self.replacement.is_some()
+				|| !self.panel.is_empty()
+				|| self.storage.is_some())
+		{
+			return Err(Error::Capability);
+		}
 		if let Some(appearance) = &self.appearance {
 			if !manifest.capabilities.contains(&Capability::Appearance) {
 				return Err(Error::Capability);

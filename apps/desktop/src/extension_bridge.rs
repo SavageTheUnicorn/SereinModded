@@ -31,16 +31,9 @@ struct Pending {
 
 /// How often a plugin's `tick` action has been called and is next due,
 /// tracked per plugin id for as long as it stays enabled this session.
-/// Scheduling is paced by completion, not just by wall-clock elapsed time:
-/// `in_flight` stops a second tick from being queued while the first is
-/// still running, so a slow invocation can never make ticks pile up
-/// faster than the single-worker queue can drain them -- that queue is
-/// only 4 deep and shared with every other extension action, including
-/// this same plugin's own settings panel.
 struct TickSchedule {
 	enabled_at: Instant,
 	next_due: Instant,
-	in_flight: bool,
 }
 
 /// Host-side, Wasm-free color easing between two successive `tick`
@@ -155,6 +148,11 @@ pub struct Bridge {
 impl Bridge {
 	pub fn cleanup_pending(&self) -> bool {
 		self.pending.values().any(|pending| pending.cleanup)
+	}
+	fn tick_pending(&self, generation: u64, id: &str) -> bool {
+		self.pending
+			.values()
+			.any(|pending| pending.generation == generation && pending.tick.as_deref() == Some(id))
 	}
 	pub fn logout(&mut self, ctx: &egui::Context) -> Result<(), String> {
 		for entry in &mut self.installed {
@@ -300,12 +298,9 @@ impl Bridge {
 			}
 			match outcome {
 				Err(error) => {
-					if let Some(plugin_id) = pending.as_ref().and_then(|p| p.tick.clone()) {
-						// A missed or failed tick is not user-visible; just
-						// clear in-flight so the next due tick can go out.
-						if let Some(schedule) = self.ticks.get_mut(&plugin_id) {
-							schedule.in_flight = false;
-						}
+					if pending.as_ref().is_some_and(|p| p.tick.is_some()) {
+						// A missed or failed tick is not user-visible; once its
+						// pending entry is removed the next due tick can run.
 						continue;
 					}
 					if let Some((id, _, _)) = pending.as_ref().and_then(|p| p.invocation.as_ref()) {
@@ -429,19 +424,19 @@ impl Bridge {
 					messaging.extensions.status =
 						"Disabled. Downloaded code and extension data were removed.".into();
 				}
-				Ok(Event::Invoked { id, output }) if pending.as_ref().is_some_and(|p| p.tick.is_some()) => {
-					// Host-scheduled tick: clear in-flight so the next due
-					// tick can be scheduled, then start easing from the
-					// current color toward the new one rather than
+				Ok(Event::Invoked { id, output })
+					if pending.as_ref().is_some_and(|p| p.tick.is_some()) =>
+				{
+					// Host-scheduled tick: start easing from the current
+					// color toward the new one rather than
 					// snapping to it -- see `Transition`. No panel/status
 					// UI to update either way.
-					if let Some(schedule) = self.ticks.get_mut(&id) {
-						schedule.in_flight = false;
-					}
 					if !self.disabled.contains(&id)
 						&& let Some(appearance) = &output.appearance
-						&& let Some(installed) =
-							self.installed.iter_mut().find(|entry| entry.manifest.id == id)
+						&& let Some(installed) = self
+							.installed
+							.iter_mut()
+							.find(|entry| entry.manifest.id == id)
 					{
 						let from = self
 							.transitions
@@ -877,6 +872,7 @@ impl Bridge {
 	fn schedule_ticks(&mut self, account: &Option<String>, generation: u64, ctx: &egui::Context) {
 		let Some(account) = account else {
 			self.ticks.clear();
+			self.transitions.clear();
 			return;
 		};
 		let now = Instant::now();
@@ -898,14 +894,16 @@ impl Bridge {
 		self.transitions.retain(|id, _| active.contains(id));
 		let mut due = Vec::new();
 		for id in &active {
+			let in_flight = self.tick_pending(generation, id);
 			let schedule = self.ticks.entry(id.clone()).or_insert(TickSchedule {
 				enabled_at: now,
 				next_due: now,
-				in_flight: false,
 			});
-			if !schedule.in_flight && now >= schedule.next_due {
-				due.push((id.clone(), now.saturating_duration_since(schedule.enabled_at)));
-				schedule.in_flight = true;
+			if !in_flight && now >= schedule.next_due {
+				due.push((
+					id.clone(),
+					now.saturating_duration_since(schedule.enabled_at),
+				));
 				schedule.next_due = now + Duration::from_millis(extensions::TICK_MIN_INTERVAL_MS);
 			}
 		}
@@ -960,9 +958,9 @@ impl Bridge {
 	}
 	/// Like `submit`, but for a host-scheduled tick: no UI context to
 	/// resume, no status message on failure (the next tick just retries),
-	/// and the resulting `Pending` is flagged with the plugin id so
-	/// `Event::Invoked` can both clear `TickSchedule.in_flight` and apply
-	/// only the appearance overlay, skipping panel/status UI.
+	/// and the resulting `Pending` is flagged with the plugin id so the
+	/// scheduler can derive whether one is already in flight and apply only
+	/// the appearance overlay, skipping panel/status UI.
 	fn submit_tick(&mut self, plugin_id: String, job: Job, generation: u64, ctx: &egui::Context) {
 		match self.host.as_mut().unwrap().submit(job, ctx) {
 			Ok(token) => {
@@ -979,14 +977,7 @@ impl Bridge {
 					},
 				);
 			}
-			Err(_) => {
-				// Didn't even make it into the queue (e.g. briefly full) --
-				// clear in-flight so the next due cycle can retry, rather
-				// than leaving this plugin stuck thinking one is pending.
-				if let Some(schedule) = self.ticks.get_mut(&plugin_id) {
-					schedule.in_flight = false;
-				}
-			}
+			Err(_) => {}
 		}
 	}
 	fn source_for(&self, id: &str, sha256: &str, reviewed: bool) -> Option<InstallSource> {
@@ -1108,7 +1099,8 @@ impl Bridge {
 		} else {
 			(Instant::now()
 				.saturating_duration_since(transition.start)
-				.as_secs_f64() / transition.duration.as_secs_f64())
+				.as_secs_f64()
+				/ transition.duration.as_secs_f64())
 			.clamp(0.0, 1.0)
 		};
 		Some(blend_theme(&transition.from, &transition.to, t))
@@ -1138,7 +1130,11 @@ impl Bridge {
 			.map_or_else(extensions::Theme::default, |(theme, _)| (**theme).clone());
 		for entry in &entries {
 			let blended = self.blended_theme(&entry.manifest.id);
-			appearance.overlay(blended.as_ref().unwrap_or_else(|| entry.theme.as_ref().unwrap()));
+			appearance.overlay(
+				blended
+					.as_ref()
+					.unwrap_or_else(|| entry.theme.as_ref().unwrap()),
+			);
 		}
 		ui::design::set_extension_theme(
 			(!entries.is_empty() || self.theme_preview.is_some()).then_some(&appearance),
@@ -1177,6 +1173,27 @@ fn source_hash(source: &InstallSource) -> &str {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn tick_in_flight_is_derived_from_current_pending_generation() {
+		let mut bridge = Bridge::default();
+		bridge.pending.insert(
+			1,
+			Pending {
+				theme_save: false,
+				generation: 7,
+				cleanup: false,
+				reconcile: false,
+				preview: None,
+				invocation: None,
+				tick: Some("rainbow".into()),
+			},
+		);
+		assert!(bridge.tick_pending(7, "rainbow"));
+		assert!(!bridge.tick_pending(8, "rainbow"));
+		bridge.pending.retain(|_, pending| pending.cleanup);
+		assert!(!bridge.tick_pending(7, "rainbow"));
+	}
 	#[test]
 	fn cancelled_import_cannot_replace_the_catalog_bytes_the_user_approved() {
 		let package =

@@ -74,15 +74,14 @@ plugin queue up before the first one resolves, so a slow invocation still
 can't flood the shared, single-worker extension queue that every other
 action -- Import, Refresh, a plugin's own settings panel -- goes through
 too. The invocation carries
-`tick_ms`, milliseconds elapsed since the plugin was enabled this session,
-and the plugin must derive its output solely from that value - there is no
-selected message, composer, or stored state on a tick call, and any output
-field other than `appearance` (and, implicitly, an empty `panel`) is
-rejected the same as it would be from any other capability mismatch. This
-is how `rgb-cycle` animates a theme: it returns a new `appearance` overlay
-each call, and the host swaps straight to it (there's no cross-fade), so
-pick a rotation slow enough relative to the tick interval that each step
-reads as gradual motion rather than a visible jump.
+`tick_ms`, milliseconds elapsed since the plugin was enabled this session;
+time-based output must derive from that value, while granted `storage` may
+supply persistent configuration. There is no selected message, composer,
+or panel context on a tick call, and any output field other than
+`appearance` is rejected. This is how `rgb-cycle` animates a theme: it
+returns a new `appearance` overlay each call, and the host eases displayed
+hex colors from the previous output to the new one over the tick interval,
+so a moderate rotation still reads as continuous motion.
 
 Panel elements use the `type` tag: `text` (`text`), `row` (`children`), `button` (`id`, `label`),
 `text_input` (`id`, `label`, `value`), `checkbox` (`id`, `label`, `checked`),

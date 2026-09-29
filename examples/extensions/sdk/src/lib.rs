@@ -15,9 +15,9 @@ pub struct Invocation {
 	#[serde(default)]
 	pub values: BTreeMap<String, String>,
 	/// Only set by the host for a `tick` action: milliseconds elapsed since
-	/// this plugin was enabled this session. Use it, not wall-clock or any
-	/// stored state, to derive time-based output — each invocation is a
-	/// fresh instance with nothing carried over from the last one.
+	/// this plugin was enabled this session. Use it, not wall-clock or
+	/// storage, to derive timing; granted storage may still configure the
+	/// output. Each invocation is a fresh instance.
 	#[serde(default)]
 	pub tick_ms: Option<u64>,
 }

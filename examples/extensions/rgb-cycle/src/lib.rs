@@ -150,7 +150,7 @@ fn settings_panel(input: Invocation) -> Output {
 
 	let mut panel = vec![Element::Text {
 		text: "Choose which parts of the theme animate. Changes apply on \
-			the next tick (within about a tenth of a second) after Save."
+			the next scheduled tick after Save."
 			.to_string(),
 	}];
 	let mut last_group = "";
